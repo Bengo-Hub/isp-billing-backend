@@ -1,0 +1,306 @@
+"""Authentication API endpoints."""
+
+from datetime import timedelta
+from typing import Any, Dict
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user, get_pagination_params, PaginationParams
+from app.core.database import get_db
+from app.core.security import create_token_pair, verify_token
+from app.models.user import User
+from app.schemas.user import (
+    TokenRefresh,
+    User as UserSchema,
+    UserCreate,
+    UserLogin,
+    UserPasswordChange,
+    UserPasswordReset,
+    UserPasswordResetConfirm,
+    UserVerification,
+)
+from app.schemas.auth import Token
+from app.services.auth_service import AuthService
+from app.services.user_service import UserService
+
+router = APIRouter()
+
+
+@router.post("/register", response_model=UserSchema, status_code=status.HTTP_201_CREATED)
+async def register(
+    user_data: UserCreate,
+    db: AsyncSession = Depends(get_db),
+) -> UserSchema:
+    """Register a new user."""
+    auth_service = AuthService(db)
+    user = await auth_service.register_user(user_data)
+    return UserSchema.model_validate(user)
+
+
+@router.post("/login", response_model=Token, 
+            summary="User Login", 
+            description="Login with username and password to get access tokens. Compatible with OAuth2 password flow for Swagger UI.",
+            responses={
+                200: {
+                    "description": "Successful login",
+                    "content": {
+                        "application/json": {
+                            "example": {
+                                "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+                                "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+                                "token_type": "bearer",
+                                "expires_in": 1800
+                            }
+                        }
+                    }
+                },
+                401: {"description": "Invalid credentials"},
+                400: {"description": "Inactive user"}
+            })
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_db),
+) -> Token:
+    """
+    Login user and return JWT tokens.
+    
+    This endpoint is compatible with OAuth2 password flow for Swagger UI authentication.
+    After successful login, use the returned access_token in the Authorization header
+    as 'Bearer <access_token>' for subsequent API calls.
+    
+    **For Swagger UI users:**
+    1. Click the "Authorize" button at the top
+    2. Enter your username and password
+    3. Click "Authorize" - the token will be automatically used for all requests
+    
+    **Default credentials for testing:**
+    - Username: admin
+    - Password: admin123
+    """
+    auth_service = AuthService(db)
+    user = await auth_service.authenticate_user(form_data.username, form_data.password)
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Inactive user"
+        )
+    
+    # Create tokens
+    token_data = create_token_pair(
+        user_id=user.id,
+        username=user.username,
+        role=user.role.value,
+    )
+    
+    # Update last login
+    await auth_service.update_last_login(user.id)
+    
+    return Token(
+        access_token=token_data["access_token"],
+        refresh_token=token_data["refresh_token"],
+        token_type=token_data["token_type"],
+        expires_in=30 * 60,  # 30 minutes
+    )
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_token(
+    token_data: TokenRefresh,
+    db: AsyncSession = Depends(get_db),
+) -> Token:
+    """Refresh access token using refresh token."""
+    auth_service = AuthService(db)
+    
+    # Verify refresh token
+    token_info = verify_token(token_data.refresh_token, token_type="refresh")
+    if not token_info:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token"
+        )
+    
+    # Get user
+    user_service = UserService(db)
+    user = await user_service.get_by_id(token_info.user_id)
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive"
+        )
+    
+    # Create new tokens
+    new_token_data = create_token_pair(
+        user_id=user.id,
+        username=user.username,
+        role=user.role.value,
+    )
+    
+    return Token(
+        access_token=new_token_data["access_token"],
+        refresh_token=new_token_data["refresh_token"],
+        token_type=new_token_data["token_type"],
+        expires_in=30 * 60,  # 30 minutes
+    )
+
+
+@router.post("/logout")
+async def logout(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """Logout user and invalidate tokens."""
+    auth_service = AuthService(db)
+    await auth_service.logout_user(current_user.id)
+    return {"message": "Successfully logged out"}
+
+
+@router.get("/me", response_model=UserSchema)
+async def get_current_user_info(
+    current_user: User = Depends(get_current_user),
+) -> UserSchema:
+    """Get current user information."""
+    # Convert SQLAlchemy model to Pydantic schema
+    return UserSchema.model_validate(current_user)
+
+
+@router.post("/verify")
+async def verify_user(
+    verification_data: UserVerification,
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """Verify user email or phone."""
+    auth_service = AuthService(db)
+    success = await auth_service.verify_user(
+        verification_data.token,
+        verification_data.verification_type,
+    )
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired verification token"
+        )
+    
+    return {"message": "User verified successfully"}
+
+
+@router.post("/resend-verification")
+async def resend_verification(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """Resend verification email or SMS."""
+    auth_service = AuthService(db)
+    await auth_service.resend_verification(current_user.id)
+    return {"message": "Verification sent successfully"}
+
+
+@router.post("/forgot-password")
+async def forgot_password(
+    password_reset_data: UserPasswordReset,
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """Request password reset."""
+    auth_service = AuthService(db)
+    await auth_service.request_password_reset(password_reset_data.email)
+    return {"message": "Password reset instructions sent to your email"}
+
+
+@router.post("/reset-password")
+async def reset_password(
+    password_reset_data: UserPasswordResetConfirm,
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """Reset password with token."""
+    auth_service = AuthService(db)
+    success = await auth_service.reset_password(
+        password_reset_data.token,
+        password_reset_data.new_password,
+    )
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token"
+        )
+    
+    return {"message": "Password reset successfully"}
+
+
+@router.post("/change-password")
+async def change_password(
+    password_data: UserPasswordChange,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """Change user password."""
+    auth_service = AuthService(db)
+    success = await auth_service.change_password(
+        current_user.id,
+        password_data.current_password,
+        password_data.new_password,
+    )
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect"
+        )
+    
+    return {"message": "Password changed successfully"}
+
+
+@router.get("/sessions")
+async def get_user_sessions(
+    current_user: User = Depends(get_current_user),
+    pagination: PaginationParams = Depends(get_pagination_params),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Get user active sessions."""
+    auth_service = AuthService(db)
+    sessions = await auth_service.get_user_sessions(
+        current_user.id,
+        page=pagination.page,
+        size=pagination.size,
+    )
+    return sessions
+
+
+@router.delete("/sessions/{session_id}")
+async def revoke_session(
+    session_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """Revoke a specific session."""
+    auth_service = AuthService(db)
+    success = await auth_service.revoke_session(session_id, current_user.id)
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+    
+    return {"message": "Session revoked successfully"}
+
+
+@router.delete("/sessions")
+async def revoke_all_sessions(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """Revoke all user sessions except current one."""
+    auth_service = AuthService(db)
+    await auth_service.revoke_all_sessions(current_user.id)
+    return {"message": "All sessions revoked successfully"}
