@@ -109,7 +109,8 @@ class InitializationService:
                 admin_user = User(
                     username="admin",
                     email="admin@ispbilling.com",
-                    full_name="System Administrator",
+                    first_name="System",
+                    last_name="Administrator",
                     hashed_password=get_password_hash("admin123"),  # Change in production
                     role=UserRole.ADMIN,
                     status=UserStatus.ACTIVE,

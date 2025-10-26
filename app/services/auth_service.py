@@ -1,283 +1,200 @@
-"""Authentication service."""
-
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
-from uuid import uuid4
-
-from sqlalchemy import select
+"""
+Enhanced authentication service with RBAC support.
+"""
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any
+from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, or_
+from fastapi import HTTPException, status
 
-from app.core.security import get_password_hash, verify_password
-from app.models.user import User, UserSession, UserVerification
-from app.schemas.user import UserCreate
-from app.services.notification_service import NotificationService
+from app.core.config import settings
+from app.core.logging import get_logger
+from app.models.user import User, UserRole
+from app.schemas.auth import Token
+from app.core.security import TokenData, verify_password as verify_pwd, get_password_hash as hash_pwd
+
+logger = get_logger(__name__)
+
+# JWT settings
+SECRET_KEY = settings.secret_key
+ALGORITHM = settings.algorithm
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.access_token_expire_minutes
+REFRESH_TOKEN_EXPIRE_DAYS = settings.refresh_token_expire_days
 
 
 class AuthService:
-    """Authentication service."""
-
+    """Authentication service with RBAC support."""
+    
     def __init__(self, db: AsyncSession):
         self.db = db
-        self.notification_service = NotificationService(db)
 
-    async def register_user(self, user_data: UserCreate) -> User:
-        """Register a new user."""
-        # Check if user already exists
-        existing_user = await self.get_user_by_username(user_data.username)
-        if existing_user:
-            raise ValueError("Username already registered")
+    def verify_password(self, plain_password: str, hashed_password: str) -> bool:
+        """Verify a password against its hash."""
+        return verify_pwd(plain_password, hashed_password)
 
-        existing_user = await self.get_user_by_email(user_data.email)
-        if existing_user:
-            raise ValueError("Email already registered")
+    def get_password_hash(self, password: str) -> str:
+        """Hash a password."""
+        return hash_pwd(password)
 
-        # Create user
-        hashed_password = get_password_hash(user_data.password)
-        user = User(
-            username=user_data.username,
-            email=user_data.email,
-            phone=user_data.phone,
-            first_name=user_data.first_name,
-            last_name=user_data.last_name,
-            hashed_password=hashed_password,
-            role=user_data.role,
-            bio=user_data.bio,
-        )
+    def create_access_token(self, data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
+        """Create a JWT access token."""
+        to_encode = data.copy()
+        if expires_delta:
+            expire = datetime.now(timezone.utc) + expires_delta
+        else:
+            expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        
+        to_encode.update({"exp": expire, "type": "access"})
+        encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+        return encoded_jwt
 
-        self.db.add(user)
-        await self.db.commit()
-        await self.db.refresh(user)
+    def create_refresh_token(self, data: Dict[str, Any]) -> str:
+        """Create a JWT refresh token."""
+        to_encode = data.copy()
+        expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+        to_encode.update({"exp": expire, "type": "refresh"})
+        encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+        return encoded_jwt
 
-        # Send verification email
-        await self._send_verification_email(user)
-
-        return user
-
-    async def authenticate_user(self, username: str, password: str) -> Optional[User]:
-        """Authenticate user with username and password."""
-        user = await self.get_user_by_username(username)
-        if not user:
+    async def authenticate_user(self, username_or_email: str, password: str) -> Optional[User]:
+        """Authenticate a user with username/email and password."""
+        try:
+            # Try to find user by username or email
+            result = await self.db.execute(
+                select(User).where(
+                    (User.email == username_or_email) | (User.username == username_or_email),
+                    User.is_active.is_(True)
+                )
+            )
+            user = result.scalar_one_or_none()
+            
+            if not user:
+                return None
+                
+            if not self.verify_password(password, user.hashed_password):
+                return None
+                
+            # Update last login
+            user.last_login = datetime.now(timezone.utc)
+            await self.db.commit()
+            
+            return user
+            
+        except Exception as e:
+            logger.error(f"Authentication error: {e}")
             return None
 
-        if not verify_password(password, user.hashed_password):
+    async def get_user_by_id(self, user_id: int) -> Optional[User]:
+        """Get user by ID."""
+        try:
+            result = await self.db.execute(select(User).where(User.id == user_id))
+            return result.scalar_one_or_none()
+        except Exception as e:
+            logger.error(f"Error getting user by ID: {e}")
             return None
-
-        return user
-
-    async def get_user_by_username(self, username: str) -> Optional[User]:
-        """Get user by username."""
-        result = await self.db.execute(
-            select(User).where(User.username == username)
-        )
-        return result.scalar_one_or_none()
 
     async def get_user_by_email(self, email: str) -> Optional[User]:
         """Get user by email."""
-        result = await self.db.execute(
-            select(User).where(User.email == email)
-        )
-        return result.scalar_one_or_none()
+        try:
+            result = await self.db.execute(select(User).where(User.email == email))
+            return result.scalar_one_or_none()
+        except Exception as e:
+            logger.error(f"Error getting user by email: {e}")
+            return None
+
+    def verify_token(self, token: str) -> Optional[TokenData]:
+        """Verify and decode a JWT token."""
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            user_id: int = payload.get("sub")
+            token_type: str = payload.get("type")
+            username: str = payload.get("username")
+            role: str = payload.get("role")
+            
+            if user_id is None or token_type != "access":
+                return None
+                
+            return TokenData(user_id=user_id, username=username, role=role)
+            
+        except JWTError:
+            return None
+
+    def create_provisioning_token(self, user_id: int, router_id: int, permissions: list) -> str:
+        """Create a specialized token for router provisioning."""
+        data = {
+            "sub": user_id,
+            "router_id": router_id,
+            "permissions": permissions,
+            "purpose": "provisioning",
+            "exp": datetime.now(timezone.utc) + timedelta(hours=1)  # Short-lived token
+        }
+        return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+
+    def verify_provisioning_token(self, token: str) -> Optional[Dict[str, Any]]:
+        """Verify a provisioning token."""
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            if payload.get("purpose") != "provisioning":
+                return None
+            return payload
+        except JWTError:
+            return None
+
+    def check_permission(self, user: User, required_permission: str) -> bool:
+        """Check if user has required permission based on role."""
+        role_permissions = {
+            UserRole.ADMIN: [
+                "users.create", "users.read", "users.update", "users.delete",
+                "routers.create", "routers.read", "routers.update", "routers.delete",
+                "provisioning.create", "provisioning.read", "provisioning.update",
+                "billing.create", "billing.read", "billing.update", "billing.delete",
+                "settings.read", "settings.update"
+            ],
+            UserRole.TECHNICIAN: [
+                "routers.read", "routers.update",
+                "provisioning.create", "provisioning.read", "provisioning.update",
+                "billing.read"
+            ],
+            UserRole.CUSTOMER: [
+                "routers.read",
+                "billing.read"
+            ]
+        }
+        
+        user_permissions = role_permissions.get(user.role, [])
+        return required_permission in user_permissions
 
     async def update_last_login(self, user_id: int) -> None:
         """Update user's last login timestamp."""
-        user = await self.db.get(User, user_id)
-        if user:
-            user.last_login = datetime.utcnow()
-            await self.db.commit()
+        try:
+            user = await self.get_user_by_id(user_id)
+            if user:
+                user.last_login = datetime.now(timezone.utc)
+                await self.db.commit()
+        except Exception as e:
+            logger.error(f"Error updating last login: {e}")
 
-    async def logout_user(self, user_id: int) -> None:
-        """Logout user by deactivating all sessions."""
-        result = await self.db.execute(
-            select(UserSession).where(
-                UserSession.user_id == user_id,
-                UserSession.is_active == True
-            )
-        )
-        sessions = result.scalars().all()
-        
-        for session in sessions:
-            session.is_active = False
-        
-        await self.db.commit()
-
-    async def verify_user(self, token: str, verification_type: str) -> bool:
-        """Verify user with token."""
-        result = await self.db.execute(
-            select(UserVerification).where(
-                UserVerification.token == token,
-                UserVerification.verification_type == verification_type,
-                UserVerification.is_used == False,
-                UserVerification.expires_at > datetime.utcnow()
-            )
-        )
-        verification = result.scalar_one_or_none()
-        
-        if not verification:
-            return False
-
-        # Mark verification as used
-        verification.is_used = True
-
-        # Update user verification status
-        user = await self.db.get(User, verification.user_id)
-        if user:
-            if verification_type == "email":
-                user.is_verified = True
-                user.email_verified_at = datetime.utcnow()
-            elif verification_type == "phone":
-                user.phone_verified_at = datetime.utcnow()
-
-        await self.db.commit()
-        return True
-
-    async def resend_verification(self, user_id: int) -> None:
-        """Resend verification email or SMS."""
-        user = await self.db.get(User, user_id)
+    async def login(self, username_or_email: str, password: str) -> Token:
+        """Authenticate user and return tokens."""
+        user = await self.authenticate_user(username_or_email, password)
         if not user:
-            raise ValueError("User not found")
-
-        if user.is_verified:
-            raise ValueError("User already verified")
-
-        await self._send_verification_email(user)
-
-    async def request_password_reset(self, email: str) -> None:
-        """Request password reset."""
-        user = await self.get_user_by_email(email)
-        if not user:
-            # Don't reveal if email exists
-            return
-
-        # Create password reset token
-        token = str(uuid4())
-        verification = UserVerification(
-            user_id=user.id,
-            verification_type="password_reset",
-            token=token,
-            expires_at=datetime.utcnow() + timedelta(hours=24),
-        )
-
-        self.db.add(verification)
-        await self.db.commit()
-
-        # Send password reset email
-        await self.notification_service.send_password_reset_email(user, token)
-
-    async def reset_password(self, token: str, new_password: str) -> bool:
-        """Reset password with token."""
-        result = await self.db.execute(
-            select(UserVerification).where(
-                UserVerification.token == token,
-                UserVerification.verification_type == "password_reset",
-                UserVerification.is_used == False,
-                UserVerification.expires_at > datetime.utcnow()
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
             )
-        )
-        verification = result.scalar_one_or_none()
         
-        if not verification:
-            return False
-
-        # Update password
-        user = await self.db.get(User, verification.user_id)
-        if user:
-            user.hashed_password = get_password_hash(new_password)
-            verification.is_used = True
-            await self.db.commit()
-            return True
-
-        return False
-
-    async def change_password(
-        self, user_id: int, current_password: str, new_password: str
-    ) -> bool:
-        """Change user password."""
-        user = await self.db.get(User, user_id)
-        if not user:
-            return False
-
-        if not verify_password(current_password, user.hashed_password):
-            return False
-
-        user.hashed_password = get_password_hash(new_password)
-        await self.db.commit()
-        return True
-
-    async def get_user_sessions(
-        self, user_id: int, page: int = 1, size: int = 20
-    ) -> Dict[str, Any]:
-        """Get user sessions with pagination."""
-        offset = (page - 1) * size
+        access_token = self.create_access_token(
+            data={"sub": user.id, "username": user.username, "role": user.role.value}
+        )
+        refresh_token = self.create_refresh_token(
+            data={"sub": user.id, "username": user.username}
+        )
         
-        # Get total count
-        count_result = await self.db.execute(
-            select(UserSession).where(UserSession.user_id == user_id)
+        return Token(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60
         )
-        total = len(count_result.scalars().all())
-
-        # Get sessions
-        result = await self.db.execute(
-            select(UserSession)
-            .where(UserSession.user_id == user_id)
-            .order_by(UserSession.created_at.desc())
-            .offset(offset)
-            .limit(size)
-        )
-        sessions = result.scalars().all()
-
-        return {
-            "sessions": sessions,
-            "total": total,
-            "page": page,
-            "size": size,
-            "pages": (total + size - 1) // size,
-        }
-
-    async def revoke_session(self, session_id: int, user_id: int) -> bool:
-        """Revoke a specific session."""
-        result = await self.db.execute(
-            select(UserSession).where(
-                UserSession.id == session_id,
-                UserSession.user_id == user_id
-            )
-        )
-        session = result.scalar_one_or_none()
-        
-        if not session:
-            return False
-
-        session.is_active = False
-        await self.db.commit()
-        return True
-
-    async def revoke_all_sessions(self, user_id: int) -> None:
-        """Revoke all user sessions."""
-        result = await self.db.execute(
-            select(UserSession).where(
-                UserSession.user_id == user_id,
-                UserSession.is_active == True
-            )
-        )
-        sessions = result.scalars().all()
-        
-        for session in sessions:
-            session.is_active = False
-        
-        await self.db.commit()
-
-    async def _send_verification_email(self, user: User) -> None:
-        """Send verification email to user."""
-        # Create verification token
-        token = str(uuid4())
-        verification = UserVerification(
-            user_id=user.id,
-            verification_type="email",
-            token=token,
-            expires_at=datetime.utcnow() + timedelta(hours=24),
-        )
-
-        self.db.add(verification)
-        await self.db.commit()
-
-        # Send email
-        await self.notification_service.send_verification_email(user, token)

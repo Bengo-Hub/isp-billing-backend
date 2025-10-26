@@ -75,3 +75,23 @@ class ExternalServiceError(ISPBaseException):
 class ProvisioningError(ISPBaseException):
     """Raised when provisioning operation fails."""
     pass
+
+
+class PermissionDeniedError(ISPBaseException):
+    """Raised when user lacks required permissions."""
+    pass
+
+
+class ResourceNotFoundError(ISPBaseException):
+    """Raised when requested resource is not found."""
+    pass
+
+
+class RoleError(ISPBaseException):
+    """Raised when role operation fails."""
+    pass
+
+
+class LicenceError(ISPBaseException):
+    """Raised when licence operation fails."""
+    pass

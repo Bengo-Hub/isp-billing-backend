@@ -1,15 +1,21 @@
-# ISP Billing System - Backend
+# Codevertex ISP Billing System - Backend
 
-A comprehensive ISP billing system built with FastAPI, supporting MikroTik router integration, MPESA payments, and multi-tenant architecture.
+A comprehensive, production-ready ISP billing and management system built with FastAPI, supporting MikroTik router integration, M-PESA payments, RBAC, and multi-tenant architecture.
 
 ## Features
 
-- **User Management**: Multi-role authentication (Admin, Technician, Customer)
-- **Router Integration**: MikroTik RouterOS API integration for PPPoE and Hotspot
-- **Billing Engine**: Automated invoicing with usage tracking
-- **Payment Integration**: MPESA STK Push and C2B callbacks
-- **Real-time Monitoring**: Router status and user activity tracking
-- **Background Tasks**: Celery-based task queue for billing and notifications
+### Core Features
+- **RBAC System**: Role-Based Access Control with 4 roles (Superuser, Admin, Technician, Customer) and 70 granular permissions
+- **User Management**: Complete user lifecycle management with multi-role authentication
+- **MikroTik Integration**: RouterOS API integration for PPPoE, Hotspot, and device provisioning
+- **Automated Provisioning**: 3-step wizard for router provisioning with live log streaming
+- **Billing Engine**: Automated invoicing, usage tracking, and payment reconciliation
+- **M-PESA Integration**: STK Push, C2B callbacks, and payment verification
+- **SMS Credit Management**: Multi-provider SMS gateway with credit tracking
+- **Real-time Monitoring**: Live router status, user activity, and system metrics
+- **Background Tasks**: Celery-based task queue for billing, notifications, and maintenance
+- **Advanced Analytics**: Comprehensive reporting with export functionality
+- **Licence Management**: Trial periods, subscription tracking, and licence validation
 
 ## Tech Stack
 
@@ -170,9 +176,103 @@ See `.env.example` for all required environment variables.
 ## Testing
 
 ```bash
+# Run all tests
 pytest tests/ -v
+
+# Run specific test file
+pytest tests/test_auth.py -v
+
+# Run with coverage
+pytest tests/ --cov=app --cov-report=html
 ```
 
-## License
+## 📚 Documentation
 
-MIT License
+### Core Documentation
+- **[Complete Setup Guide](./docs/SETUP_GUIDE.md)** - Detailed installation and configuration instructions
+- **[API Documentation](./docs/API_DOCUMENTATION.md)** - Complete API reference and examples
+- **[Implementation Guide](./docs/IMPLEMENTATION_GUIDE.md)** - Technical implementation details
+- **[Project Summary](./docs/PROJECT_SUMMARY.md)** - High-level overview and architecture
+
+### Feature-Specific Guides
+- **[RBAC System Guide](./docs/RBAC_SYSTEM.md)** - Role-based access control documentation
+- **[MikroTik Provisioning Guide](./docs/MIKROTIK_PROVISIONING_GUIDE.md)** - Complete technical provisioning guide (1,400+ lines)
+- **[Auth Mapping Guide](./docs/AUTH_MAPPING.md)** - Frontend to backend authentication mapping
+- **[Swagger Authentication Guide](./docs/swagger_authentication_guide.md)** - API authentication setup
+
+### Additional Resources
+- **[Bug Fixes Log](./docs/BUG_FIXES.md)** - Known issues and resolutions
+- **[OpenAPI Spec](./docs/openapi.json)** - OpenAPI 3.0 specification
+- **[Implementation Progress](../wifi-billing-software-frontend/docs/IMPLEMENTATION_PROGRESS.md)** - Feature completion status
+
+## 🚀 Quick Links
+
+- **Swagger UI**: http://localhost:8000/docs
+- **ReDoc**: http://localhost:8000/redoc
+- **Health Check**: http://localhost:8000/health
+
+## 🔐 Default Credentials
+
+After initial setup, use these credentials:
+
+**Superuser Account** (Full system access):
+- Username: `superuser`
+- Password: `superuser123`
+
+**Demo Admin Account** (ISP provider access):
+- Username: `demo`
+- Password: `demo123`
+
+⚠️ **Important**: Change these passwords in production!
+
+## 🛠️ Development Tools
+
+- **Alembic**: Database migrations
+- **Pytest**: Testing framework
+- **Black**: Code formatting
+- **Flake8**: Linting
+- **MyPy**: Type checking
+- **Pre-commit**: Git hooks
+
+## 📊 Database Schema
+
+The system uses PostgreSQL with the following main tables:
+- `users` - User accounts and authentication
+- `roles` & `permissions` - RBAC system
+- `routers` - MikroTik devices
+- `plans` - Service packages
+- `subscriptions` - User subscriptions
+- `invoices` & `payments` - Billing
+- `licences` - Licence management
+- `system_licences` - Trial licences
+
+See [IMPLEMENTATION_GUIDE.md](./docs/IMPLEMENTATION_GUIDE.md) for complete schema documentation.
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests: `pytest tests/ -v`
+5. Submit a pull request
+
+## 📧 Support
+
+For issues, questions, or contributions:
+- **Email**: support@codevertexitsolutions.com
+- **Documentation**: See `/docs` folder
+- **GitHub Issues**: Create an issue in the repository
+
+## 📝 License
+
+MIT License - See LICENSE file for details
+
+## 🏢 About Codevertex IT Solutions
+
+Codevertex IT Solutions specializes in ISP management software, network automation, and billing systems.
+
+---
+
+**Version**: 1.0.0  
+**Last Updated**: October 21, 2025  
+**Status**: Production Ready ✅

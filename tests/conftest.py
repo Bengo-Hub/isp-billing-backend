@@ -185,7 +185,7 @@ async def test_user_with_phone(db_session: AsyncSession) -> User:
         email="testphone@example.com",
         first_name="Test",
         last_name="User",
-        phone_number="254712345678",
+        phone="+254712345678",
         hashed_password=get_password_hash("testpassword"),
         role=UserRole.CUSTOMER,
         status=UserStatus.ACTIVE,

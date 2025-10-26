@@ -5,7 +5,7 @@ This service implements a comprehensive 3-step provisioning workflow:
 2. Configuration - Apply basic router configuration and security
 3. Service Setup - Configure PPPoE/Hotspot services and user management
 
-Based on Centipid billing system provisioning process with production-ready features:
+Based on Codevertex provisioning process with production-ready features:
 - Atomic operations with rollback capability
 - Progress tracking and real-time updates
 - Template-based configuration
@@ -47,7 +47,20 @@ from app.models.router import Router, RouterStatus
 from app.models.user import User
 from app.integrations.mikrotik import MikroTikAPI
 from app.services.router_service import RouterService
+from app.services.provisioning.commands import (
+    load_command_templates,
+    generate_configuration_commands,
+    generate_hotspot_commands,
+    generate_pppoe_commands,
+    execute_command_with_retry,
+    backup_router_configuration,
+    apply_security_configuration,
+)
 from app.api.deps import PaginationParams
+from app.services.provisioning.verify import verify_basic_configuration, verify_service_configuration
+from app.services.provisioning.rollback import execute_rollback
+from app.services.provisioning.status import build_session_status
+from app.services.provisioning.live_streaming import streaming_manager
 
 logger = get_logger(__name__)
 
@@ -67,64 +80,8 @@ class ProvisioningService:
         self.retry_delays = [1, 2, 5, 10]  # Exponential backoff
         
         # MikroTik command templates
-        self.command_templates = self._load_command_templates()
+        self.command_templates = load_command_templates()
 
-    def _load_command_templates(self) -> Dict[str, Dict[str, Any]]:
-        """Load MikroTik command templates for different services."""
-        return {
-            "connection": {
-                "system_info": "/system/resource/print",
-                "identity_check": "/system/identity/print",
-                "interface_list": "/interface/print",
-                "ip_address_list": "/ip/address/print",
-                "version_check": "/system/package/print where name=system"
-            },
-            "configuration": {
-                "set_identity": "/system/identity/set name={identity}",
-                "create_bridge": "/interface/bridge/add name={bridge_name}",
-                "add_bridge_port": "/interface/bridge/port/add interface={interface} bridge={bridge_name}",
-                "set_ip_address": "/ip/address/add address={ip_address} interface={interface}",
-                "set_dns": "/ip/dns/set servers={dns_servers}",
-                "create_ip_pool": "/ip/pool/add name={pool_name} ranges={ip_range}",
-                "enable_api": "/ip/service/set api disabled=no port={api_port}",
-                "create_admin_user": "/user/add name={username} password={password} group=full",
-                "set_ntp": "/system/ntp/client/set enabled=yes server-dns-names={ntp_servers}",
-                "configure_firewall": "/ip/firewall/filter/add chain=input action=accept protocol=icmp",
-            },
-            "hotspot": {
-                "create_hotspot": "/ip/hotspot/add name={hotspot_name} interface={interface}",
-                "set_hotspot_profile": "/ip/hotspot/profile/set {profile_id} dns-name={dns_name} hotspot-address={gateway}",
-                "create_user_profile": "/ip/hotspot/user/profile/add name={profile_name} rate-limit={rate_limit}",
-                "add_hotspot_user": "/ip/hotspot/user/add name={username} password={password} profile={profile}",
-                "configure_walled_garden": "/ip/hotspot/walled-garden/add dst-host={host}",
-                "set_login_page": "/ip/hotspot/profile/set {profile_id} login-by=http-chap,cookie",
-                "configure_radius": "/radius/add service=hotspot address={radius_server} secret={radius_secret}",
-                "enable_anti_sharing": "/ip/hotspot/profile/set {profile_id} login-by=http-chap session-timeout=1d idle-timeout=5m",
-            },
-            "pppoe": {
-                "create_ppp_profile": "/ppp/profile/add name={profile_name} rate-limit={rate_limit} local-address={local_address} remote-address={ip_pool}",
-                "enable_pppoe_server": "/interface/pppoe-server/server/add service-name={service_name} interface={interface} default-profile={profile}",
-                "add_ppp_secret": "/ppp/secret/add name={username} password={password} service=pppoe profile={profile}",
-                "configure_radius_ppp": "/radius/add service=ppp address={radius_server} secret={radius_secret}",
-                "set_ppp_auth": "/ppp/aaa/set use-radius=yes",
-                "configure_accounting": "/ppp/profile/set {profile_id} use-upnp=yes use-compression=yes",
-            },
-            "security": {
-                "disable_default_services": [
-                    "/ip/service/set telnet disabled=yes",
-                    "/ip/service/set ftp disabled=yes",
-                    "/ip/service/set www disabled=yes",
-                    "/ip/service/set ssh port=2222",
-                ],
-                "create_firewall_rules": [
-                    "/ip/firewall/filter/add chain=input action=accept connection-state=established,related",
-                    "/ip/firewall/filter/add chain=input action=accept protocol=icmp",
-                    "/ip/firewall/filter/add chain=input action=accept dst-port=8728 protocol=tcp src-address={management_ip}",
-                    "/ip/firewall/filter/add chain=input action=drop",
-                ],
-                "configure_snmp": "/snmp/set enabled=yes contact={contact} location={location}",
-            }
-        }
 
     async def create_provisioning_session(
         self,
@@ -225,16 +182,26 @@ class ProvisioningService:
     async def _execute_provisioning_workflow(self, session: ProvisioningSession) -> None:
         """Execute the complete provisioning workflow."""
         try:
+            # Start live streaming
+            await streaming_manager.start_session(session.session_id, session.router_id)
+            await streaming_manager.log_provisioning_step(
+                session.session_id, 
+                "initialization", 
+                "Starting provisioning workflow"
+            )
+            
             # Step 1: Connection and Verification
             await self._execute_connection_step(session)
             
             if session.status == ProvisioningStatus.FAILED:
+                await streaming_manager.end_session(session.session_id, False)
                 return
 
             # Step 2: Basic Configuration
             await self._execute_configuration_step(session)
             
             if session.status == ProvisioningStatus.FAILED:
+                await streaming_manager.end_session(session.session_id, False)
                 return
 
             # Step 3: Service Setup
@@ -248,9 +215,23 @@ class ProvisioningService:
                 session.progress_percentage = 100.0
 
                 await self.db.commit()
+                await streaming_manager.log_provisioning_step(
+                    session.session_id, 
+                    "completion", 
+                    "Provisioning completed successfully",
+                    "success"
+                )
+                await streaming_manager.end_session(session.session_id, True)
                 self.logger.info(f"Provisioning session {session.session_id} completed successfully")
 
         except Exception as e:
+            await streaming_manager.log_provisioning_step(
+                session.session_id, 
+                "error", 
+                f"Provisioning failed: {str(e)}", 
+                "error"
+            )
+            await streaming_manager.end_session(session.session_id, False)
             await self._handle_provisioning_error(session, str(e))
 
     async def _execute_connection_step(self, session: ProvisioningSession) -> None:
@@ -267,6 +248,11 @@ class ProvisioningService:
 
             # Sub-step 1: Test connection (25%)
             await self._update_step_progress(step_log, 25.0, "Testing connection...")
+            await streaming_manager.log_provisioning_step(
+                session.session_id, 
+                "connection", 
+                "Testing connection to router..."
+            )
             connected = await api.connect()
             
             if not connected:
@@ -325,10 +311,10 @@ class ProvisioningService:
 
             # Create backup of current configuration
             await self._update_step_progress(step_log, 10.0, "Creating configuration backup...")
-            await self._backup_router_configuration(session, api)
+            await backup_router_configuration(self.db, session, api, self.logger)
 
             # Apply basic configuration commands
-            commands = await self._generate_configuration_commands(config, session.service_type)
+            commands = generate_configuration_commands(config, session.service_type)
             total_commands = len(commands)
 
             for i, command_data in enumerate(commands):
@@ -340,14 +326,14 @@ class ProvisioningService:
                 )
                 
                 # Execute command with retry logic
-                success = await self._execute_command_with_retry(session, api, command_data)
+                success = await execute_command_with_retry(self.db, self.retry_delays, self.logger, session, api, command_data)
                 
                 if not success and command_data.get('critical', True):
                     raise ConfigurationError(f"Critical command failed: {command_data['description']}")
 
             # Verify configuration
             await self._update_step_progress(step_log, 95.0, "Verifying configuration...")
-            await self._verify_basic_configuration(api, config)
+            await verify_basic_configuration(api, config)
 
             # Finalize step
             await self._update_step_progress(step_log, 100.0, "Configuration completed")
@@ -382,12 +368,12 @@ class ProvisioningService:
 
             # Generate service-specific commands
             if session.service_type == ServiceType.HOTSPOT:
-                commands = await self._generate_hotspot_commands(config)
+                commands = generate_hotspot_commands(config)
             elif session.service_type == ServiceType.PPPOE_SERVER:
-                commands = await self._generate_pppoe_commands(config)
+                commands = generate_pppoe_commands(config)
             else:  # BOTH
-                hotspot_commands = await self._generate_hotspot_commands(config)
-                pppoe_commands = await self._generate_pppoe_commands(config)
+                hotspot_commands = generate_hotspot_commands(config)
+                pppoe_commands = generate_pppoe_commands(config)
                 commands = hotspot_commands + pppoe_commands
 
             total_commands = len(commands)
@@ -400,18 +386,18 @@ class ProvisioningService:
                     f"Configuring service {i+1}/{total_commands}: {command_data['description']}"
                 )
                 
-                success = await self._execute_command_with_retry(session, api, command_data)
+                success = await execute_command_with_retry(self.db, self.retry_delays, self.logger, session, api, command_data)
                 
                 if not success and command_data.get('critical', True):
                     raise ConfigurationError(f"Service configuration failed: {command_data['description']}")
 
             # Apply security configurations
             await self._update_step_progress(step_log, 90.0, "Applying security configurations...")
-            await self._apply_security_configuration(api, config)
+            await apply_security_configuration(api, config, self.command_templates, self.logger)
 
             # Final verification
             await self._update_step_progress(step_log, 95.0, "Performing final verification...")
-            await self._verify_service_configuration(api, session.service_type, config)
+            await verify_service_configuration(api, session.service_type, config)
 
             await self._update_step_progress(step_log, 100.0, "Service setup completed")
             
@@ -453,15 +439,25 @@ class ProvisioningService:
                 'description': f'Create bridge {bridge_name}',
                 'critical': True
             })
-            
-            # Add interface to bridge
-            interface = config.get('interface', 'ether2')
-            commands.append({
-                'type': 'api_call',
-                'command': f"/interface/bridge/port/add interface={interface} bridge={bridge_name}",
-                'description': f'Add {interface} to bridge',
-                'critical': True
-            })
+
+            # Add interface(s) to bridge
+            bridge_ports = config.get('bridge_ports')
+            if isinstance(bridge_ports, list) and bridge_ports:
+                for port in bridge_ports:
+                    commands.append({
+                        'type': 'api_call',
+                        'command': f"/interface/bridge/port/add interface={port} bridge={bridge_name}",
+                        'description': f'Add {port} to bridge',
+                        'critical': True
+                    })
+            else:
+                interface = config.get('interface', 'ether2')
+                commands.append({
+                    'type': 'api_call',
+                    'command': f"/interface/bridge/port/add interface={interface} bridge={bridge_name}",
+                    'description': f'Add {interface} to bridge',
+                    'critical': True
+                })
 
         # Configure IP pool
         if 'ip_pool_start' in config and 'ip_pool_end' in config:
@@ -760,7 +756,7 @@ class ProvisioningService:
         if session.get_config_item('rollback_on_failure', True):
             session.rollback_required = True
             # Schedule rollback task
-            asyncio.create_task(self._execute_rollback(session))
+            asyncio.create_task(execute_rollback(self.db, self.router_service, session, self.logger))
 
         await self.db.commit()
         self.logger.error(f"Provisioning session {session.session_id} failed: {error_message}")
@@ -828,60 +824,7 @@ class ProvisioningService:
         if not session:
             return None
 
-        # Get step logs
-        result = await self.db.execute(
-            select(ProvisioningStepLog)
-            .where(ProvisioningStepLog.session_id == session.id)
-            .order_by(ProvisioningStepLog.step_order)
-        )
-        steps = result.scalars().all()
-
-        # Calculate overall progress and estimate remaining time
-        completed_steps = sum(1 for step in steps if step.status == ProvisioningStatus.COMPLETED)
-        total_steps = len(steps)
-        
-        estimated_remaining = None
-        if session.status == ProvisioningStatus.IN_PROGRESS and session.started_at:
-            elapsed_minutes = (datetime.utcnow() - session.started_at).total_seconds() / 60
-            if completed_steps > 0:
-                avg_time_per_step = elapsed_minutes / completed_steps
-                remaining_steps = total_steps - completed_steps
-                estimated_remaining = int(avg_time_per_step * remaining_steps)
-
-        # Get current operation
-        current_operation = None
-        for step in steps:
-            if step.status == ProvisioningStatus.IN_PROGRESS and step.output_data:
-                current_operation = step.output_data.get('current_operation')
-                break
-
-        return {
-            'session_id': session.session_id,
-            'status': session.status.value,
-            'current_step': session.current_step.value,
-            'progress_percentage': session.progress_percentage,
-            'steps_completed': completed_steps,
-            'steps_total': total_steps,
-            'estimated_time_remaining_minutes': estimated_remaining,
-            'current_operation': current_operation,
-            'error_message': session.error_message,
-            'can_cancel': session.status in [ProvisioningStatus.PENDING, ProvisioningStatus.IN_PROGRESS],
-            'can_retry': session.status == ProvisioningStatus.FAILED,
-            'started_at': session.started_at,
-            'completed_at': session.completed_at,
-            'steps': [
-                {
-                    'step': step.step.value,
-                    'status': step.status.value,
-                    'progress': step.progress_percentage,
-                    'started_at': step.started_at,
-                    'completed_at': step.completed_at,
-                    'duration_seconds': step.duration_seconds,
-                    'error': step.error_details
-                }
-                for step in steps
-            ]
-        }
+        return await build_session_status(self.db, session)
 
     async def cancel_provisioning(
         self, 

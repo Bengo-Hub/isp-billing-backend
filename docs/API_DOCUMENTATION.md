@@ -102,6 +102,46 @@ Authorization: Bearer <token>
 }
 ```
 
+#### Get Bootstrap Command (Step 2)
+```http
+GET /api/v1/provisioning/bootstrap/command?identity=MikroTik4&api_port=8728&interface=ether2
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+{
+  "command": "/tool fetch mode=https url=\"https://yourdomain.com/api/v1/provisioning/bootstrap/script?identity=MikroTik4&api_port=8728&interface=ether2\" dst-path=codevertex.rsc; delay 2s; import codevertex.rsc;",
+  "script_url": "https://yourdomain.com/api/v1/provisioning/bootstrap/script?identity=MikroTik4&api_port=8728&interface=ether2",
+  "notes": [
+    "If device mode is not allowed, run: /system/device-mode update mode=advanced"
+  ]
+}
+```
+
+#### Get Bootstrap Script
+```http
+GET /api/v1/provisioning/bootstrap/script?identity=MikroTik4&api_port=8728&interface=ether2
+Authorization: Bearer <token>
+```
+
+Returns plain text RouterOS script that sets identity, enables API on the given port, and performs minimal hardening.
+
+#### Network Auto-Calculation
+```http
+GET /api/v1/provisioning/network/calc?subnet_address=172.31.0.0&cidr=16
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+{
+  "network": "172.31.0.0/16",
+  "gateway": "172.31.0.2",
+  "dhcp_pool": "172.31.0.3 - 172.31.255.254"
+}
+```
+
 #### Cancel Provisioning
 ```http
 POST /api/v1/provisioning/sessions/{session_id}/cancel
@@ -398,6 +438,18 @@ DELETE /api/v1/routers/{router_id}
 Authorization: Bearer <technician_or_admin_token>
 ```
 
+#### Get Active Connections (Technician/Admin)
+```http
+GET /api/v1/routers/{router_id}/active-connections
+Authorization: Bearer <technician_or_admin_token>
+```
+
+#### Disconnect User (Technician/Admin)
+```http
+POST /api/v1/routers/{router_id}/disconnect-user?username=C45&user_type=hotspot
+Authorization: Bearer <technician_or_admin_token>
+```
+
 ### Service Plans Endpoints
 
 #### Get All Plans
@@ -554,6 +606,56 @@ Content-Type: application/json
 ```http
 GET /api/v1/billing/payments/history
 Authorization: Bearer <access_token>
+```
+
+### SMS Credit Endpoints
+
+#### Create SMS Account (Admin)
+```http
+POST /api/v1/sms-credit/accounts
+Authorization: Bearer <admin_token>
+```
+
+#### List SMS Accounts (Admin)
+```http
+GET /api/v1/sms-credit/accounts
+Authorization: Bearer <admin_token>
+```
+
+#### Top Up SMS Account (Admin)
+```http
+POST /api/v1/sms-credit/accounts/{account_id}/top-up
+Authorization: Bearer <admin_token>
+```
+
+#### Process Top Up (Admin)
+```http
+POST /api/v1/sms-credit/top-ups/{top_up_id}/process
+Authorization: Bearer <admin_token>
+```
+
+#### Get Account Balance & Today Usage
+```http
+GET /api/v1/sms-credit/accounts/{account_id}/balance
+Authorization: Bearer <technician_or_admin_token>
+```
+
+#### Get Transactions
+```http
+GET /api/v1/sms-credit/accounts/{account_id}/transactions?page=1&size=20
+Authorization: Bearer <technician_or_admin_token>
+```
+
+#### Get Usage Analytics
+```http
+GET /api/v1/sms-credit/accounts/{account_id}/analytics?period_type=daily&days=30
+Authorization: Bearer <technician_or_admin_token>
+```
+
+#### Validate Phone
+```http
+POST /api/v1/sms-credit/validate-phone
+Authorization: Bearer <technician_or_admin_token>
 ```
 
 ### Notification Endpoints

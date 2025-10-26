@@ -23,6 +23,7 @@ from app.core.database import Base
 class UserRole(str, PyEnum):
     """User role enumeration."""
 
+    SUPERUSER = "superuser"
     ADMIN = "admin"
     TECHNICIAN = "technician"
     CUSTOMER = "customer"
@@ -51,6 +52,7 @@ class User(Base):
     phone = Column(String(20), unique=True, index=True, nullable=True)
     first_name = Column(String(50), nullable=False)
     last_name = Column(String(50), nullable=False)
+    company_name = Column(String(200), nullable=True)  # For ISP providers
     
     # Authentication
     hashed_password = Column(String(255), nullable=False)
@@ -60,6 +62,7 @@ class User(Base):
     # Profile
     role = Column(Enum(UserRole), default=UserRole.CUSTOMER, nullable=False)
     status = Column(Enum(UserStatus), default=UserStatus.PENDING_VERIFICATION, nullable=False)
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=True)  # RBAC role foreign key
     
     # Profile details
     avatar_url = Column(String(500), nullable=True)
@@ -72,7 +75,11 @@ class User(Base):
     email_verified_at = Column(DateTime, nullable=True)
     phone_verified_at = Column(DateTime, nullable=True)
     
-    # Relationships - using lazy loading to avoid circular imports
+    # RBAC relationships
+    role_obj = relationship("Role", back_populates="users", foreign_keys=[role_id])
+    permission_overrides = relationship("UserPermission", back_populates="user", cascade="all, delete-orphan")
+    
+    # Business relationships - using lazy loading to avoid circular imports
     subscriptions = relationship("Subscription", back_populates="user", cascade="all, delete-orphan", lazy="select", foreign_keys="Subscription.user_id")
     invoices = relationship("Invoice", back_populates="user", cascade="all, delete-orphan", lazy="select")
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan", lazy="select", foreign_keys="Payment.user_id")
@@ -93,6 +100,7 @@ class User(Base):
             "phone": self.phone,
             "first_name": self.first_name,
             "last_name": self.last_name,
+            "company_name": self.company_name,
             "role": self.role.value if self.role else None,
             "status": self.status.value if self.status else None,
             "is_verified": self.is_verified,

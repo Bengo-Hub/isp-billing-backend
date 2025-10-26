@@ -26,6 +26,10 @@ from .sms_credit import (
     SMSCreditAccount, SMSTransaction, SMSTopUp, SMSCreditAlert,
     PhoneNumberManagement, SMSCreditUsageStats
 )
+from .rbac import (
+    Role, Permission, UserPermission, SystemLicence,
+    PermissionModule, PermissionAction, UserRole
+)
 
 __all__ = [
     "BaseModel",
@@ -78,4 +82,11 @@ __all__ = [
     "SMSCreditAlert",
     "PhoneNumberManagement",
     "SMSCreditUsageStats",
+    "Role",
+    "Permission",
+    "UserPermission",
+    "SystemLicence",
+    "PermissionModule",
+    "PermissionAction",
+    "UserRole",
 ]

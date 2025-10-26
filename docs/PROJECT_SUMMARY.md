@@ -190,6 +190,24 @@ pytest tests/test_auth.py -v
 3. **Implementation Guide**: `IMPLEMENTATION_GUIDE.md` - Detailed implementation
 4. **Interactive Docs**: Swagger UI and ReDoc at runtime
 
+### Recent Updates
+- Added SMS Credit API surface (accounts, top-ups, balance, transactions, analytics) to match UI.
+- Added Router active-connections listing and a disconnect-user endpoint to support Active Users actions.
+- Added provisioning bootstrap endpoints generating a RouterOS one‑liner and script based on the current domain.
+- Replaced any remaining references to Centipid with Codevertex in provisioning bootstrap logic.
+- Updated `docs/API_DOCUMENTATION.md` with the new endpoints.
+
+### Provisioning Overview (Codevertex)
+The provisioning workflow consists of three steps:
+1. Connection – validate connectivity, gather system info, verify RouterOS version.
+2. Configuration – backup current config, apply base config (identity, bridge, pool, DNS), verify.
+3. Service Setup – configure Hotspot/PPPoE, security hardening, final verification.
+
+The frontend wizard uses:
+- POST `/api/v1/provisioning/workflow` to start the workflow.
+- GET `/api/v1/provisioning/sessions/{id}/status` to poll progress and see current operation.
+- GET `/api/v1/provisioning/bootstrap/command` and `/bootstrap/script` to show/copy the device command in Step 2.
+
 ### Key Documentation Features
 - **Complete API Reference**: All endpoints with examples
 - **Authentication Guide**: JWT setup and usage

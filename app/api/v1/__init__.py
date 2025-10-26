@@ -12,9 +12,11 @@ from .notifications import router as notifications_router
 from .reports import router as reports_router
 from .provisioning import router as provisioning_router
 from .licence import router as licence_router
+from .sms_credit import router as sms_credit_router
 from .ui import router as ui_router
 from .gateway_management import router as gateway_router
 from .admin import router as admin_router
+from .rbac import router as rbac_router
 
 api_router = APIRouter()
 
@@ -32,3 +34,5 @@ api_router.include_router(licence_router, prefix="/licence", tags=["Licence Mana
 api_router.include_router(ui_router, prefix="/ui", tags=["User Interface"])
 api_router.include_router(gateway_router, prefix="/gateways", tags=["Gateway Management"])
 api_router.include_router(admin_router, prefix="/admin", tags=["System Administration"])
+api_router.include_router(sms_credit_router, prefix="/sms-credit", tags=["SMS Credit"])
+api_router.include_router(rbac_router, prefix="/rbac", tags=["RBAC Management"])

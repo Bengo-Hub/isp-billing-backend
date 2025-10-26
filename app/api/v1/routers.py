@@ -286,6 +286,58 @@ async def get_router_devices(
     return devices
 
 
+@router.get("/{router_id}/active-connections", response_model=List[Dict[str, Any]])
+async def get_active_connections(
+    router_id: int,
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """Get active hotspot and PPPoE connections directly from MikroTik."""
+    from app.integrations.mikrotik import MikroTikAPI
+    service = RouterService(db)
+    router = await service.get_by_id(router_id)
+    if not router:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    api = MikroTikAPI(router)
+    connected = await api.connect()
+    if not connected:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to connect to router")
+    try:
+        connections = await api.get_active_connections()
+        return connections
+    finally:
+        await api.disconnect()
+
+
+@router.post("/{router_id}/disconnect-user")
+async def disconnect_user(
+    router_id: int,
+    username: str,
+    user_type: str = Query("hotspot", pattern="^(hotspot|pppoe)$"),
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Disable a hotspot or PPPoE user on the router (soft disconnect)."""
+    from app.integrations.mikrotik import MikroTikAPI
+    service = RouterService(db)
+    router = await service.get_by_id(router_id)
+    if not router:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    api = MikroTikAPI(router)
+    connected = await api.connect()
+    if not connected:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to connect to router")
+    try:
+        ok = await api.disable_user(username=username, user_type=user_type)
+        if not ok:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to disconnect user")
+        return {"message": "User disconnected", "username": username, "type": user_type}
+    finally:
+        await api.disconnect()
+
+
 @router.get("/devices/{device_id}", response_model=RouterDevice)
 async def get_router_device(
     device_id: int,

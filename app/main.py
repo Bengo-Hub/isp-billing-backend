@@ -13,6 +13,7 @@ from app.api.v1 import auth, billing, notifications, plans, routers, subscriptio
 from app.core.config import settings
 from app.core.database import init_db
 from app.core.logging import setup_logging
+from app.core.seed_middleware import SeedMiddleware
 from app.services.initialization_service import initialization_service
 
 
@@ -85,10 +86,23 @@ def custom_openapi():
             "flows": {
                 "password": {
                     "tokenUrl": "/api/v1/auth/login",
-                    "scopes": {}
+                    "scopes": {},
                 }
             },
-            "description": "OAuth2 password flow - use 'admin' / 'admin123' for testing"
+            "description": (
+                "**OAuth2 Password Flow - Demo Credentials:**\n\n"
+                "**Demo Admin Account:**\n"
+                "- Username: `demo`\n"
+                "- Password: `demo123`\n"
+                "- Email: `demo@codevertexitsolutions.com`\n"
+                "- Role: Admin (ISP Provider)\n\n"
+                "**Superuser Account:**\n"
+                "- Username: `superuser`\n"
+                "- Password: `superuser123`\n"
+                "- Email: `superuser@codevertexitsolutions.com`\n"
+                "- Role: Superuser (Full System Access)\n\n"
+                "**Note**: You can use either username OR email in the username field."
+            )
         },
         "BearerAuth": {
             "type": "http",
@@ -105,6 +119,45 @@ def custom_openapi():
         "/api/v1/auth/verify", "/api/v1/auth/forgot-password", "/api/v1/auth/reset-password",
         "/api/v1/auth/verify-email", "/api/v1/auth/verify-phone"
     }
+    
+    # Add default examples to login endpoint
+    if "/api/v1/auth/login" in openapi_schema["paths"]:
+        login_endpoint = openapi_schema["paths"]["/api/v1/auth/login"]["post"]
+        
+        # Add example request body with default credentials
+        if "requestBody" in login_endpoint:
+            login_endpoint["requestBody"]["content"]["application/x-www-form-urlencoded"]["example"] = {
+                "username": "demo",
+                "password": "demo123"
+            }
+            
+            # Add multiple examples
+            login_endpoint["requestBody"]["content"]["application/x-www-form-urlencoded"]["examples"] = {
+                "demo_admin": {
+                    "summary": "Demo Admin Account",
+                    "description": "ISP Provider demo account with admin permissions",
+                    "value": {
+                        "username": "demo",
+                        "password": "demo123"
+                    }
+                },
+                "demo_admin_email": {
+                    "summary": "Demo Admin (using email)",
+                    "description": "Login using email instead of username",
+                    "value": {
+                        "username": "demo@codevertexitsolutions.com",
+                        "password": "demo123"
+                    }
+                },
+                "superuser": {
+                    "summary": "Superuser Account",
+                    "description": "Full system access for advanced configuration",
+                    "value": {
+                        "username": "superuser",
+                        "password": "superuser123"
+                    }
+                }
+            }
     
     # Add security requirements to protected endpoints
     for path in openapi_schema["paths"]:
@@ -164,6 +217,9 @@ if settings.is_production:
         TrustedHostMiddleware,
         allowed_hosts=["*.yourdomain.com", "yourdomain.com"]
     )
+
+# Add seed middleware to ensure RBAC initialization
+app.add_middleware(SeedMiddleware)
 
 
 # Include API routers using the consolidated v1 router
