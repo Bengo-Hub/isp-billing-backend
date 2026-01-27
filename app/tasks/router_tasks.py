@@ -11,7 +11,7 @@ from app.core.celery import celery_app
 from app.core.database import AsyncSessionLocal
 from app.core.logging import get_logger
 from app.models.router import Router, RouterStatus
-from app.services.router_service import RouterService
+from app.modules.routers import RouterService
 
 logger = get_logger(__name__)
 

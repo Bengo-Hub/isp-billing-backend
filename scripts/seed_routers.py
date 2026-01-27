@@ -32,6 +32,8 @@ class RouterSeeder:
         """Seed routers with realistic MikroTik data."""
         if clear_existing:
             await self._clear_routers()
+            if count == 0:
+                return []
 
         routers = []
         
@@ -43,6 +45,9 @@ class RouterSeeder:
         if count > len(standard_routers):
             additional_routers = await self._create_additional_routers(count - len(standard_routers))
             routers.extend(additional_routers)
+        
+        # Flush to get router IDs before creating devices
+        await self.db.flush()
         
         # Create router devices for each router
         for router in routers:
@@ -178,8 +183,8 @@ class RouterSeeder:
                 last_seen=datetime.utcnow() - timedelta(minutes=random.randint(1, 1440)) if random.choice([True, False]) else None,
                 uptime=random.randint(0, 2592000),  # 0 to 30 days
                 location=f"{location}, Kenya",
-                latitude=str(random.uniform(-4.5, 1.5)),  # Kenya latitude range
-                longitude=str(random.uniform(33.5, 42.0)),  # Kenya longitude range
+                latitude=f"{random.uniform(-4.5, 1.5):.6f}",  # Kenya latitude range (limited precision)
+                longitude=f"{random.uniform(33.5, 42.0):.6f}",  # Kenya longitude range (limited precision)
                 config=self._get_default_router_config(f"{router_type_name} Router {location}"),
                 notes=f"Auto-generated router for testing - {location}",
                 created_at=datetime.utcnow() - timedelta(days=random.randint(1, 365))

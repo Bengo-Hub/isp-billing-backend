@@ -39,13 +39,16 @@ class RouterType(str, PyEnum):
 
 
 class Router(Base):
-    """Router model."""
+    """Router model with multi-tenant support."""
 
     __tablename__ = "routers"
 
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
-    
+
+    # Organization (tenant)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+
     # Basic information
     name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
@@ -77,6 +80,7 @@ class Router(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     
     # Relationships
+    organization = relationship("Organization", back_populates="routers")
     subscriptions = relationship("Subscription", back_populates="router", cascade="all, delete-orphan")
     devices = relationship("RouterDevice", back_populates="router", cascade="all, delete-orphan")
 

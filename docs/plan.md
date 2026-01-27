@@ -1,1130 +1,581 @@
-# ISP Billing System - Development Plan
+# ISP Billing System - Backend Implementation Plan
 
-## Overview
-
-This document outlines the system features, descriptions, architecture, API specifications, and implementation stages for building an ISP billing platform similar to Centipid. It will support both Hotspot and PPPoE user management on MikroTik routers, integrated billing via MPESA, and include admin, customer, and public-facing portals.
-
----
-
-## Features & Descriptions
-
-### 1. User Management
-
-**Description:** Handles account creation, login, password recovery, user roles.
-
-- User types: ISP Admin, Technician, End User (Customer)
-- Role-based access control
-- Email/phone verification
-
-### 2. Router Management & Device Provisioning
-
-**Description:** Comprehensive MikroTik router management and device provisioning system
-
-- **Device Provisioning Workflow:**
-  - 3-step onboarding process (Connection → Device Details → Service Setup)
-  - Provisioning command generation and execution
-  - Live configuration progress monitoring
-  - Device connection status verification
-- **Router Management:**
-  - Add/edit/delete router configurations
-  - Push user credentials (PPP & Hotspot)
-  - Monitor router status (uptime, connected users, CPU, memory)
-  - Remote Winbox access management
-- **Advanced Configuration:**
-  - Service type selection (PPPoE Server, Hotspot)
-  - Hotspot Anti-Sharing Protection (TTL modification)
-  - Custom subnet configuration (default 172.31.0.0/16)
-  - Ethernet port selection for bridge configuration
-  - Real-time configuration progress tracking
-
-### 3. Hotspot User Management
-
-**Description:** Create and manage Hotspot users on MikroTik
-
-- Voucher system with expiration, usage limits
-- Bandwidth and time-based packages
-- Auto-disable on expiry or overuse
-
-### 4. PPPoE User Management
-
-**Description:** Create and manage PPPoE users via MikroTik API
-
-- Username/password-based accounts
-- Bandwidth plans with FUP support
-- Auto-disconnect on expiry/non-payment
-
-### 5. Service Plans / Packages
-
-**Description:** Define internet packages and associate users
-
-- Download/upload speeds
-- Time/data validity
-- Monthly recurring or one-time
-
-### 6. Billing Engine
-
-**Description:** Core of the financial system
-
-- Generate invoices (automated/manual)
-- Bill per cycle (monthly/weekly)
-- Usage-based billing support
-
-### 7. Payment Integration (MPESA)
-
-**Description:** Collect payments via MPESA APIs
-
-- Support Paybill, Till, Bank Paybill
-- Auto-reconcile payments (STK, C2B callbacks)
-- Mark invoice as paid and activate access
-
-### 8. Customer Portal
-
-**Description:** Interface for users to manage their account
-
-- View active plan, invoices, usage
-- Initiate MPESA payment (STK Push)
-- View payment history
-
-### 9. ISP Admin Panel & Dashboard
-
-**Description:** Comprehensive admin interface for ISP operators with advanced analytics
-
-- **Dashboard Metrics:**
-  - Revenue tracking (monthly earnings, SMS balance, client count)
-  - Active users monitoring (real-time and historical)
-  - Payment and expense trends
-  - Customer retention rate analytics
-  - Package performance comparison
-  - Network data usage monitoring
-  - Revenue forecasting (3-month predictions)
-- **Management Features:**
-  - Manage users, routers, packages
-  - Most active users tracking
-  - Reports and audit logs
-  - Real-time status indicators
-- **Analytics & Reporting:**
-  - User registration trends
-  - Data usage patterns (PPPoE vs Hotspot)
-  - Package utilization distribution
-  - Network performance metrics
-
-### 10. Public Landing Page
-
-**Description:** Public-facing site to market and sell internet packages
-
-- View packages
-- Register new customers
-- MPESA payment integration for signup
-
-### 11. Notifications & Communication
-
-**Description:** Multi-channel notification system with gateway management
-
-- **Notification Types:**
-  - Payment confirmations
-  - Invoice due reminders
-  - Service suspension alerts
-  - System status updates
-- **Communication Channels:**
-  - Email notifications (SMTP, SendGrid, AWS SES)
-  - SMS notifications (Africa's Talking, Twilio)
-  - In-app notifications
-- **Gateway Management:**
-  - SMS gateway configuration and testing
-  - Email gateway configuration and testing
-  - Gateway status monitoring
-  - Delivery tracking and reporting
-
-### 12. Support Ticket System (Basic)
-
-**Description:** Enable customers to raise issues or feedback
-
-- Ticket creation
-- Admin response interface
-- Status tracking
-
-### 13. Tenant Configuration Management
-
-**Description:** Comprehensive system configuration and gateway management for tenant administrators
-
-- **Payment Gateway Configuration:**
-  - MPESA configuration (Consumer Key, Secret, Passkey, Shortcode)
-  - Bank Account integration (Paybill, Account Number)
-  - Gateway testing and validation
-  - Callback URL management
-  - Environment switching (sandbox/production)
-  - Transaction cost tracking and display
-- **SMS Gateway Configuration:**
-  - Africa's Talking integration
-  - Twilio integration
-  - SMS Global integration
-  - Gateway testing and balance monitoring
-  - SMS credit top-up system
-  - Phone number management
-- **Email Gateway Configuration:**
-  - SMTP configuration
-  - SendGrid integration
-  - AWS SES integration
-  - Email delivery testing
-- **System Settings:**
-  - Application configuration
-  - Database settings
-  - Redis configuration
-  - Security settings
-  - Rate limiting configuration
-- **Settings Management Interface:**
-  - Tabbed settings interface (General, Payments, PPPoE, Hotspot, SMS Gateway, Notifications)
-  - Real-time configuration updates
-  - Settings validation and testing
-  - Configuration backup and restore
-
-### 14. Centipid Licence Management
-
-**Description:** Subscription and licence management system for tenant billing
-
-- **Licence Tracking:**
-  - Subscription expiry monitoring
-  - Renewal reminders and notifications
-  - Licence status display
-  - Payment history tracking
-- **Payment Management:**
-  - Payment logs with detailed transaction history
-  - Payment status tracking (checked/unchecked)
-  - Bulk payment operations
-  - Payment search and filtering
-- **Earnings Dashboard:**
-  - Daily, weekly, monthly earnings display
-  - Earnings visibility toggles
-  - Transaction cost tracking
-  - Revenue analytics
-
-### 15. Package Management System
-
-**Description:** Advanced package creation and management system
-
-- **Package Templates:**
-  - Quick template system for common packages
-  - Package guide and documentation
-  - Template customization
-  - Bulk package creation
-- **Package Configuration:**
-  - Speed settings (download/upload)
-  - Time-based validity
-  - Data limits and FUP
-  - Package categorization (Hotspot, PPPoE, Data Plans, Free Trial)
-- **Package Assignment:**
-  - Direct assignment to MikroTik devices
-  - Device-specific package configuration
-  - Package activation/deactivation
-  - Bulk package operations
-
-### 16. Advanced Notification System
-
-**Description:** Comprehensive notification management with template customization
-
-- **Notification Types:**
-  - MikroTik status notifications
-  - Payment confirmation notifications
-  - Service expiry notifications
-  - Expiry reminder notifications
-  - Email subscription reminders
-- **Message Templates:**
-  - Rich text editor with HTML support
-  - Variable substitution system (@username, @package_name, @expiry_date, etc.)
-  - User type differentiation (Hotspot vs PPPoE)
-  - Template preview and testing
-- **Notification Channels:**
-  - SMS notifications with custom templates
-  - Email notifications with HTML formatting
-  - In-app notifications
-  - Push notifications
-
-### 17. User Interface & Experience
-
-**Description:** Advanced UI/UX features for optimal user experience
-
-- **User Settings Management:**
-  - 2FA settings configuration
-  - Theme switching (Light, Dark, System)
-  - User profile management
-  - Billing & subscription management
-  - System users management
-  - System logs access
-  - Features & bug reporting
-  - Referral system
-  - Equipment shop integration
-  - Support contact system
-- **Advanced Search & Filtering:**
-  - Global search functionality (CTRL+F)
-  - Advanced filtering options
-  - Search suggestions and autocomplete
-  - Saved search preferences
-- **Bulk Operations:**
-  - Multi-select functionality
-  - Bulk actions for payments, packages, users
-  - Batch processing capabilities
-  - Progress tracking for bulk operations
-
-### 18. Reports & Analytics
-
-**Description:** Comprehensive reporting and analytics system
-
-- **Financial Reports:**
-  - Daily/monthly revenue tracking
-  - Payment collection rates
-  - Revenue forecasting
-  - Expense tracking
-  - Transaction cost analysis
-- **Usage Analytics:**
-  - Usage per user/package
-  - Data consumption patterns
-  - Peak usage times
-  - Network performance metrics
-- **Operational Reports:**
-  - Router/device uptime
-  - Customer retention rates
-  - Package performance comparison
-  - User activity tracking
-- **Export Capabilities:**
-  - PDF reports
-  - CSV exports
-  - Excel workbooks
-  - Real-time dashboards
+**Document Version:** 2.0
+**Last Updated:** 2026-01-26
+**Project Status:** 85% Complete
+**Target:** 100% Production-Ready Multi-Tenant ISP Billing Platform
 
 ---
 
-## Centipid Billing System Features Analysis
+## Executive Summary
 
-Based on the comprehensive analysis of Centipid billing system screenshots, the following additional features have been identified and integrated into the plan:
-
-### Key Features from Screenshots:
-
-1. **MikroTik Device Provisioning Workflow:**
-   - 3-step onboarding process (Connection → Device Details → Service Setup)
-   - Provisioning command generation with copy functionality
-   - Live configuration progress monitoring with real-time updates
-   - Device connection status verification with ping testing
-
-2. **Advanced Router Configuration:**
-   - Service type selection (PPPoE Server, Hotspot)
-   - Hotspot Anti-Sharing Protection (TTL modification for single-device usage)
-   - Custom subnet configuration (default 172.31.0.0/16)
-   - Ethernet port selection for bridge configuration
-   - Real-time configuration progress tracking
-
-3. **Comprehensive Dashboard Analytics:**
-   - Revenue metrics (monthly earnings, SMS balance, client count)
-   - Payment and expense trend charts
-   - Active users monitoring (real-time and historical)
-   - Customer retention rate analytics (6-month tracking)
-   - Package performance comparison tables
-   - Network data usage monitoring (download/upload tracking)
-   - Revenue forecasting (3-month predictions)
-   - Most active users tracking
-   - User registration trends
-
-4. **Multi-Device Management:**
-   - Router status monitoring (Online/Offline with real-time updates)
-   - Remote Winbox access management
-   - CPU and memory monitoring
-   - Device provisioning status tracking
-   - Multiple router management interface
-
-5. **Centipid Licence Management:**
-   - Subscription expiry monitoring and renewal prompts
-   - Payment logs with detailed transaction history
-   - Payment status tracking (checked/unchecked)
-   - Earnings dashboard (daily, weekly, monthly)
-   - Transaction cost tracking and display
-
-6. **Advanced Package Management:**
-   - Package templates and quick setup system
-   - Package categorization (Hotspot, PPPoE, Data Plans, Free Trial)
-   - Bulk package operations and management
-   - Direct assignment to MikroTik devices
-   - Package guide and documentation
-
-7. **Comprehensive Payment Management:**
-   - Manual payment recording functionality
-   - Payment status management (checked/unchecked)
-   - Bulk payment operations
-   - Advanced payment search and filtering
-   - Payment disbursement method tracking
-
-8. **Advanced Notification System:**
-   - MikroTik status notifications
-   - Payment confirmation SMS (separate for Hotspot/PPPoE)
-   - Service expiry and reminder notifications
-   - Email subscription reminders with HTML formatting
-   - Rich message templates with variable substitution
-   - User type differentiation (Hotspot vs PPPoE)
-
-9. **Payment Gateway Configuration:**
-   - Bank Account integration (Paybill, Account Number)
-   - Multiple payment gateway support
-   - Gateway testing and validation
-   - Transaction cost tracking
-   - Settings management with tabbed interface
-
-10. **SMS Credit Management:**
-    - SMS top-up system with credit management
-    - Phone number management and validation
-    - SMS transaction history and status tracking
-    - Bulk SMS operations support
-
-11. **Advanced User Interface:**
-    - User settings dropdown with comprehensive options
-    - 2FA settings and theme switching
-    - Global search functionality (CTRL+F)
-    - Bulk operations support across all modules
-    - Advanced filtering and search capabilities
-    - System users management and logs access
-
-### Implementation Priority:
-- **High Priority:** Device provisioning workflow, dashboard analytics, payment management, package management
-- **Medium Priority:** Advanced notification system, licence management, UI/UX features
-- **Low Priority:** SMS credit management, advanced reporting features
+This plan outlines the comprehensive backend implementation for a production-ready, multi-tenant ISP billing platform. Based on extensive research of industry leaders (Centipid, Splynx, WISPGate, Powerlynx), MikroTik integration patterns, and enterprise multi-tenancy best practices, this document tracks all features, their implementation status, and pending work required for production readiness.
 
 ---
 
-## Tech Stack
+## Research Findings Summary
 
-### Backend
+### Industry Analysis (Competitors)
+- **Centipid**: MikroTik-focused, hotspot/PPPoE, M-PESA integration, 3-step provisioning
+- **Splynx**: Full ISP management, RADIUS, multi-vendor support, extensive reporting
+- **WISPGate**: Cloud-based, multi-tenant, captive portal customization
+- **Powerlynx**: Self-service portals, automated billing, voucher management
 
-- **Framework**: FastAPI (Python 3.10+)
-- **Database**: PostgreSQL
-- **Cache/Queue**: Redis (for session caching and Celery task queue)
-- **Background Jobs**: Celery (billing cycles, notifications)
-- **Router Integration**: routeros-api Python package
-- **Deployment**: Docker, Docker Compose on Contabo VPS
+### MikroTik Integration Points
+- **RouterOS API**: TCP ports 8728 (plain) / 8729 (SSL)
+- **User Manager**: RADIUS server for authentication
+- **Hotspot**: MAC-based auth, vouchers, walled garden
+- **PPPoE**: Profile-based bandwidth, queue management
 
-### Frontend
-
-- **Framework**: React (Next.js 15)
-- **UI Kit**: Shadcn UI
-- **Routing**: Next.js App Router
-- **State Management**: React Query/Context API
-- **Progressive Web App (PWA)**: Enabled for offline support
-- **Forms/Validation**: React Hook Form + Zod
-
----
-
-## System Architecture
-
-```text
-+-------------------+            +---------------------+
-|     Frontend      |  <--->    |  FastAPI Backend    |
-| (Next.js + PWA)   |            |  (REST API + Auth)  |
-+-------------------+            +----------+----------+
-                                         |
-                                         v
-                           +-------------+-------------+
-                           |       PostgreSQL         |
-                           |    (Persistent Store)    |
-                           +-------------+-------------+
-                                         |
-                                         v
-                           +-------------+-------------+
-                           |      Redis + Celery       |
-                           | (Queue + Cache + Tasks)   |
-                           +-------------+-------------+
-                                         |
-                                         v
-                              +----------+----------+
-                              |  MikroTik Routers   |
-                              | (Hotspot / PPPoE)   |
-                              +---------------------+
-```
+### Multi-Tenancy Patterns (from ERP-API Analysis)
+- **Recommended**: Pool model with row-level security (TenantID on all tables)
+- **Tenant Context**: Middleware-based with X-Tenant-Id header
+- **Data Isolation**: Foreign key chaining (Business → Branch → Entity)
+- **Configuration**: Per-tenant settings for payments, branding, notifications
 
 ---
 
-## API Specifications (Core Routes)
+## Current Architecture Status
 
-### Auth
+### Technology Stack
+| Component | Version | Status |
+|-----------|---------|--------|
+| FastAPI | 0.115.x | Implemented |
+| PostgreSQL | 15+ | Implemented |
+| SQLAlchemy | 2.0.36 | Implemented |
+| Redis | 5.2.x | Implemented |
+| Celery | 5.4.x | Implemented |
+| Pydantic | 2.10.x | Implemented |
+| Tenacity (Retry) | 9.0.x | Implemented |
+| PyBreaker (Circuit) | 1.2.x | Implemented |
 
-- `POST /auth/register` – Create new user
-- `POST /auth/login` – Login and receive JWT
-- `POST /auth/logout` – Invalidate token
-
-### Users
-
-- `GET /users/me` – Get current user profile
-- `GET /users` – List all users (admin only)
-- `PATCH /users/{id}` – Update user details
-
-### Routers
-
-- `POST /routers` – Add MikroTik router
-- `GET /routers` – List routers
-- `GET /routers/{id}` – Router details
-- `DELETE /routers/{id}` – Remove router
-- `POST /routers/{id}/provision` – Start device provisioning
-- `GET /routers/{id}/provision/status` – Get provisioning status
-- `POST /routers/{id}/configure` – Configure router services
-- `GET /routers/{id}/devices` – List connected devices
-- `POST /routers/{id}/sync` – Sync router status and devices
-
-### Plans
-
-- `POST /plans` – Create service plan
-- `GET /plans` – List plans
-- `PATCH /plans/{id}` – Update plan
-- `DELETE /plans/{id}` – Delete plan
-
-### Subscriptions (PPP/Hotspot)
-
-- `POST /subscriptions` – Assign user to plan + router
-- `GET /subscriptions` – List active subscriptions
-- `PATCH /subscriptions/{id}` – Update bandwidth/quota
-- `DELETE /subscriptions/{id}` – Disable user access
-
-### Billing
-
-- `GET /invoices` – List invoices
-- `POST /invoices/generate` – Manually trigger billing
-- `POST /payments/mpesa/stk` – Initiate MPESA STK Push
-- `POST /payments/mpesa/callback` – Webhook from Safaricom
-- `GET /payments/history` – Payment logs for a user
-
-### Notifications
-
-- `POST /notify/email` – Send custom email
-- `POST /notify/sms` – Send SMS via gateway
-- `GET /notify/gateways` – List available gateways
-- `POST /notify/gateways/test` – Test gateway configuration
-- `GET /notify/gateways/{type}/status` – Get gateway status
-
-### Configuration
-
-- `GET /config/gateways` – Get gateway configurations
-- `POST /config/gateways` – Update gateway configuration
-- `POST /config/gateways/test` – Test gateway connection
-- `GET /config/system` – Get system configuration
-- `POST /config/system` – Update system configuration
-
-### Tickets
-
-- `POST /tickets` – Create support request
-- `GET /tickets` – View open tickets (admin)
-- `PATCH /tickets/{id}` – Respond to ticket
-
-### Analytics & Dashboard
-
-- `GET /analytics/revenue` – Get revenue analytics
-- `GET /analytics/users` – Get user analytics
-- `GET /analytics/usage` – Get usage analytics
-- `GET /analytics/retention` – Get customer retention data
-- `GET /analytics/packages` – Get package performance data
-- `GET /analytics/network` – Get network usage data
-- `GET /analytics/forecast` – Get revenue forecasting data
-- `GET /dashboard/metrics` – Get dashboard summary metrics
-
-### Licence Management
-
-- `GET /licence/status` – Get licence status and expiry
-- `POST /licence/renew` – Renew licence subscription
-- `GET /licence/payments` – Get licence payment history
-- `POST /licence/payments` – Record licence payment
-- `GET /licence/earnings` – Get earnings summary (daily/weekly/monthly)
-
-### Package Management
-
-- `GET /packages/templates` – Get package templates
-- `POST /packages/templates` – Create package template
-- `GET /packages/quick-setup` – Get quick setup options
-- `POST /packages/bulk-create` – Bulk create packages
-- `GET /packages/categories` – Get package categories
-- `POST /packages/{id}/assign` – Assign package to device
-- `POST /packages/bulk-operations` – Perform bulk operations
-
-### Advanced Notifications
-
-- `GET /notifications/templates` – Get notification templates
-- `POST /notifications/templates` – Create/update notification template
-- `POST /notifications/templates/test` – Test notification template
-- `GET /notifications/variables` – Get available template variables
-- `POST /notifications/send-custom` – Send custom notification
-- `GET /notifications/history` – Get notification history
-
-### User Interface
-
-- `GET /ui/settings` – Get user interface settings
-- `POST /ui/settings` – Update user interface settings
-- `GET /ui/themes` – Get available themes
-- `POST /ui/themes` – Set user theme
-- `GET /ui/search` – Global search functionality
-- `GET /ui/suggestions` – Get search suggestions
-- `POST /ui/bulk-operations` – Perform bulk operations
+### Module Structure (Implemented)
+- `app/modules/auth/` - Authentication, users, RBAC
+- `app/modules/billing/` - Billing, payments, M-PESA
+- `app/modules/routers/` - MikroTik management
+- `app/modules/licences/` - Licence management
+- `app/modules/provisioning/` - Device provisioning
+- `app/modules/subscriptions/` - Subscription lifecycle
+- `app/modules/plans/` - Service plans, templates
+- `app/modules/notifications/` - Multi-channel notifications
+- `app/modules/analytics/` - Reports, advanced analytics
+- `app/modules/support/` - Ticket system
+- `app/modules/gateways/` - Gateway management
+- `app/modules/system/` - Configuration, initialization
 
 ---
 
-## Implementation Sprints
+## Sprint Breakdown
 
-### ✅ Sprint 1: Project Setup & Core Models (COMPLETED)
+### Phase 1: Foundation (COMPLETED)
 
-- ✅ Initialize Git, Docker, FastAPI backend project
-- ✅ Setup PostgreSQL and Redis services
-- ✅ Define DB models for users, plans, invoices
-- ✅ Implement user auth (JWT-based)
+#### Sprint 1: Project Setup & Core Models
+**Status:** COMPLETED
+**Duration:** Completed
 
-### ✅ Sprint 2: MikroTik Router Integration (COMPLETED)
+| Task | Status | Notes |
+|------|--------|-------|
+| FastAPI project structure | COMPLETED | Modular architecture |
+| PostgreSQL + Redis setup | COMPLETED | Docker Compose ready |
+| SQLAlchemy 2.0 models | COMPLETED | 40+ tables |
+| Alembic migrations | COMPLETED | Version controlled |
+| JWT authentication | COMPLETED | Access + Refresh tokens |
+| Environment configuration | COMPLETED | Pydantic Settings |
 
-- ✅ Integrate routeros-api
-- ✅ Add router CRUD endpoints
-- ✅ Create PPPoE & Hotspot user handlers
-- ✅ Fetch usage data from routers
+#### Sprint 2: MikroTik Router Integration
+**Status:** COMPLETED
+**Duration:** Completed
 
-### ✅ Sprint 2.5: Device Provisioning System (COMPLETED - NEW)
+| Task | Status | Notes |
+|------|--------|-------|
+| RouterOS API integration | COMPLETED | routeros-api package |
+| Router CRUD endpoints | COMPLETED | Full management |
+| PPPoE user handlers | COMPLETED | Profile management |
+| Hotspot user handlers | COMPLETED | Voucher support |
+| Usage data fetching | COMPLETED | Real-time metrics |
+| Connection monitoring | COMPLETED | CPU, memory, uptime |
 
-- ✅ **3-step provisioning workflow** (Connection → Configuration → Service Setup)
-- ✅ **Live configuration progress monitoring** with real-time updates
-- ✅ **Device connection status verification** with comprehensive testing
-- ✅ **Advanced router configuration** (PPPoE/Hotspot, anti-sharing, custom subnets)
-- ✅ **Template-based configuration** system with versioning
-- ✅ **Configuration backup and restore** functionality
-- ✅ **Provisioning API endpoints** (15+ new endpoints)
-- ✅ **Background task processing** with Celery integration
-- ✅ **Comprehensive error handling** with automatic rollback
-- ✅ **Production-ready security** features
+#### Sprint 3: Device Provisioning System
+**Status:** COMPLETED
+**Duration:** Completed
 
-### ✅ Sprint 3: Billing System (COMPLETED)
-
-- ✅ Implement billing scheduler with Celery
-- ✅ Create recurring invoice engine
-- ✅ Enforce service lockout based on status
-- ✅ Admin: invoice list, filters
-
-### ✅ Sprint 4: MPESA Integration (COMPLETED)
-
-- ✅ Integrate Daraja STK push & C2B endpoints
-- ✅ Auto-reconcile payments via callbacks
-- ✅ Mark invoice as paid and reactivate user
-
-### 🚧 Sprint 5: Admin Panel & ISP Dashboard (NEXT)
-
-- **Frontend Dashboard:**
-  - Create comprehensive dashboard in Next.js
-  - Revenue metrics and analytics charts
-  - Package performance comparison tables
-  - User activity tracking and monitoring
-  - Real-time status indicators
-  - Centipid licence management interface
-  - Payment management with status tracking
-- **API Endpoints:**
-  - Add analytics and dashboard endpoints
-  - Router provisioning and configuration APIs
-  - Gateway configuration management APIs
-  - Licence management APIs
-  - Package management APIs
-- **Management Features:**
-  - Assign plans to users
-  - View logs, user activity, router list
-  - Multi-device management interface
-  - Bulk operations support
-  - Advanced search and filtering
-
-### 🚧 Sprint 6: Customer Portal & Landing Page (NEXT)
-
-- Build user portal (Next.js): packages, usage, invoices
-- PWA support for offline mode
-- Landing page with marketing content and registration flow
-- Payment trigger via STK push (Daraja frontend integration)
-
-### ✅ Sprint 7: Device Provisioning & Advanced Configuration (COMPLETED)
-
-- ✅ **MikroTik Device Provisioning:**
-  - 3-step onboarding workflow
-  - Provisioning command generation
-  - Live configuration progress monitoring
-  - Device connection status verification
-- ✅ **Advanced Router Configuration:**
-  - Service type selection (PPPoE/Hotspot)
-  - Anti-sharing protection configuration
-  - Custom subnet configuration
-  - Ethernet port selection
-- ✅ **Multi-Device Management:**
-  - Router status monitoring
-  - Remote Winbox access
-  - CPU and memory monitoring
-  - Device provisioning tracking
-
-### 🚧 Sprint 8: Advanced Notifications & UI/UX (NEXT)
-
-- **Advanced Notification System:**
-  - Message template system with variable substitution
-  - Rich text editor with HTML support
-  - User type differentiation (Hotspot vs PPPoE)
-  - Template preview and testing
-  - SMS credit management system
-- **User Interface & Experience:**
-  - User settings dropdown with comprehensive options
-  - 2FA settings and theme switching
-  - Global search functionality (CTRL+F)
-  - Bulk operations support across all modules
-  - Advanced filtering and search capabilities
-  - System users management and logs access
-
-### 🚧 Sprint 9: Notifications & Reporting (NEXT)
-
-- **Gateway Management:**
-  - SMS gateway configuration (Africa's Talking, Twilio)
-  - Email gateway configuration (SendGrid, SMTP, AWS SES)
-  - Gateway testing and validation
-  - Delivery tracking and reporting
-- **Advanced Reporting:**
-  - Revenue forecasting and analytics
-  - Customer retention rate tracking
-  - Package performance analysis
-  - Exportable reports (PDF, CSV, Excel)
-  - Real-time dashboard updates
-
-### 🚧 Sprint 10: Final Testing & Deployment (NEXT)
-
-- Full QA testing of workflows
-- Dockerize services
-- Deploy to Contabo VPS with HTTPS (NGINX + Let's Encrypt)
-- Add backup script and monitoring
-
-## 🎉 Backend Implementation Status: 95% COMPLETE (PRODUCTION-READY) (FINAL)
-
-### ✅ What's Been Completed
-
-**Core Backend Infrastructure:**
-- ✅ Modern FastAPI application with async support
-- ✅ PostgreSQL database with SQLAlchemy 2.0
-- ✅ Redis caching and Celery background tasks
-- ✅ JWT authentication with role-based access control
-- ✅ **142 API endpoints** (far exceeds original estimate)
-- ✅ **20+ database models** (exceeds original estimate)
-- ✅ MikroTik RouterOS API integration
-- ✅ MPESA Daraja API integration
-- ✅ Comprehensive test suite
-- ✅ Complete API documentation
-- ✅ Docker and Docker Compose setup
-- ✅ Database migrations with Alembic
-
-**Key Features Implemented:**
-- ✅ User management with multi-role support
-- ✅ **Complete router management and device provisioning** (NEW)
-- ✅ **Centipid licence management system** (NEW)
-- ✅ **Advanced package management with templates** (NEW)
-- ✅ **SMS credit management system** (NEW)
-- ✅ Service plan management
-- ✅ Subscription lifecycle management
-- ✅ Billing and invoice generation
-- ✅ **Enhanced payment management with status tracking** (NEW)
-- ✅ Payment processing with MPESA
-- ✅ **Advanced notification system with templates** (NEW)
-- ✅ **Advanced provisioning system** (NEW)
-- ✅ **Revenue forecasting and analytics** (NEW)
-- ✅ Background task automation
-- ✅ Security and validation
-- ✅ Rate limiting and CORS
-
-### 🚀 Ready for Next Phase
-
-The backend is **production-ready** and fully functional. The next phase involves:
-
-1. **Frontend Development** (Sprint 5-6): React/Next.js applications
-2. **Production Deployment** (Sprint 8): VPS deployment and monitoring
-3. **Advanced Features** (Sprint 7): Enhanced notifications and reporting
-
-### 📊 Backend Statistics (Final)
-
-- **Total Files**: **100+ files** (significantly expanded)
-- **Lines of Code**: **8000+ lines** (major increase)
-- **API Endpoints**: **180+ endpoints** (far exceeds original estimate)
-- **Database Models**: **35+ models** (including all new features)
-- **Services**: **15+ production-ready services**
-- **Background Tasks**: **20+ Celery tasks**
-- **Database Tables**: **35+ tables** with comprehensive relationships
-- **Test Coverage**: Comprehensive across all modules
-- **Documentation**: Complete with all API endpoints documented
-
-### 🔧 Quick Start
-
-```bash
-cd backend
-./scripts/setup.sh  # Linux/Mac
-# or
-scripts\setup.bat   # Windows
-# or
-docker-compose up -d
-```
-
-**Access Points:**
-- API Docs: http://localhost:8000/docs
-- Health Check: http://localhost:8000/health
-- Default Admin: admin/admin123
+| Task | Status | Notes |
+|------|--------|-------|
+| 3-step provisioning workflow | COMPLETED | Connection → Config → Service |
+| Live progress monitoring | COMPLETED | WebSocket streaming |
+| Bootstrap command generation | COMPLETED | Token-based auth |
+| Device connection verification | COMPLETED | Ping + API checks |
+| Template-based configuration | COMPLETED | Versioned configs |
+| Automatic rollback | COMPLETED | Error recovery |
 
 ---
 
-## Optional Future Features
+### Phase 2: Billing & Payments (COMPLETED)
 
-- Reseller/Sub-ISP dashboard
-- USSD integration
-- QR voucher printer
-- Mobile app (React Native / PWA upgrade)
-- AI/ML usage predictions
+#### Sprint 4: Billing Engine
+**Status:** COMPLETED
+**Duration:** Completed
 
----
+| Task | Status | Notes |
+|------|--------|-------|
+| Invoice generation | COMPLETED | Automated + manual |
+| Recurring billing cycles | COMPLETED | Celery scheduled |
+| Usage-based billing | COMPLETED | Data tracking |
+| Service lockout | COMPLETED | Non-payment handling |
+| Payment reconciliation | COMPLETED | Auto-matching |
 
-## Implementation Status
+#### Sprint 5: M-PESA Integration
+**Status:** COMPLETED
+**Duration:** Completed
 
-### ✅ **BACKEND COMPLETED (100%)**
-
-#### **Core Services (Production-Ready)**
-- **RouterService**: Complete MikroTik integration with device management
-- **ProvisioningService**: **Complete 3-step device provisioning system** (NEW)
-- **LicenceService**: **Complete Centipid licence management** (NEW)
-- **PackageTemplateService**: **Advanced package management with templates** (NEW)
-- **SMSCreditService**: **Complete SMS credit management** (NEW)
-- **PaymentManagementService**: **Enhanced payment management** (NEW)
-- **NotificationTemplateService**: **Advanced notification templates** (NEW)
-- **AdvancedAnalyticsService**: **Revenue forecasting and analytics** (NEW)
-- **PlanService**: Full service plan lifecycle management  
-- **SubscriptionService**: Complete subscription management with usage tracking
-- **BillingService**: Comprehensive billing and payment processing
-- **TicketService**: Full support ticket system with action logging
-- **ReportsService**: Advanced analytics with Polars and multi-format exports
-- **NotificationService**: Multi-channel notifications (Email, SMS, In-app)
-- **ConfigurationService**: System configuration and gateway management
-
-#### **API Endpoints (142 Endpoints - Significantly Expanded)**
-- **Authentication**: JWT-based auth with role-based access control
-- **User Management**: Complete CRUD operations with verification
-- **Router Management**: Full router and device management
-- **Device Provisioning**: **Complete provisioning workflow system** (NEW)
-- **Service Plans**: Complete plan management with features and pricing
-- **Subscriptions**: Full subscription lifecycle management
-- **Billing**: Invoice generation, payment processing, MPESA integration
-- **Notifications**: Multi-channel notification system
-- **Support Tickets**: Complete ticket management system
-- **Reports**: Analytics and file export (PDF, CSV, XLSX)
-- **Configuration**: System and gateway configuration management
-
-#### **Data Processing & Analytics**
-- **Polars Integration**: High-performance data processing
-- **Multi-format Exports**: PDF, CSV, XLSX report generation
-- **File Streaming**: Direct file download for UI integration
-- **Comprehensive Analytics**: Subscriptions, billing, routers, tickets
-
-#### **Background Tasks (Celery)**
-- **Billing Tasks**: Automated invoice generation, payment processing
-- **Notification Tasks**: Email/SMS sending, payment reminders
-- **Provisioning Tasks**: **Device provisioning automation, monitoring, cleanup** (NEW)
-- **Router Tasks**: Status synchronization, device management
-- **Maintenance Tasks**: Session cleanup, subscription management
-
-### ✅ **ALL BACKEND FEATURES COMPLETED (100%)**
-
-#### **✅ Recently Implemented Features (COMPLETED)**
-- ✅ **Centipid Licence Management**: Complete licence tracking, renewal, payment management
-- ✅ **Advanced Package Management**: Package templates, bulk operations, device assignment
-- ✅ **SMS Credit Management**: Credit tracking, top-up system, transaction history
-- ✅ **Advanced Notification Templates**: Rich text editor, variable substitution, user type differentiation
-- ✅ **Enhanced Payment Management**: Checked/unchecked tracking, bulk operations, manual recording
-- ✅ **Revenue Forecasting**: ML-powered revenue forecasting and customer retention analytics
-- ✅ **Advanced Analytics**: Package performance comparison, network usage monitoring
-
-#### **✅ All Critical Features Now Implemented**
-- ✅ **Device Provisioning**: Complete 3-step workflow with real-time monitoring
-- ✅ **Licence Management**: Full Centipid-compatible licence system
-- ✅ **Package Templates**: Advanced package creation and management
-- ✅ **SMS Credit System**: Complete credit management with top-up functionality
-- ✅ **Payment Status Tracking**: Enhanced payment verification and bulk operations
-- ✅ **Advanced Notifications**: Rich templates with variable substitution
-- ✅ **Revenue Forecasting**: ML-powered analytics and insights
-
-### 🔄 **NEXT PHASE: FRONTEND DEVELOPMENT**
-
-#### **Ready for Frontend Integration**
-- **RESTful API**: **142 endpoints** with comprehensive documentation
-- **File Streaming**: Direct file downloads for reports
-- **Real-time Data**: Analytics and dashboard data
-- **Authentication**: JWT tokens for secure frontend integration
-- **Error Handling**: Consistent error responses for UI integration
-- **Device Provisioning**: **Complete 3-step workflow APIs** (NEW)
-
-### 📊 **ANALYTICS & REPORTING CAPABILITIES**
-
-#### **Available Reports**
-- **Subscription Analytics**: Usage patterns, active users, data consumption
-- **Billing Analytics**: Revenue tracking, collection rates, payment methods
-- **Router Analytics**: Uptime monitoring, device management, performance
-- **Support Analytics**: Ticket volume, resolution times, team performance
-
-#### **Export Formats**
-- **CSV**: Raw data exports for analysis
-- **PDF**: Formatted reports with charts and summaries
-- **XLSX**: Multi-sheet workbooks with analytics
-- **Comprehensive Reports**: All data in single files
+| Task | Status | Notes |
+|------|--------|-------|
+| Daraja STK Push | COMPLETED | Customer-initiated |
+| C2B callbacks | COMPLETED | Webhook handlers |
+| Payment verification | COMPLETED | Transaction validation |
+| Auto-activation | COMPLETED | Service enablement |
+| Transaction logging | COMPLETED | Audit trail |
 
 ---
 
-## Latest Audit and Fixes (December 2024)
+### Phase 3: Advanced Features (PARTIALLY COMPLETED)
 
-### Critical Issues Identified and Fixed
+#### Sprint 6: Licence Management
+**Status:** COMPLETED
+**Duration:** Completed
 
-1. **Pydantic Validation Errors**
-   - **Issue**: Router schemas had missing MAC address validator causing validation errors
-   - **Fix**: Added proper MAC address validation in `RouterDeviceBase` and `RouterDeviceUpdate` schemas
-   - **Status**: ✅ Resolved
+| Task | Status | Notes |
+|------|--------|-------|
+| Subscription tracking | COMPLETED | Expiry monitoring |
+| Payment logs | COMPLETED | Transaction history |
+| Earnings dashboard | COMPLETED | Daily/weekly/monthly |
+| Renewal notifications | COMPLETED | Automated alerts |
+| Usage analytics | COMPLETED | Feature tracking |
 
-2. **Import and Dependency Issues**
-   - **Issue**: Duplicate `TokenData` class in both `security.py` and `auth.py`
-   - **Fix**: Removed duplicate from `auth.py`, imported from `security.py`
-   - **Status**: ✅ Resolved
+#### Sprint 7: Package Management
+**Status:** COMPLETED
+**Duration:** Completed
 
-3. **Model Base Class Issues**
-   - **Issue**: All models were incorrectly importing `BaseModel` from `models.base` instead of using SQLAlchemy's `Base`
-   - **Fix**: Updated all model files to import `Base` from `core.database`
-   - **Status**: ✅ Resolved
+| Task | Status | Notes |
+|------|--------|-------|
+| Package templates | COMPLETED | Quick setup |
+| Package categories | COMPLETED | Hotspot/PPPoE/Data |
+| Bulk operations | COMPLETED | Mass updates |
+| Device assignment | COMPLETED | Router-specific |
+| FUP support | COMPLETED | Fair Usage Policy |
 
-4. **Missing Dependencies**
-   - **Issue**: Missing email and SMS provider dependencies in requirements.txt
-   - **Fix**: Added sendgrid, boto3, africastalking, twilio dependencies
-   - **Status**: ✅ Resolved
+#### Sprint 8: Notification System
+**Status:** COMPLETED
+**Duration:** Completed
 
-5. **Missing Celery Tasks**
-   - **Issue**: Celery configuration referenced missing `router_tasks.py`
-   - **Fix**: Created comprehensive router tasks file with all required background jobs
-   - **Status**: ✅ Resolved
-
-6. **Missing Service Methods**
-   - **Issue**: Several service methods were referenced but not implemented
-   - **Fix**: Added missing methods: `get_pending_notifications`, `get_overdue_invoices`, `get_router_stats`, `get_plan_stats`, etc.
-   - **Status**: ✅ Resolved
-
-### Post-Audit Status
-- **Code Quality**: Production-ready with no linter errors
-- **Import Errors**: All resolved
-- **Missing Dependencies**: All added
-- **Service Layer**: Complete with all required methods
-- **Background Tasks**: Fully implemented
-- **Database Models**: Properly configured with correct base classes
+| Task | Status | Notes |
+|------|--------|-------|
+| SMS integration | COMPLETED | Africa's Talking, Twilio |
+| Email integration | COMPLETED | SMTP, SendGrid, AWS SES |
+| Template system | COMPLETED | Variable substitution |
+| User type differentiation | COMPLETED | Hotspot vs PPPoE |
+| Notification history | COMPLETED | Delivery tracking |
 
 ---
 
-## 🏆 **COMPLETE FEATURE IMPLEMENTATION SUMMARY**
+### Phase 4: Multi-Tenancy (PENDING - CRITICAL)
 
-### **✅ ALL CENTIPID FEATURES IMPLEMENTED (100%)**
+#### Sprint 9: Tenant Foundation
+**Status:** PENDING
+**Priority:** CRITICAL
+**Estimated Duration:** 2 weeks
 
-**Based on comprehensive analysis of Centipid billing system screenshots, ALL identified features have been successfully implemented:**
+| Task | Status | Notes |
+|------|--------|-------|
+| Tenant/Organization model | PENDING | Core multi-tenant entity |
+| Tenant middleware | PENDING | X-Tenant-Id header handling |
+| Row-level security | PENDING | tenant_id on all tables |
+| Tenant context management | PENDING | contextvars for request isolation |
+| Tenant-aware queries | PENDING | Automatic filtering |
+| Tenant isolation tests | PENDING | Data security verification |
 
-#### **1. ✅ MikroTik Device Provisioning (100% Complete)**
-- 3-step onboarding process (Connection → Configuration → Service Setup)
-- Provisioning command generation with copy functionality
-- Live configuration progress monitoring with real-time updates
-- Device connection status verification with ping testing
-- Advanced router configuration (anti-sharing, custom subnets, port selection)
-- Template-based configuration system
-- Automatic rollback and error handling
+**Implementation Details:**
+- Add `tenant_id` foreign key to all business entities
+- Create TenantMiddleware to extract and validate tenant from JWT/header
+- Use Python contextvars for request-scoped tenant context
+- Implement query filters using SQLAlchemy events
 
-#### **2. ✅ Centipid Licence Management (100% Complete)**
-- Subscription expiry monitoring and renewal prompts
-- Payment logs with detailed transaction history
-- Payment status tracking (checked/unchecked)
-- Earnings dashboard (daily, weekly, monthly)
-- Transaction cost tracking and display
-- Licence alerts and notifications
-- Usage analytics and reporting
+#### Sprint 10: Tenant Configuration
+**Status:** PENDING
+**Priority:** CRITICAL
+**Estimated Duration:** 1 week
 
-#### **3. ✅ Advanced Package Management (100% Complete)**
-- Package templates and quick setup system
-- Package categorization (Hotspot, PPPoE, Data Plans, Free Trial)
-- Bulk package operations and management
-- Direct assignment to MikroTik devices
-- Package guide and documentation
-- Package rating and review system
-
-#### **4. ✅ SMS Credit Management (100% Complete)**
-- SMS top-up system with credit management
-- Phone number management and validation
-- SMS transaction history and status tracking
-- Bulk SMS operations support
-- SMS usage analytics and monitoring
-- Auto top-up functionality
-
-#### **5. ✅ Enhanced Payment Management (100% Complete)**
-- Manual payment recording functionality
-- Payment status management (checked/unchecked)
-- Bulk payment operations
-- Advanced payment search and filtering
-- Payment disbursement method tracking
-- Payment verification workflow
-
-#### **6. ✅ Advanced Notification System (100% Complete)**
-- MikroTik status notifications
-- Payment confirmation SMS (separate for Hotspot/PPPoE)
-- Service expiry and reminder notifications
-- Email subscription reminders with HTML formatting
-- Rich message templates with variable substitution
-- User type differentiation (Hotspot vs PPPoE)
-- Template preview and testing
-
-#### **7. ✅ Revenue Forecasting & Analytics (100% Complete)**
-- ML-powered revenue forecasting (3-month predictions)
-- Customer retention rate analytics (6-month tracking)
-- Package performance comparison tables
-- Network data usage monitoring (download/upload tracking)
-- User activity tracking and monitoring
-- Advanced dashboard analytics
-
-### **🎉 ACHIEVEMENT: 100% FEATURE PARITY WITH CENTIPID**
-
-The ISP Billing System now **matches and exceeds** all functionality shown in the Centipid billing system screenshots, with additional production-ready features and comprehensive API coverage.
+| Task | Status | Notes |
+|------|--------|-------|
+| Per-tenant settings | PENDING | Configuration isolation |
+| Tenant payment gateways | PENDING | M-PESA, Paystack per tenant |
+| Tenant notification settings | PENDING | SMS/Email providers |
+| Tenant limits | PENDING | Max users, routers, data |
+| Tenant feature flags | PENDING | Module enablement |
 
 ---
 
-## 🚀 **IMPLEMENTATION PLAN FOR REMAINING 15%** (COMPLETED)
+### Phase 5: Branding & Customization (PENDING)
 
-### **Phase 1: Critical Systems (2 weeks)**
+#### Sprint 11: Tenant Branding
+**Status:** PENDING
+**Priority:** HIGH
+**Estimated Duration:** 1 week
 
-#### **1.1 Centipid Licence Management (Priority: URGENT)**
-```python
-# Files to Create:
-- app/models/licence.py
-- app/services/licence_service.py  
-- app/api/v1/licence.py
-- app/schemas/licence.py
-- app/tasks/licence_tasks.py
+| Task | Status | Notes |
+|------|--------|-------|
+| Branding settings model | PENDING | Colors, logos, fonts |
+| Logo/asset storage | PENDING | S3/local file handling |
+| Theme configuration | PENDING | Primary/secondary colors |
+| Email template branding | PENDING | Tenant-specific templates |
+| SMS signature branding | PENDING | Custom sender names |
 
-# Database Tables:
-- licences (tracking, expiry, status)
-- licence_payments (payment history)
-- licence_subscriptions (billing cycles)
+**Fields Required (from ERP-API pattern):**
+- primary_color, secondary_color
+- logo_url, favicon_url
+- company_name, tagline
+- footer_text, support_email
+- css_custom_overrides
 
-# API Endpoints:
-- GET/POST /licence/status
-- GET/POST /licence/payments  
-- GET /licence/earnings
-- POST /licence/renew
-```
+#### Sprint 12: Captive Portal Customization
+**Status:** PENDING
+**Priority:** HIGH
+**Estimated Duration:** 1 week
 
-#### **1.2 Advanced Package Management (Priority: HIGH)**
-```python
-# Files to Create:
-- app/models/package_template.py
-- app/services/package_template_service.py
-- app/api/v1/package_templates.py
-- app/schemas/package_template.py
-
-# Features to Add:
-- Package templates and quick setup
-- Package categorization system
-- Bulk package operations
-- Device assignment functionality
-```
-
-#### **1.3 SMS Credit Management (Priority: HIGH)**
-```python
-# Files to Create:
-- app/models/sms_credit.py
-- app/services/sms_credit_service.py
-- app/api/v1/sms_credit.py
-- app/schemas/sms_credit.py
-
-# Features to Add:
-- SMS credit tracking and balance
-- SMS top-up with payment integration
-- SMS transaction history
-- Phone number management
-```
-
-### **Phase 2: Enhanced Features (3 weeks)**
-
-#### **2.1 Advanced Notification Templates (Priority: MEDIUM)**
-```python
-# Enhanced Files:
-- app/models/notification.py (add variables, user types)
-- app/services/notification_template_service.py
-- app/api/v1/notification_templates.py
-
-# Features to Add:
-- Rich text editor support
-- Variable substitution (@username, @package, etc.)
-- User type differentiation (Hotspot vs PPPoE)
-- Template preview and testing
-```
-
-#### **2.2 Payment Status Management (Priority: MEDIUM)**
-```python
-# Enhanced Files:
-- app/models/billing.py (add status tracking)
-- app/services/payment_management_service.py
-- app/api/v1/payment_management.py
-
-# Features to Add:
-- Payment status tracking (checked/unchecked)
-- Bulk payment operations
-- Manual payment recording
-- Disbursement method tracking
-```
-
-#### **2.3 User Interface Features (Priority: MEDIUM)**
-```python
-# Files to Create:
-- app/models/user_settings.py
-- app/services/ui_service.py
-- app/api/v1/ui.py
-- app/schemas/ui.py
-
-# Features to Add:
-- User settings (2FA, themes)
-- Global search functionality
-- Bulk operations framework
-- Advanced filtering system
-```
-
-### **Phase 3: Advanced Analytics (2 weeks)**
-
-#### **3.1 Revenue Forecasting & Analytics (Priority: LOW)**
-```python
-# Enhanced Files:
-- app/services/analytics_service.py
-- app/services/forecasting_service.py
-- app/api/v1/advanced_analytics.py
-
-# Features to Add:
-- Revenue forecasting algorithms
-- Customer retention analytics
-- Package performance comparison
-- Network usage monitoring
-```
-
-#### **3.2 Gateway Management UI (Priority: LOW)**
-```python
-# Enhanced Files:
-- app/api/v1/gateway_management.py
-- app/services/gateway_monitoring_service.py
-
-# Features to Add:
-- Gateway testing interfaces
-- Status monitoring dashboard
-- Tabbed settings interface
-```
-
-### **Estimated Timeline: 7 weeks total**
-- **Phase 1**: 2 weeks (Critical systems)
-- **Phase 2**: 3 weeks (Enhanced features)  
-- **Phase 3**: 2 weeks (Advanced analytics)
-
-### **Resource Requirements:**
-- **Backend Developer**: 1 full-time
-- **Database**: PostgreSQL schema updates
-- **Testing**: Comprehensive test coverage for new features
-- **Documentation**: API documentation updates
+| Task | Status | Notes |
+|------|--------|-------|
+| Captive portal templates | PENDING | Customizable HTML/CSS |
+| Portal asset management | PENDING | Images, backgrounds |
+| Welcome message config | PENDING | Custom messaging |
+| Terms & conditions | PENDING | Tenant-specific T&C |
+| Redirect URL config | PENDING | Post-auth destination |
+| Portal preview API | PENDING | Admin preview feature |
 
 ---
 
-## Final Notes
+### Phase 6: Payment Integration Enhancement (PENDING)
 
-- Use `.env` for secrets management
-- Secure Redis and PostgreSQL with password and firewall
-- Limit access to admin routes via RBAC
-- Use rate-limiting and validation on payment webhooks
-- All APIs follow REST or JSON-RPC with proper docs (e.g. Swagger)
-- **Backend is production-ready with all placeholder logic replaced**
-- **Latest audit completed with all critical issues resolved**
+#### Sprint 13: Paystack Integration
+**Status:** PENDING
+**Priority:** MEDIUM
+**Estimated Duration:** 1 week
 
+| Task | Status | Notes |
+|------|--------|-------|
+| Paystack API client | PENDING | HTTP client with circuit breaker |
+| Card payment flow | PENDING | Initialize → Verify |
+| Bank transfer support | PENDING | Transfer receipts |
+| Webhook handlers | PENDING | Event processing |
+| Payment reconciliation | PENDING | Auto-matching |
+
+#### Sprint 14: Advanced Payment Features
+**Status:** PENDING
+**Priority:** MEDIUM
+**Estimated Duration:** 1 week
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Payment gateway abstraction | PENDING | Provider-agnostic interface |
+| Automatic refunds | PENDING | Reversal handling |
+| Partial payments | PENDING | Installment support |
+| Payment reminders | PENDING | Automated dunning |
+| Payment analytics | PENDING | Success rates, trends |
+
+---
+
+### Phase 7: Performance & Scalability (PENDING)
+
+#### Sprint 15: Caching Strategy
+**Status:** PENDING
+**Priority:** HIGH
+**Estimated Duration:** 1 week
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Redis caching layer | PENDING | Hot data caching |
+| Query result caching | PENDING | Expensive queries |
+| Session caching | PENDING | User sessions |
+| Rate limit data | PENDING | Request counters |
+| Cache invalidation | PENDING | Event-based clearing |
+
+**Caching Targets:**
+- Tenant configurations (TTL: 5 minutes)
+- User permissions (TTL: 1 minute)
+- Package definitions (TTL: 10 minutes)
+- Dashboard metrics (TTL: 30 seconds)
+
+#### Sprint 16: Database Optimization
+**Status:** PENDING
+**Priority:** HIGH
+**Estimated Duration:** 1 week
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Index optimization | PENDING | Query performance |
+| Query analysis | PENDING | N+1 detection |
+| Connection pooling | PENDING | Async pool config |
+| Read replicas | PENDING | Read scaling |
+| Partitioning strategy | PENDING | Large table handling |
+
+---
+
+### Phase 8: Security Hardening (PENDING)
+
+#### Sprint 17: Authentication Enhancement
+**Status:** PENDING
+**Priority:** CRITICAL
+**Estimated Duration:** 1 week
+
+| Task | Status | Notes |
+|------|--------|-------|
+| 2FA TOTP implementation | PENDING | Authenticator app support |
+| Password policy enforcement | PENDING | Complexity, history |
+| Session management | PENDING | Device tracking, logout all |
+| Brute force protection | PENDING | Account lockout |
+| IP whitelist/blacklist | PENDING | Access control |
+
+#### Sprint 18: API Security
+**Status:** PENDING
+**Priority:** CRITICAL
+**Estimated Duration:** 1 week
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Rate limiting per tenant | PENDING | Tier-based limits |
+| Request signing | PENDING | Webhook validation |
+| API key management | PENDING | Machine-to-machine auth |
+| Audit logging | PENDING | Security events |
+| Data encryption | PENDING | Sensitive field encryption |
+
+---
+
+### Phase 9: Advanced Analytics (PARTIALLY COMPLETED)
+
+#### Sprint 19: ML-Powered Analytics
+**Status:** PARTIALLY COMPLETED
+**Priority:** LOW
+**Estimated Duration:** 2 weeks
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Revenue forecasting | COMPLETED | scikit-learn models |
+| Customer churn prediction | PENDING | Risk scoring |
+| Usage pattern analysis | PENDING | Anomaly detection |
+| Recommendation engine | PENDING | Package suggestions |
+| Predictive maintenance | PENDING | Router health |
+
+#### Sprint 20: Reporting Enhancement
+**Status:** COMPLETED
+**Duration:** Completed
+
+| Task | Status | Notes |
+|------|--------|-------|
+| PDF report generation | COMPLETED | ReportLab + WeasyPrint |
+| Excel exports | COMPLETED | OpenPyXL |
+| CSV exports | COMPLETED | Pandas/Polars |
+| Scheduled reports | COMPLETED | Celery tasks |
+| Email delivery | COMPLETED | Automated sending |
+
+---
+
+### Phase 10: Testing & Quality (PARTIALLY COMPLETED)
+
+#### Sprint 21: Test Coverage
+**Status:** PARTIALLY COMPLETED
+**Priority:** HIGH
+**Estimated Duration:** 2 weeks
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Unit tests (services) | 40% | Pytest + fixtures |
+| Integration tests (API) | 30% | TestClient |
+| E2E tests | 10% | Full workflow tests |
+| Load testing | PENDING | Locust/k6 |
+| Security testing | PENDING | OWASP checks |
+
+**Coverage Goals:**
+- Services: 80% minimum
+- API endpoints: 90% minimum
+- Critical paths: 100%
+
+---
+
+## Implementation Priority Matrix
+
+### CRITICAL (Must Complete)
+1. **Multi-Tenancy Foundation** (Sprint 9-10)
+   - Tenant isolation is fundamental for SaaS operation
+   - Blocks all tenant-specific features
+
+2. **Security Hardening** (Sprint 17-18)
+   - 2FA for admin accounts
+   - Rate limiting per tenant
+   - Audit logging
+
+### HIGH Priority
+3. **Branding & Customization** (Sprint 11-12)
+   - Tenant branding differentiation
+   - Captive portal customization
+
+4. **Performance Optimization** (Sprint 15-16)
+   - Caching for scalability
+   - Database optimization
+
+### MEDIUM Priority
+5. **Payment Enhancement** (Sprint 13-14)
+   - Paystack for non-Kenya markets
+   - Advanced payment features
+
+### LOW Priority
+6. **Advanced Analytics** (Sprint 19)
+   - ML features are nice-to-have
+   - Can be phased in later
+
+---
+
+## API Endpoint Summary
+
+### Implemented Endpoints: 180+
+
+| Module | Endpoints | Status |
+|--------|-----------|--------|
+| Authentication | 15 | COMPLETED |
+| Users | 20 | COMPLETED |
+| Routers | 25 | COMPLETED |
+| Provisioning | 15 | COMPLETED |
+| Plans | 12 | COMPLETED |
+| Subscriptions | 18 | COMPLETED |
+| Billing | 22 | COMPLETED |
+| Payments/M-PESA | 15 | COMPLETED |
+| Notifications | 18 | COMPLETED |
+| Reports | 12 | COMPLETED |
+| Configuration | 10 | COMPLETED |
+| Licences | 10 | COMPLETED |
+| Support | 8 | COMPLETED |
+
+### Pending Endpoints: ~40
+
+| Module | Endpoints | Status |
+|--------|-----------|--------|
+| Tenants | 15 | PENDING |
+| Branding | 10 | PENDING |
+| Captive Portal | 8 | PENDING |
+| Paystack | 7 | PENDING |
+
+---
+
+## Database Schema Status
+
+### Implemented Tables: 40+
+- users, roles, permissions
+- routers, router_devices, provisioning_sessions
+- plans, subscriptions, invoices, payments
+- notifications, notification_templates
+- licences, sms_credits
+- tickets, ticket_actions
+- configurations, audit_logs
+
+### Pending Tables: ~10
+- tenants, tenant_settings
+- branding_configurations
+- captive_portal_templates
+- api_keys, rate_limits
+
+---
+
+## Background Tasks (Celery)
+
+### Implemented Tasks: 25+
+- Billing cycle processing
+- Invoice generation
+- Payment reminders
+- Subscription expiry checks
+- Router sync tasks
+- Notification delivery
+- Report generation
+- Session cleanup
+
+### Pending Tasks: ~10
+- Tenant usage aggregation
+- Multi-tenant billing
+- Cross-tenant analytics
+- Tenant backup/restore
+
+---
+
+## Verification Checklist
+
+### Backend Health
+- API docs: `http://localhost:8000/docs`
+- Health check: `http://localhost:8000/health`
+- OpenAPI spec: `http://localhost:8000/openapi.json`
+
+### Default Credentials
+- Demo: `demo/demo123`
+- Admin: `admin/admin123`
+- Superuser: `superuser/superuser123`
+
+### Quick Start
+1. Activate virtual environment
+2. Run migrations: `alembic upgrade head`
+3. Seed data: `python -m app.scripts.seed`
+4. Start server: `uvicorn app.main:app --reload`
+
+---
+
+## Risk Register
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Multi-tenant data leakage | CRITICAL | Row-level security, testing |
+| Payment integration failures | HIGH | Circuit breakers, retries |
+| Router API timeouts | MEDIUM | Connection pooling, caching |
+| Database performance | MEDIUM | Indexing, query optimization |
+| Session hijacking | HIGH | Token rotation, IP validation |
+
+---
+
+## Success Metrics
+
+| Metric | Target | Current |
+|--------|--------|---------|
+| API Response Time (P95) | < 200ms | ~150ms |
+| Uptime | 99.9% | N/A (dev) |
+| Test Coverage | > 80% | ~40% |
+| API Endpoints | 220+ | 180+ |
+| Database Tables | 50+ | 40+ |
+
+---
+
+## Timeline Summary
+
+| Phase | Duration | Status |
+|-------|----------|--------|
+| Phase 1: Foundation | - | COMPLETED |
+| Phase 2: Billing | - | COMPLETED |
+| Phase 3: Advanced Features | - | COMPLETED |
+| Phase 4: Multi-Tenancy | 3 weeks | PENDING |
+| Phase 5: Branding | 2 weeks | PENDING |
+| Phase 6: Payment Enhancement | 2 weeks | PENDING |
+| Phase 7: Performance | 2 weeks | PENDING |
+| Phase 8: Security | 2 weeks | PENDING |
+| Phase 9: Analytics | 2 weeks | PARTIAL |
+| Phase 10: Testing | 2 weeks | PARTIAL |
+
+**Total Remaining:** ~10-12 weeks for 100% completion
+
+---
+
+## Next Actions
+
+1. **Immediate:** Begin Sprint 9 (Tenant Foundation)
+2. **Week 2:** Sprint 10 (Tenant Configuration)
+3. **Week 3:** Sprint 11 (Tenant Branding)
+4. **Week 4:** Sprint 12 (Captive Portal)
+5. **Week 5-6:** Security Hardening (Sprint 17-18)
+6. **Week 7-8:** Performance Optimization (Sprint 15-16)
+7. **Week 9-10:** Testing & Documentation (Sprint 21)
+
+---
+
+*This document is maintained as the single source of truth for backend implementation progress.*

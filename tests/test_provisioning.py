@@ -11,7 +11,7 @@ from app.models.provisioning import (
     ServiceType,
     ProvisioningPriority
 )
-from app.services.provisioning_service import ProvisioningService
+from app.modules.provisioning import ProvisioningService
 from app.core.exceptions import ProvisioningError, ValidationError
 
 

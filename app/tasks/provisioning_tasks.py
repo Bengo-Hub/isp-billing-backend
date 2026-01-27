@@ -17,7 +17,7 @@ from app.models.provisioning import (
     ProvisioningStep,
     ProvisioningPriority
 )
-from app.services.provisioning_service import ProvisioningService
+from app.modules.provisioning import ProvisioningService
 
 logger = get_logger(__name__)
 

@@ -81,7 +81,7 @@ def run_with_coverage():
         "--tb=short",
         "--color=yes",
         "--cov=app.integrations.mpesa",
-        "--cov=app.services.mpesa_service",
+        "--cov=app.modules.billing.mpesa",
         "--cov=app.api.v1.mpesa",
         "--cov=app.schemas.mpesa",
         "--cov-report=html",

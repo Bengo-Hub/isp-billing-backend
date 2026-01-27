@@ -1,9 +1,10 @@
 """Application configuration settings."""
 
+import warnings
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -12,7 +13,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "ISP Billing System"
-    app_version: str = "0.1.0"
+    app_version: str = "1.0.0"
     debug: bool = False
     environment: str = "development"
 
@@ -25,6 +26,7 @@ class Settings(BaseSettings):
     database_url: str
     database_pool_size: int = 10
     database_max_overflow: int = 20
+    database_echo: bool = False
 
     # Redis
     redis_url: str
@@ -39,6 +41,16 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
+
+    # Encryption (NEW)
+    encryption_key: Optional[str] = None
+    master_password: Optional[str] = None
+    encryption_salt: Optional[str] = None
+
+    # URL Configuration
+    backend_url: Optional[str] = None  # e.g., https://api.example.com
+    frontend_url: Optional[str] = None  # e.g., https://app.example.com
+    force_https: bool = False  # Force HTTPS for all integration URLs
 
     # CORS
     cors_origins: List[str] = ["http://localhost:3000", "http://localhost:3001"]
@@ -107,7 +119,8 @@ class Settings(BaseSettings):
     backup_retention_days: int = 30
     backup_s3_bucket: Optional[str] = None
 
-    @validator("cors_origins", pre=True)
+    @field_validator("cors_origins", mode="before")
+    @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
         """Parse CORS origins from string or list."""
         if isinstance(v, str) and not v.startswith("["):
@@ -116,19 +129,54 @@ class Settings(BaseSettings):
             return v
         raise ValueError(v)
 
-    @validator("environment")
+    @field_validator("environment")
+    @classmethod
     def validate_environment(cls, v: str) -> str:
         """Validate environment setting."""
         if v not in ["development", "staging", "production"]:
             raise ValueError("Environment must be development, staging, or production")
         return v
 
-    @validator("mpesa_environment")
+    @field_validator("mpesa_environment")
+    @classmethod
     def validate_mpesa_environment(cls, v: str) -> str:
         """Validate MPESA environment setting."""
         if v not in ["sandbox", "production"]:
             raise ValueError("MPESA environment must be sandbox or production")
         return v
+
+    @model_validator(mode="after")
+    def validate_production_secrets(self) -> "Settings":
+        """Validate that production has proper secrets configured."""
+        if self.environment == "production":
+            issues = []
+
+            # Check secret_key
+            if len(self.secret_key) < 32:
+                issues.append("SECRET_KEY must be at least 32 characters in production")
+            dangerous_secrets = ["changeme", "secret", "your-secret-key", "changethis"]
+            if any(d in self.secret_key.lower() for d in dangerous_secrets):
+                issues.append("SECRET_KEY contains default/example values")
+
+            # Check encryption key or master password
+            if not self.encryption_key and not self.master_password:
+                issues.append(
+                    "ENCRYPTION_KEY or MASTER_PASSWORD required in production"
+                )
+
+            # Check database URL
+            if "localhost" in self.database_url or "127.0.0.1" in self.database_url:
+                warnings.warn(
+                    "Database URL points to localhost in production environment",
+                    UserWarning,
+                )
+
+            if issues:
+                raise ValueError(
+                    f"Production configuration validation failed: {'; '.join(issues)}"
+                )
+
+        return self
 
     @property
     def database_url_sync(self) -> str:
@@ -145,17 +193,27 @@ class Settings(BaseSettings):
         """Check if running in development."""
         return self.environment == "development"
 
-    class Config:
-        """Pydantic configuration."""
+    @property
+    def is_staging(self) -> bool:
+        """Check if running in staging."""
+        return self.environment == "staging"
 
-        env_file = ".env"
-        case_sensitive = False
+    model_config = {
+        "env_file": ".env",
+        "case_sensitive": False,
+        "extra": "ignore",
+    }
 
 
 @lru_cache()
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
+
+
+def clear_settings_cache() -> None:
+    """Clear the settings cache. Useful for testing."""
+    get_settings.cache_clear()
 
 
 # Global settings instance

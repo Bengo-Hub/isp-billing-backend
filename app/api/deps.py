@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import verify_token
 from app.models.user import User, UserRole
-from app.services.user_service import UserService
+from app.modules.auth import UserService
 
 
 class OAuth2PasswordBearerOrHTTPBearer(OAuth2PasswordBearer):
@@ -152,7 +152,13 @@ def require_role(required_role: UserRole):
     async def role_checker(
         current_user: User = Depends(get_current_active_user),
     ) -> User:
-        if current_user.role != required_role and current_user.role != UserRole.ADMIN:
+        # Platform owner has access to everything
+        if current_user.role == UserRole.PLATFORM_OWNER:
+            return current_user
+        # ISP_ADMIN is treated as the legacy ADMIN for backwards compatibility
+        if current_user.role == UserRole.ISP_ADMIN and required_role == UserRole.ADMIN:
+            return current_user
+        if current_user.role != required_role:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Insufficient permissions"
@@ -162,8 +168,22 @@ def require_role(required_role: UserRole):
 
 
 def require_admin():
-    """Require admin role."""
-    return require_role(UserRole.ADMIN)
+    """Require admin role (ISP_ADMIN or PLATFORM_OWNER)."""
+    async def role_checker(
+        current_user: User = Depends(get_current_active_user),
+    ) -> User:
+        # Support both old ADMIN role and new ISP_ADMIN role
+        admin_roles = [UserRole.PLATFORM_OWNER, UserRole.ISP_ADMIN]
+        # Also support legacy ADMIN if it exists in enum
+        if hasattr(UserRole, 'ADMIN'):
+            admin_roles.append(UserRole.ADMIN)
+        if current_user.role not in admin_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient permissions"
+            )
+        return current_user
+    return role_checker
 
 
 def require_technician_or_admin():
@@ -171,7 +191,14 @@ def require_technician_or_admin():
     async def role_checker(
         current_user: User = Depends(get_current_active_user),
     ) -> User:
-        if current_user.role not in [UserRole.ADMIN, UserRole.TECHNICIAN]:
+        # Support both old and new role names
+        allowed_roles = [UserRole.PLATFORM_OWNER, UserRole.ISP_ADMIN, UserRole.ISP_TECHNICIAN]
+        # Also support legacy roles if they exist
+        if hasattr(UserRole, 'ADMIN'):
+            allowed_roles.append(UserRole.ADMIN)
+        if hasattr(UserRole, 'TECHNICIAN'):
+            allowed_roles.append(UserRole.TECHNICIAN)
+        if current_user.role not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Insufficient permissions"
@@ -185,7 +212,11 @@ def require_customer_or_admin():
     async def role_checker(
         current_user: User = Depends(get_current_active_user),
     ) -> User:
-        if current_user.role not in [UserRole.ADMIN, UserRole.CUSTOMER]:
+        allowed_roles = [UserRole.PLATFORM_OWNER, UserRole.ISP_ADMIN, UserRole.CUSTOMER]
+        # Also support legacy ADMIN if it exists
+        if hasattr(UserRole, 'ADMIN'):
+            allowed_roles.append(UserRole.ADMIN)
+        if current_user.role not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Insufficient permissions"

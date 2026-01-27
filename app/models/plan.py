@@ -23,39 +23,42 @@ from app.core.database import Base
 class PlanType(str, PyEnum):
     """Plan type enumeration."""
 
-    INTERNET = "internet"
-    HOTSPOT = "hotspot"
-    PPPOE = "pppoe"
-    BOTH = "both"
+    INTERNET = "INTERNET"
+    HOTSPOT = "HOTSPOT"
+    PPPOE = "PPPOE"
+    BOTH = "BOTH"
 
 
 class BillingCycle(str, PyEnum):
     """Billing cycle enumeration."""
 
-    DAILY = "daily"
-    WEEKLY = "weekly"
-    MONTHLY = "monthly"
-    QUARTERLY = "quarterly"
-    YEARLY = "yearly"
-    ONE_TIME = "one_time"
+    DAILY = "DAILY"
+    WEEKLY = "WEEKLY"
+    MONTHLY = "MONTHLY"
+    QUARTERLY = "QUARTERLY"
+    YEARLY = "YEARLY"
+    ONE_TIME = "ONE_TIME"
 
 
 class PlanStatus(str, PyEnum):
     """Plan status enumeration."""
 
-    ACTIVE = "active"
-    INACTIVE = "inactive"
-    DISCONTINUED = "discontinued"
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    DISCONTINUED = "DISCONTINUED"
 
 
 class ServicePlan(Base):
-    """Service plan model."""
+    """Service plan model with multi-tenant support."""
 
     __tablename__ = "service_plans"
 
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
-    
+
+    # Organization (tenant)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+
     # Basic information
     name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
@@ -103,7 +106,15 @@ class ServicePlan(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     
     # Relationships
+    organization = relationship("Organization", back_populates="service_plans")
     subscriptions = relationship("Subscription", back_populates="plan", cascade="all, delete-orphan")
+    features = relationship("PlanFeature", backref="plan", cascade="all, delete-orphan")
+    pricing_tiers = relationship("PlanPricing", backref="plan", cascade="all, delete-orphan")
+
+    @property
+    def pricing(self):
+        """Backward-compatible alias for pricing tiers."""
+        return self.pricing_tiers
 
     @property
     def is_unlimited_data(self) -> bool:

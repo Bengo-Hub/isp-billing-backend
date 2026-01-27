@@ -928,5 +928,5 @@ The system uses the RouterOS API to:
 Enable debug logging to see detailed command execution:
 ```python
 import logging
-logging.getLogger('app.services.provisioning').setLevel(logging.DEBUG)
+logging.getLogger('app.modules.provisioning').setLevel(logging.DEBUG)
 ```

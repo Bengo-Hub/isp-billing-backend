@@ -15,7 +15,7 @@ from app.models.licence import Licence, LicenceStatus, LicencePaymentStatus
 from app.models.router import Router
 from app.models.user import User
 from app.models.subscription import Subscription
-from app.services.licence_service import LicenceService
+from app.modules.licences import LicenceService
 
 logger = get_logger(__name__)
 

@@ -39,7 +39,7 @@ from app.core.security import get_password_hash
 from app.core.config import settings
 from app.models.user import User, UserRole, UserStatus
 from app.models.rbac import Role, Permission, UserPermission, SystemLicence, PermissionModule, PermissionAction
-from app.services.rbac_service import RBACService
+from app.modules.auth import RBACService
 
 
 # Create synchronous engine for setup operations

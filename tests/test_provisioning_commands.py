@@ -3,19 +3,19 @@ Unit tests for provisioning command generation and validation.
 """
 import pytest
 from unittest.mock import Mock, patch
-from app.services.provisioning.commands import (
-    _generate_configuration_commands,
-    _generate_hotspot_commands,
-    _generate_pppoe_commands,
-    _load_command_templates
+from app.modules.provisioning.commands import (
+    generate_configuration_commands,
+    generate_hotspot_commands,
+    generate_pppoe_commands,
+    load_command_templates,
 )
 
 class TestCommandGeneration:
     """Test command generation functions."""
     
-    def test_load_command_templates(self):
+    def testload_command_templates(self):
         """Test that command templates load correctly."""
-        templates = _load_command_templates()
+        templates = load_command_templates()
         
         assert "system" in templates
         assert "network" in templates
@@ -23,7 +23,7 @@ class TestCommandGeneration:
         assert "pppoe" in templates
         assert "security" in templates
         
-    def test_generate_configuration_commands_basic(self):
+    def testgenerate_configuration_commands_basic(self):
         """Test basic configuration command generation."""
         config = {
             "router_identity": "test-router",
@@ -32,7 +32,7 @@ class TestCommandGeneration:
             "custom_subnet": False
         }
         
-        commands = _generate_configuration_commands(config)
+        commands = generate_configuration_commands(config)
         
         assert isinstance(commands, list)
         assert len(commands) > 0
@@ -45,7 +45,7 @@ class TestCommandGeneration:
         bridge_commands = [cmd for cmd in commands if "bridge" in cmd.lower()]
         assert len(bridge_commands) > 0
         
-    def test_generate_configuration_commands_with_anti_sharing(self):
+    def testgenerate_configuration_commands_with_anti_sharing(self):
         """Test configuration with anti-sharing enabled."""
         config = {
             "router_identity": "test-router",
@@ -54,13 +54,13 @@ class TestCommandGeneration:
             "custom_subnet": False
         }
         
-        commands = _generate_configuration_commands(config)
+        commands = generate_configuration_commands(config)
         
         # Check for anti-sharing rules
         anti_sharing_commands = [cmd for cmd in commands if "anti-sharing" in cmd.lower()]
         assert len(anti_sharing_commands) > 0
         
-    def test_generate_configuration_commands_custom_subnet(self):
+    def testgenerate_configuration_commands_custom_subnet(self):
         """Test configuration with custom subnet."""
         config = {
             "router_identity": "test-router",
@@ -71,13 +71,13 @@ class TestCommandGeneration:
             "cidr": 24
         }
         
-        commands = _generate_configuration_commands(config)
+        commands = generate_configuration_commands(config)
         
         # Check for custom IP configuration
         ip_commands = [cmd for cmd in commands if "192.168.100" in cmd]
         assert len(ip_commands) > 0
         
-    def test_generate_hotspot_commands_basic(self):
+    def testgenerate_hotspot_commands_basic(self):
         """Test basic hotspot command generation."""
         config = {
             "enable_hotspot": True,
@@ -85,7 +85,7 @@ class TestCommandGeneration:
             "dns_servers": ["8.8.8.8", "8.8.4.4"]
         }
         
-        commands = _generate_hotspot_commands(config)
+        commands = generate_hotspot_commands(config)
         
         assert isinstance(commands, list)
         assert len(commands) > 0
@@ -98,7 +98,7 @@ class TestCommandGeneration:
         dns_commands = [cmd for cmd in commands if "8.8.8.8" in cmd]
         assert len(dns_commands) > 0
         
-    def test_generate_pppoe_commands_basic(self):
+    def testgenerate_pppoe_commands_basic(self):
         """Test basic PPPoE command generation."""
         config = {
             "enable_pppoe": True,
@@ -106,7 +106,7 @@ class TestCommandGeneration:
             "pppoe_pool": "pppoe-pool"
         }
         
-        commands = _generate_pppoe_commands(config)
+        commands = generate_pppoe_commands(config)
         
         assert isinstance(commands, list)
         assert len(commands) > 0
@@ -124,7 +124,7 @@ class TestCommandGeneration:
             "custom_subnet": False
         }
         
-        commands = _generate_configuration_commands(config)
+        commands = generate_configuration_commands(config)
         
         # Check that all bridge ports are included
         bridge_add_commands = [cmd for cmd in commands if "bridge port add" in cmd.lower()]
@@ -146,7 +146,7 @@ class TestCommandGeneration:
             "cidr": 24
         }
         
-        commands = _generate_configuration_commands(config)
+        commands = generate_configuration_commands(config)
         
         # Check that commands don't contain invalid characters
         for command in commands:
@@ -165,30 +165,30 @@ class TestCommandGeneration:
 class TestCommandExecution:
     """Test command execution with retry logic."""
     
-    @patch('app.services.provisioning.commands.RouterOSApi')
-    def test_execute_command_with_retry_success(self, mock_api_class):
+    @patch('app.modules.provisioning.commands.RouterOSApi')
+    def testexecute_command_with_retry_success(self, mock_api_class):
         """Test successful command execution."""
         mock_api = Mock()
         mock_api_class.return_value = mock_api
         mock_api.execute_command.return_value = {"success": True}
         
-        from app.services.provisioning.commands import _execute_command_with_retry
+        from app.modules.provisioning.commands import execute_command_with_retry
         
-        result = _execute_command_with_retry(mock_api, "/test command", max_retries=3)
+        result = execute_command_with_retry(mock_api, "/test command", max_retries=3)
         
         assert result["success"] is True
         mock_api.execute_command.assert_called_once_with("/test command")
         
-    @patch('app.services.provisioning.commands.RouterOSApi')
-    def test_execute_command_with_retry_failure(self, mock_api_class):
+    @patch('app.modules.provisioning.commands.RouterOSApi')
+    def testexecute_command_with_retry_failure(self, mock_api_class):
         """Test command execution with retries."""
         mock_api = Mock()
         mock_api_class.return_value = mock_api
         mock_api.execute_command.side_effect = Exception("Connection failed")
         
-        from app.services.provisioning.commands import _execute_command_with_retry
+        from app.modules.provisioning.commands import execute_command_with_retry
         
-        result = _execute_command_with_retry(mock_api, "/test command", max_retries=2)
+        result = execute_command_with_retry(mock_api, "/test command", max_retries=2)
         
         assert result["success"] is False
         assert "Connection failed" in result["error"]

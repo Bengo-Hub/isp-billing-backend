@@ -1,20 +1,38 @@
 """FastAPI application entry point."""
 
+import logging
+import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import HTTPBearer
+from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.api.v1 import auth, billing, notifications, plans, routers, subscriptions, users, reports, configuration, mpesa
 from app.core.config import settings
 from app.core.database import init_db
+from app.core.errors import register_exception_handlers
 from app.core.logging import setup_logging
 from app.core.seed_middleware import SeedMiddleware
-from app.services.initialization_service import initialization_service
+from app.core.tenant_middleware import TenantMiddleware
+from app.modules.system import initialization_service
+
+logger = logging.getLogger(__name__)
+
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """Middleware to add request ID for tracing."""
+
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        request.state.trace_id = request_id
+
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
 
 
 @asynccontextmanager
@@ -22,19 +40,34 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan events."""
     # Startup
     setup_logging()
-    
+    logger.info(f"Starting {settings.app_name} v{settings.app_version}")
+    logger.info(f"Environment: {settings.environment}")
+
     # Initialize database
     await init_db()
-    
+
+    # Get encryption key from settings (no more hardcoded fallback in production)
+    encryption_key = settings.encryption_key or settings.master_password
+    if not encryption_key and settings.is_production:
+        logger.error("No encryption key configured for production!")
+        raise RuntimeError("ENCRYPTION_KEY or MASTER_PASSWORD required in production")
+
+    # Use a development default only in non-production
+    if not encryption_key:
+        logger.warning("Using development encryption key - NOT FOR PRODUCTION")
+        encryption_key = "dev-only-key-do-not-use-in-production"
+
     # Auto-initialize system (configurations, admin user)
-    encryption_key = getattr(settings, 'encryption_key', 'default-encryption-key-change-in-production')
     await initialization_service.initialize_all(
         database_url=settings.database_url,
         encryption_key=encryption_key
     )
-    
+
+    logger.info("Application startup complete")
     yield
+
     # Shutdown
+    logger.info("Application shutting down")
     pass
 
 
@@ -42,13 +75,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 security_scheme = HTTPBearer()
 
 # Create FastAPI application
+# Docs are always enabled for API documentation access
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description="ISP Billing System API - Comprehensive billing platform for ISPs",
-    docs_url="/docs" if settings.debug else None,
-    redoc_url="/redoc" if settings.debug else None,
-    openapi_url="/openapi.json" if settings.debug else None,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
     lifespan=lifespan,
     openapi_tags=[
         {"name": "Authentication", "description": "User authentication and authorization"},
@@ -59,6 +93,15 @@ app = FastAPI(
         {"name": "Billing & Payments", "description": "Billing and payment operations"},
         {"name": "Notifications & Support", "description": "Notification and support ticket management"},
         {"name": "Reports & Analytics", "description": "Reports and analytics with file export capabilities"},
+        {"name": "Platform - Organizations", "description": "ISP provider management (Platform Owner only)"},
+        {"name": "Platform - Billing", "description": "Platform billing and invoices (Platform Owner only)"},
+        {"name": "Platform - Analytics", "description": "Platform-wide analytics (Platform Owner only)"},
+        {"name": "Platform - Subscription Tiers", "description": "Subscription tier management (Platform Owner only)"},
+        {"name": "Portal - Hotspot", "description": "Hotspot customer portal for package purchase and vouchers"},
+        {"name": "Portal - PPPoE", "description": "PPPoE customer portal for usage and subscription management"},
+        {"name": "Tenant - Payment Gateways", "description": "Payment gateway configuration for ISP providers"},
+        {"name": "Tenant - Settings", "description": "Organization settings for ISP providers"},
+        {"name": "Onboarding", "description": "ISP provider signup and registration"},
     ],
 )
 
@@ -117,8 +160,15 @@ def custom_openapi():
         "/", "/health", "/docs", "/redoc", "/openapi.json",
         "/api/v1/auth/login", "/api/v1/auth/register", "/api/v1/auth/refresh",
         "/api/v1/auth/verify", "/api/v1/auth/forgot-password", "/api/v1/auth/reset-password",
-        "/api/v1/auth/verify-email", "/api/v1/auth/verify-phone"
+        "/api/v1/auth/verify-email", "/api/v1/auth/verify-phone",
     }
+
+    # Portal and onboarding endpoints are public (access without JWT)
+    public_path_prefixes = [
+        "/api/v1/portal/hotspot/",
+        "/api/v1/portal/pppoe/",
+        "/api/v1/onboarding/",
+    ]
     
     # Add default examples to login endpoint
     if "/api/v1/auth/login" in openapi_schema["paths"]:
@@ -164,9 +214,17 @@ def custom_openapi():
         for method in openapi_schema["paths"][path]:
             if method in ["get", "post", "put", "patch", "delete"]:
                 endpoint = openapi_schema["paths"][path][method]
-                
+
+                # Check if path is public
+                is_public = path in public_paths
+                if not is_public:
+                    for prefix in public_path_prefixes:
+                        if path.startswith(prefix):
+                            is_public = True
+                            break
+
                 # Only add security to protected endpoints
-                if path not in public_paths and "security" not in endpoint:
+                if not is_public and "security" not in endpoint:
                     # Use OAuth2PasswordBearer as primary (for Swagger UI), BearerAuth as fallback
                     endpoint["security"] = [
                         {"OAuth2PasswordBearer": []},
@@ -177,7 +235,7 @@ def custom_openapi():
     openapi_schema["info"]["contact"] = {
         "name": "ISP Billing System Support",
         "email": "support@ispbilling.com",
-        "url": "https://github.com/your-org/isp-billing-system"
+        "url": "https://github.com/Bengo-Hub/isp-billing-backend"
     }
     
     openapi_schema["info"]["license"] = {
@@ -202,6 +260,12 @@ def custom_openapi():
 
 app.openapi = custom_openapi
 
+# Register custom exception handlers
+register_exception_handlers(app)
+
+# Add request ID middleware for tracing
+app.add_middleware(RequestIDMiddleware)
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -221,23 +285,19 @@ if settings.is_production:
 # Add seed middleware to ensure RBAC initialization
 app.add_middleware(SeedMiddleware)
 
+# Add tenant middleware for multi-tenancy support
+app.add_middleware(TenantMiddleware)
+
 
 # Include API routers using the consolidated v1 router
 from app.api.v1 import api_router
 app.include_router(api_router, prefix="/api/v1")
 
 
-@app.get("/")
-async def root() -> JSONResponse:
-    """Root endpoint."""
-    return JSONResponse(
-        content={
-            "message": f"Welcome to {settings.app_name}",
-            "version": settings.app_version,
-            "environment": settings.environment,
-            "docs_url": "/docs" if settings.debug else None,
-        }
-    )
+@app.get("/", include_in_schema=False)
+async def root():
+    """Root endpoint - redirects to Swagger UI documentation."""
+    return RedirectResponse(url="/docs")
 
 
 @app.get("/health")

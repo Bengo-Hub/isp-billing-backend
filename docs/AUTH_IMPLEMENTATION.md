@@ -90,7 +90,7 @@ class AuthService:
         )
         
         # Get user permissions and licence
-        from app.services.rbac_service import RBACService
+        from app.modules.auth import RBACService
         rbac_service = RBACService(self.db)
         
         permissions = rbac_service.get_user_permissions(user.id)
@@ -135,7 +135,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.services.auth_service import AuthService
+from app.modules.auth import AuthService
 from app.schemas.auth import LoginResponse, TokenResponse
 
 router = APIRouter()

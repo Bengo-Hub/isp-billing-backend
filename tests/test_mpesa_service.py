@@ -10,7 +10,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime
 
-from app.services.mpesa_service import MpesaService
+from app.modules.billing import MpesaService
 from app.core.exceptions import ValidationError, ExternalServiceError, BillingError
 from app.models.user import User, UserRole, UserStatus
 from app.models.billing import Payment, PaymentStatus, PaymentMethod

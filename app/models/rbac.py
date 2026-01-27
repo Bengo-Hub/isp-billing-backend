@@ -22,25 +22,62 @@ from app.core.database import Base
 
 
 class PermissionModule(str, PyEnum):
-    """Permission module enumeration."""
+    """Permission module enumeration for multi-tenant access control."""
+
+    # Platform Owner modules (Super Admin) - ISP Software Provider
+    PLATFORM_ORGANIZATIONS = "platform_organizations"  # Manage ISP providers
+    PLATFORM_BILLING = "platform_billing"  # Platform invoices, payments
+    PLATFORM_ANALYTICS = "platform_analytics"  # Platform-wide stats
+    PLATFORM_CONFIG = "platform_config"  # System configuration
+    PLATFORM_TIERS = "platform_tiers"  # Subscription tiers
     
-    # Core modules
+    # Platform Integration modules (Platform Owner only)
+    PLATFORM_INTEGRATIONS = "platform_integrations"  # Manage integration configs
+    PLATFORM_INTEGRATIONS_SECRETS = "platform_integrations_secrets"  # View/edit API keys, secrets
+    PLATFORM_INTEGRATIONS_URLS = "platform_integrations_urls"  # View/edit callback/webhook URLs
+    PLATFORM_PAYMENT_GATEWAYS = "platform_payment_gateways"  # Platform-level gateway setup
+    PLATFORM_SMS_GATEWAYS = "platform_sms_gateways"  # Platform-level SMS gateway setup
+    PLATFORM_EMAIL_GATEWAYS = "platform_email_gateways"  # Platform-level email gateway setup
+
+    # ISP Provider modules (Admin/Technician)
     DASHBOARD = "dashboard"
-    USERS = "users"
-    PACKAGES = "packages"
+    USERS = "users"  # Staff and customers
+    CUSTOMERS = "customers"  # Customer management
+    PACKAGES = "packages"  # Service plans
     ROUTERS = "routers"
     PROVISIONING = "provisioning"
-    PAYMENTS = "payments"
+    PAYMENTS = "payments"  # ISP payments
+    PAYMENT_GATEWAYS = "payment_gateways"  # Gateway configuration
     SMS = "sms"
-    SETTINGS = "settings"
+    VOUCHERS = "vouchers"  # Voucher management
+    SETTINGS = "settings"  # Organization settings
     REPORTS = "reports"
     NOTIFICATIONS = "notifications"
-    
-    # Advanced modules
-    SYSTEM_CONFIG = "system_config"
-    LICENCE_MANAGEMENT = "licence_management"
+    SUPPORT = "support"  # Support tickets
+
+    # Advanced ISP modules
+    BILLING = "billing"  # Invoices, billing cycles
+    SUBSCRIPTIONS = "subscriptions"
+    ANALYTICS = "analytics"  # ISP analytics
+    BRANDING = "branding"  # Portal branding
     AUDIT_LOGS = "audit_logs"
     BACKUP_RESTORE = "backup_restore"
+    
+    # ISP Tenant Integration modules (ISP Admin only - limited access)
+    TENANT_PAYMENT_CONFIG = "tenant_payment_config"  # Select gateway, account details
+    TENANT_SMS_CONFIG = "tenant_sms_config"  # Select SMS provider, top-up
+    TENANT_PAYOUT_CONFIG = "tenant_payout_config"  # Payout schedule, account details
+
+    # Customer Portal modules
+    CUSTOMER_DASHBOARD = "customer_dashboard"
+    CUSTOMER_PACKAGES = "customer_packages"
+    CUSTOMER_PAYMENTS = "customer_payments"
+    CUSTOMER_USAGE = "customer_usage"
+    CUSTOMER_PROFILE = "customer_profile"
+
+    # Legacy modules (backward compatibility)
+    SYSTEM_CONFIG = "platform_config"  # Maps to PLATFORM_CONFIG
+    LICENCE_MANAGEMENT = "platform_tiers"  # Maps to PLATFORM_TIERS
 
 
 class PermissionAction(str, PyEnum):

@@ -38,6 +38,8 @@ class LicenceSeeder:
         """Seed Centipid licences with realistic data."""
         if clear_existing:
             await self._clear_licences()
+            if count == 0:
+                return []
 
         licences = []
         
@@ -52,6 +54,9 @@ class LicenceSeeder:
         
         # Create licence features
         await self._create_licence_features()
+        
+        # Ensure licences have primary keys assigned before creating dependent records
+        await self.db.flush()
         
         # Create licence payments and usage logs
         for licence in licences:
@@ -368,6 +373,10 @@ class LicenceSeeder:
                 weights=[90, 10]
             )[0]
             
+            # Calculate billing period for this payment
+            billing_start = payment_date
+            billing_end = payment_date + timedelta(days=30)
+            
             payment = LicencePayment(
                 licence_id=licence.id,
                 amount=licence.monthly_cost,
@@ -376,12 +385,10 @@ class LicenceSeeder:
                 payment_reference=f"MP{random.randint(100000000, 999999999)}",
                 payment_date=payment_date,
                 status=payment_status,
-                transaction_fee=licence.monthly_cost * Decimal("0.01"),  # 1% fee
-                payment_metadata={
-                    "phone_number": licence.contact_phone,
-                    "payment_type": "automatic",
-                    "seeded": True
-                },
+                billing_period_start=billing_start,
+                billing_period_end=billing_end,
+                extends_licence_until=billing_end,
+                is_renewal=(i > 0),  # First payment is initial, rest are renewals
                 notes=f"Automated payment for {licence.licence_name}"
             )
             
@@ -405,19 +412,18 @@ class LicenceSeeder:
             usage_log = LicenceUsageLog(
                 licence_id=licence.id,
                 log_date=log_date,
-                routers_used=daily_routers,
-                users_active=daily_users,
-                concurrent_sessions_peak=daily_sessions,
+                log_type="daily",
+                routers_count=daily_routers,
+                users_count=daily_users,
+                active_sessions=daily_sessions,
                 data_transferred_gb=Decimal(str(random.uniform(10.0, 1000.0))),
-                transactions_processed=random.randint(10, 500),
-                api_calls_made=random.randint(0, 10000) if licence.has_feature("api_access") else 0,
-                uptime_percentage=random.uniform(95.0, 100.0),
-                performance_score=random.uniform(85.0, 100.0),
-                usage_metadata={
-                    "peak_hour": random.randint(19, 23),  # Evening peak
-                    "average_session_duration": random.randint(30, 300),
-                    "top_bandwidth_users": random.randint(5, 20)
-                }
+                total_transactions=random.randint(10, 500),
+                api_calls_count=random.randint(0, 10000) if licence.has_feature("api_access") else 0,
+                system_uptime_percentage=Decimal(str(random.uniform(95.0, 100.0))),
+                average_response_time_ms=random.randint(50, 300),
+                error_rate_percentage=Decimal(str(random.uniform(0.0, 5.0))),
+                daily_revenue=licence.monthly_cost / 30,
+                monthly_revenue=licence.monthly_cost
             )
             
             self.db.add(usage_log)

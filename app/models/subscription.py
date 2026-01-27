@@ -39,13 +39,16 @@ class SubscriptionType(str, PyEnum):
 
 
 class Subscription(Base):
-    """User subscription model."""
+    """User subscription model with multi-tenant support."""
 
     __tablename__ = "subscriptions"
 
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
-    
+
+    # Organization (tenant)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+
     # Foreign keys
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     plan_id = Column(Integer, ForeignKey("service_plans.id"), nullable=False)
@@ -90,6 +93,7 @@ class Subscription(Base):
     )
 
     # Relationships
+    organization = relationship("Organization", back_populates="subscriptions")
     user = relationship("User", back_populates="subscriptions", foreign_keys=[user_id])
     plan = relationship("ServicePlan", back_populates="subscriptions")
     router = relationship("Router", back_populates="subscriptions")

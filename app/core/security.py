@@ -17,6 +17,7 @@ class TokenData(BaseModel):
     user_id: Optional[int] = None
     username: Optional[str] = None
     role: Optional[str] = None
+    organization_id: Optional[int] = None
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -97,18 +98,34 @@ def verify_token(token: str, token_type: str = "access") -> Optional[TokenData]:
         user_id_str: str = payload.get("sub")
         username: str = payload.get("username")
         role: str = payload.get("role")
+        organization_id = payload.get("organization_id")
         if user_id_str is None or username is None:
             return None
         # Convert string user_id back to int
         user_id = int(user_id_str)
-        return TokenData(user_id=user_id, username=username, role=role)
+        return TokenData(
+            user_id=user_id,
+            username=username,
+            role=role,
+            organization_id=organization_id
+        )
     except InvalidTokenError:
         return None
 
 
-def create_token_pair(user_id: int, username: str, role: str) -> Dict[str, str]:
+def create_token_pair(
+    user_id: int,
+    username: str,
+    role: str,
+    organization_id: Optional[int] = None
+) -> Dict[str, str]:
     """Create both access and refresh tokens."""
-    token_data = {"sub": str(user_id), "username": username, "role": role}
+    token_data = {
+        "sub": str(user_id),
+        "username": username,
+        "role": role,
+        "organization_id": organization_id,
+    }
     access_token = create_access_token(token_data)
     refresh_token = create_refresh_token(token_data)
     return {

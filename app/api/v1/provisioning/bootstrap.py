@@ -3,10 +3,14 @@ Bootstrap endpoints for MikroTik device provisioning.
 Handles initial device connection and script generation.
 """
 import logging
+import secrets
+from datetime import datetime, timedelta
+from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from app.models.user import User
-from app.api.deps import require_technician_or_admin
+from app.api.deps import require_technician_or_admin, get_db
+from app.core.security import create_access_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -18,50 +22,48 @@ async def get_bootstrap_command(
     identity: str = Query("MikroTik"),
     api_port: int = Query(8728),
     interface: str = Query("ether2"),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_technician_or_admin()),
 ):
     """Generate a one-liner RouterOS command for initial device provisioning with proper access token.
-    
+
     This command downloads and executes the bootstrap script from the current domain.
     The script enables API access and sets basic device configuration.
     """
     try:
         # Get the current domain from the request
         base = f"{request.url.scheme}://{request.url.netloc}"
-        
-        # Generate provisioning token for this specific router
-        from app.services.auth_service import AuthService
-        from app.core.database import get_db
-        
-        db = next(get_db())
-        auth_service = AuthService(db)
-        
-        # Create provisioning token with limited permissions
-        provisioning_token = auth_service.create_provisioning_token(
-            user_id=current_user.id,
-            router_id=0,  # Will be updated when router is created
-            permissions=["provisioning.execute", "router.configure"]
-        )
-        
+
+        # Generate provisioning token with limited permissions (1 hour expiry)
+        token_data = {
+            "sub": str(current_user.id),
+            "username": current_user.username,
+            "role": current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role),
+            "type": "provisioning",
+            "permissions": ["provisioning.execute", "router.configure"],
+            "nonce": secrets.token_hex(8),  # Unique per request
+        }
+        provisioning_token = create_access_token(token_data, expires_delta=timedelta(hours=1))
+
         # Generate the command with token similar to Centipid's approach
         script_url = f"{base}/api/v1/provisioning/bootstrap/script?token={provisioning_token}&identity={identity}&api_port={api_port}&interface={interface}"
         command = f"/tool fetch mode=https url=\"{script_url}\" dst-path=codevertex.rsc; delay 2s; import codevertex.rsc;"
-        
+
         notes = [
             "If device mode is not allowed, run: /system/device-mode update mode=advanced",
             "Ensure the device has internet access to fetch the script",
             "The delay ensures the file is fully downloaded before import",
             "The token provides secure access to the provisioning script",
         ]
-        
+
         return {
-            "command": command, 
-            "script_url": script_url, 
+            "command": command,
+            "script_url": script_url,
             "token": provisioning_token,
             "expires_in": 3600,  # 1 hour
             "notes": notes
         }
-    
+
     except Exception as e:
         logger.error(f"Failed to generate bootstrap command: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate bootstrap command")
@@ -81,19 +83,15 @@ async def get_bootstrap_script(
     The advanced configuration is later handled by the provisioning workflow.
     """
     try:
-        # Verify provisioning token
-        from app.services.auth_service import AuthService
-        from app.core.database import get_db
-        
-        db = next(get_db())
-        auth_service = AuthService(db)
-        
-        token_data = auth_service.verify_provisioning_token(token)
-        if not token_data:
+        # Verify provisioning token using the security module
+        from app.core.security import verify_token
+
+        token_data = verify_token(token, token_type="access")
+        if not token_data or not hasattr(token_data, 'user_id'):
             raise HTTPException(status_code=401, detail="Invalid provisioning token")
-        
+
         # Log the provisioning attempt
-        logger.info(f"Provisioning script requested by user {token_data['sub']} for router {token_data.get('router_id', 'pending')}")
+        logger.info(f"Provisioning script requested by user {token_data.user_id} for identity: {identity}")
         
         lines = [
             "; Codevertex bootstrap script - Initial device setup",

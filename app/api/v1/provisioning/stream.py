@@ -8,7 +8,7 @@ import asyncio
 from typing import Dict, Set
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from fastapi.websockets import WebSocketState
-from app.services.provisioning_service import ProvisioningService
+from app.modules.provisioning import ProvisioningService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

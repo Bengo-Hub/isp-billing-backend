@@ -167,7 +167,7 @@ All MPESA callbacks are verified using the official Safaricom public key:
 ### Python Service Usage
 
 ```python
-from app.services.mpesa_service import MpesaService
+from app.modules.billing import MpesaService
 
 # Initialize service
 mpesa_service = MpesaService(db, environment="sandbox")

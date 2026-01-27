@@ -5,8 +5,11 @@ import asyncio
 import sys
 from pathlib import Path
 
-# Add the app directory to the Python path
-sys.path.append(str(Path(__file__).parent.parent))
+# Ensure environment variables are loaded like other scripts
+backend_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(backend_dir))
+from scripts.seed_env import setup_seed_environment
+setup_seed_environment()
 
 from sqlalchemy.ext.asyncio import create_async_engine
 from app.core.config import settings

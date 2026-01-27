@@ -21,12 +21,22 @@ from app.core.database import Base
 
 
 class UserRole(str, PyEnum):
-    """User role enumeration."""
+    """User role enumeration for multi-tenant access control."""
 
-    SUPERUSER = "superuser"
-    ADMIN = "admin"
-    TECHNICIAN = "technician"
-    CUSTOMER = "customer"
+    # Platform level - ISP Billing Software owner
+    PLATFORM_OWNER = "platform_owner"  # Super admin with platform-wide access
+
+    # Organization level - ISP Provider users
+    ISP_ADMIN = "isp_admin"  # ISP Provider admin with full tenant access
+    ISP_TECHNICIAN = "isp_technician"  # ISP technician with limited access
+
+    # Customer level - End users
+    CUSTOMER = "customer"  # Hotspot/PPPoE customer
+
+    # Legacy aliases (for backward compatibility)
+    SUPERUSER = "platform_owner"  # Maps to PLATFORM_OWNER
+    ADMIN = "isp_admin"  # Maps to ISP_ADMIN
+    TECHNICIAN = "isp_technician"  # Maps to ISP_TECHNICIAN
 
 
 class UserStatus(str, PyEnum):
@@ -39,20 +49,23 @@ class UserStatus(str, PyEnum):
 
 
 class User(Base):
-    """User model."""
+    """User model with multi-tenant support."""
 
     __tablename__ = "users"
 
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
-    
+
+    # Organization (tenant) - null for platform owners
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+
     # Basic information
     username = Column(String(50), unique=True, index=True, nullable=False)
     email = Column(String(100), unique=True, index=True, nullable=False)
     phone = Column(String(20), unique=True, index=True, nullable=True)
     first_name = Column(String(50), nullable=False)
     last_name = Column(String(50), nullable=False)
-    company_name = Column(String(200), nullable=True)  # For ISP providers
+    company_name = Column(String(200), nullable=True)  # For ISP providers (legacy)
     
     # Authentication
     hashed_password = Column(String(255), nullable=False)
@@ -75,6 +88,9 @@ class User(Base):
     email_verified_at = Column(DateTime, nullable=True)
     phone_verified_at = Column(DateTime, nullable=True)
     
+    # Organization relationship
+    organization = relationship("Organization", back_populates="users", foreign_keys=[organization_id])
+
     # RBAC relationships
     role_obj = relationship("Role", back_populates="users", foreign_keys=[role_id])
     permission_overrides = relationship("UserPermission", back_populates="user", cascade="all, delete-orphan")
@@ -95,6 +111,7 @@ class User(Base):
         """Convert user model to dictionary."""
         return {
             "id": self.id,
+            "organization_id": self.organization_id,
             "username": self.username,
             "email": self.email,
             "phone": self.phone,
@@ -112,8 +129,28 @@ class User(Base):
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "email_verified_at": self.email_verified_at.isoformat() if self.email_verified_at else None,
             "phone_verified_at": self.phone_verified_at.isoformat() if self.phone_verified_at else None,
-            "full_name": self.full_name
+            "full_name": self.full_name,
         }
+
+    @property
+    def is_platform_owner(self) -> bool:
+        """Check if user is a platform owner."""
+        return self.role == UserRole.PLATFORM_OWNER and self.organization_id is None
+
+    @property
+    def is_isp_admin(self) -> bool:
+        """Check if user is an ISP admin."""
+        return self.role == UserRole.ISP_ADMIN and self.organization_id is not None
+
+    @property
+    def is_isp_technician(self) -> bool:
+        """Check if user is an ISP technician."""
+        return self.role == UserRole.ISP_TECHNICIAN and self.organization_id is not None
+
+    @property
+    def is_customer(self) -> bool:
+        """Check if user is a customer."""
+        return self.role == UserRole.CUSTOMER
 
     def __repr__(self) -> str:
         """String representation."""

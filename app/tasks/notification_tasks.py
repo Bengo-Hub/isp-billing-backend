@@ -13,7 +13,7 @@ from app.core.logging import get_logger
 from app.models.notification import Notification, NotificationType, NotificationStatus
 from app.models.billing import Invoice, InvoiceStatus
 from app.models.user import User
-from app.services.notification_service import NotificationService
+from app.modules.notifications import NotificationService
 
 logger = get_logger(__name__)
 
@@ -167,7 +167,7 @@ def send_payment_reminders(self):
     try:
         async def _send_reminders():
             async with AsyncSessionLocal() as db:
-                from app.services.billing_service import BillingService
+                from app.modules.billing import BillingService
                 billing_service = BillingService(db)
                 notification_service = NotificationService(db)
                 
@@ -222,7 +222,7 @@ def send_subscription_expiry_warnings(self):
     try:
         async def _send_warnings():
             async with AsyncSessionLocal() as db:
-                from app.services.subscription_service import SubscriptionService
+                from app.modules.subscriptions import SubscriptionService
                 subscription_service = SubscriptionService(db)
                 notification_service = NotificationService(db)
                 
@@ -346,7 +346,7 @@ def process_notification_queue(self):
                         # Process notification based on type
                         if notification.notification_type == "email":
                             # Send email using notification service
-                            from app.services.notification_service import NotificationService
+                            from app.modules.notifications import NotificationService
                             notification_service = NotificationService(db)
                             await notification_service.send_email_notification(
                                 to_email=notification.recipient,
@@ -355,7 +355,7 @@ def process_notification_queue(self):
                             )
                         elif notification.notification_type == "sms":
                             # Send SMS using notification service
-                            from app.services.notification_service import NotificationService
+                            from app.modules.notifications import NotificationService
                             notification_service = NotificationService(db)
                             await notification_service.send_sms_notification(
                                 to_phone=notification.recipient,

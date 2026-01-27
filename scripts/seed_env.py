@@ -20,15 +20,15 @@ def setup_seed_environment():
     # Check if .env file exists in parent directory
     env_file = Path(__file__).parent.parent / ".env"
     if env_file.exists():
-        print(f"📄 Using .env file: {env_file}")
+        print(f"[INFO] Using .env file: {env_file}")
         # Load .env file if it exists
         try:
             from dotenv import load_dotenv
             load_dotenv(env_file)
         except ImportError:
-            print("⚠️  python-dotenv not installed, using default values")
+            print("[WARN] python-dotenv not installed, using default values")
     else:
-        print("⚠️  No .env file found, using default values for seeding")
+        print("[WARN] No .env file found, using default values for seeding")
 
 # Setup environment when this module is imported
 setup_seed_environment()

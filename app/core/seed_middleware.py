@@ -8,7 +8,7 @@ from app.core.database import engine
 from app.core.security import get_password_hash
 from app.models.user import User, UserRole, UserStatus
 from app.models.rbac import Role, SystemLicence, Permission, UserPermission
-from app.services.rbac_service import RBACService
+from app.modules.auth import RBACService
 from sqlalchemy.orm import sessionmaker
 
 
@@ -30,8 +30,9 @@ class SeedMiddleware(BaseHTTPMiddleware):
     
     async def _ensure_seeded(self):
         """Ensure demo and superuser accounts exist."""
-        # Create a session factory
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        # Create a session factory bound to the synchronous engine to avoid
+        # mixing async engine with synchronous sessions (caused AsyncConnection errors)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine.sync_engine)
         db = SessionLocal()
         try:
             rbac_service = RBACService(db)

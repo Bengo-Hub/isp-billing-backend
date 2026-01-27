@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_db
 from app.models.user import User
 from app.models.rbac import PermissionModule, PermissionAction
-from app.services.rbac_service import RBACService
+from app.modules.auth import RBACService
 
 
 def require_permission(

@@ -36,6 +36,8 @@ class PlanSeeder:
         """Seed service plans with realistic ISP packages."""
         if clear_existing:
             await self._clear_plans()
+            if count == 0:
+                return []
 
         plans = []
         
@@ -158,7 +160,14 @@ class PlanSeeder:
                 description=plan_data["description"],
                 plan_type=plan_data["plan_type"],
                 status=PlanStatus.ACTIVE,
-                is_active=True,
+                price=plan_data["price"],
+                currency="KES",
+                billing_cycle=plan_data["billing_cycle"],
+                download_speed=plan_data["download_speed"],
+                upload_speed=plan_data["upload_speed"],
+                data_limit=plan_data["data_limit"],
+                time_limit=plan_data["time_limit"],
+                validity_days=plan_data["validity_days"],
                 sort_order=len(plans) + 1,
                 created_at=datetime.utcnow() - timedelta(days=random.randint(1, 90))
             )
@@ -194,31 +203,38 @@ class PlanSeeder:
                 }
             ]
             
-            for feature_data in features:
+            for idx, feature_data in enumerate(features):
                 feature = PlanFeature(
                     plan_id=plan.id,
                     feature_name=feature_data["feature_name"],
                     feature_value=feature_data["feature_value"],
-                    feature_type=feature_data["feature_type"],
-                    is_core_feature=feature_data["is_core_feature"],
-                    is_visible=True,
-                    sort_order=len(features)
+                    is_included=feature_data["is_core_feature"],
+                    sort_order=idx
                 )
                 
                 self.db.add(feature)
             
-            # Create plan pricing
+            # Create plan pricing tiers (monthly and annual)
             pricing = PlanPricing(
                 plan_id=plan.id,
+                duration_months=1,  # Monthly
                 price=plan_data["price"],
-                currency="KES",
-                billing_cycle=plan_data["billing_cycle"],
-                is_active=True,
-                valid_from=datetime.utcnow(),
-                valid_until=datetime.utcnow() + timedelta(days=365)
+                discount_percentage=Decimal("0"),
+                is_active=True
             )
             
             self.db.add(pricing)
+            
+            # Add annual pricing with discount
+            annual_pricing = PlanPricing(
+                plan_id=plan.id,
+                duration_months=12,  # Annual
+                price=plan_data["price"] * 10,  # 2 months free
+                discount_percentage=Decimal("16.67"),
+                is_active=True
+            )
+            
+            self.db.add(annual_pricing)
             plans.append(plan)
         
         return plans
@@ -250,8 +266,15 @@ class PlanSeeder:
                 name=f"Custom {plan_type.value.title()} {download_speed}Mbps",
                 description=f"Custom {plan_type.value} plan with {download_speed}Mbps speed",
                 plan_type=plan_type,
-                status=random.choice([PlanStatus.ACTIVE, PlanStatus.DRAFT]),
-                is_active=random.choice([True, True, False]),  # 66% active
+                status=random.choice([PlanStatus.ACTIVE, PlanStatus.INACTIVE]),
+                price=price,
+                currency="KES",
+                billing_cycle=BillingCycle.MONTHLY,
+                download_speed=download_speed,
+                upload_speed=upload_speed,
+                data_limit=data_limit,
+                time_limit=-1,  # Unlimited
+                validity_days=validity_days,
                 sort_order=100 + i,
                 created_at=datetime.utcnow() - timedelta(days=random.randint(1, 180))
             )
@@ -262,12 +285,10 @@ class PlanSeeder:
             # Create pricing
             pricing = PlanPricing(
                 plan_id=plan.id,
+                duration_months=1,
                 price=price,
-                currency="KES",
-                billing_cycle=BillingCycle.MONTHLY,
-                is_active=True,
-                valid_from=datetime.utcnow(),
-                valid_until=datetime.utcnow() + timedelta(days=365)
+                discount_percentage=Decimal("0"),
+                is_active=True
             )
             
             self.db.add(pricing)
@@ -279,6 +300,8 @@ class PlanSeeder:
         """Seed package templates."""
         if clear_existing:
             await self._clear_package_templates()
+            if count == 0:
+                return []
 
         templates = []
         
@@ -364,15 +387,28 @@ class PlanSeeder:
             }
         ]
         
-        # Get admin user for created_by
+        # Get admin user for created_by (prefer platform owner or ISP admin)
         from app.models.user import User, UserRole
-        from sqlalchemy import select
+        from sqlalchemy import select, or_
         
+        # Prefer platform owner or an ISP admin; fallback to any user if none found
         result = await self.db.execute(
-            select(User).where(User.role == UserRole.ADMIN).limit(1)
+            select(User).where(
+                or_(
+                    User.role == UserRole.PLATFORM_OWNER,
+                    User.role == UserRole.ISP_ADMIN,
+                    User.role == UserRole.ADMIN
+                )
+            ).limit(1)
         )
         admin_user = result.scalar_one_or_none()
-        admin_id = admin_user.id if admin_user else 1
+        if not admin_user:
+            # Pick any existing user as a fallback
+            result = await self.db.execute(select(User).limit(1))
+            admin_user = result.scalar_one_or_none()
+        if not admin_user:
+            raise RuntimeError("No users found in database. Seed users before package templates.")
+        admin_id = admin_user.id
         
         for template_data in template_data:
             template = PackageTemplate(
@@ -422,7 +458,7 @@ class PlanSeeder:
         """Seed package category configurations."""
         if clear_existing:
             await self._clear_package_categories()
-
+            return []
         categories = []
         
         category_configs = [
@@ -554,6 +590,15 @@ class PlanSeeder:
         
         await self.db.commit()
         self.logger.info("Cleared existing package templates")
+
+    async def _clear_package_categories(self):
+        """Clear existing package category configurations."""
+        from sqlalchemy import delete
+        
+        await self.db.execute(delete(PackageCategoryConfig))
+        
+        await self.db.commit()
+        self.logger.info("Cleared existing package category configs")
 
 
 async def seed_plans(count: int = 20, clear_existing: bool = False) -> List[ServicePlan]:

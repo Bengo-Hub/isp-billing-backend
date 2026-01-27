@@ -18,7 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import AsyncSessionLocal
 from app.core.logging import get_logger
 from app.models.subscription import Subscription, SubscriptionUsageLog, SubscriptionHistory, SubscriptionStatus, SubscriptionType
-from app.models.billing import Invoice, InvoiceItem, Payment, PaymentLog, BillingCycle, InvoiceStatus, PaymentStatus, PaymentMethod
+from app.models.billing import Invoice, InvoiceItem, Payment, PaymentLog, InvoiceStatus, PaymentStatus, PaymentMethod
+from app.models.plan import BillingCycle as PlanBillingCycle
 from app.models.user import User, UserRole
 from app.models.plan import ServicePlan
 from app.models.router import Router, RouterStatus
@@ -37,6 +38,8 @@ class SubscriptionSeeder:
         """Seed subscriptions with realistic data."""
         if clear_existing:
             await self._clear_subscriptions()
+            if count == 0:
+                return []
 
         # Get available users, plans, and routers
         users = await self._get_customer_users()
@@ -85,11 +88,12 @@ class SubscriptionSeeder:
         # Set subscription dates
         start_date = datetime.utcnow() - timedelta(days=random.randint(1, 90))
         
-        # Get plan pricing to determine validity
+        # Get plan pricing and plan billing cycle to determine validity
         plan_pricing = plan.pricing[0] if plan.pricing else None
-        if plan_pricing and plan_pricing.billing_cycle == BillingCycle.MONTHLY:
+        plan_billing_cycle = plan.billing_cycle if hasattr(plan, "billing_cycle") else PlanBillingCycle.ONE_TIME
+        if plan_billing_cycle == PlanBillingCycle.MONTHLY:
             end_date = start_date + timedelta(days=30)
-        elif plan_pricing and plan_pricing.billing_cycle == BillingCycle.WEEKLY:
+        elif plan_billing_cycle == PlanBillingCycle.WEEKLY:
             end_date = start_date + timedelta(days=7)
         else:
             end_date = start_date + timedelta(days=1)
@@ -102,7 +106,13 @@ class SubscriptionSeeder:
                 SubscriptionStatus.ACTIVE, SubscriptionStatus.ACTIVE, SubscriptionStatus.ACTIVE,
                 SubscriptionStatus.SUSPENDED, SubscriptionStatus.PENDING
             ])  # 60% active
-        
+
+        # Ensure numeric fields fit in int32 to avoid DB insertion errors
+        max_int32 = 2_147_483_647
+        bytes_uploaded_val = min(random.randint(1000000, 100000000), max_int32)  # 1MB to 100MB
+        bytes_downloaded_val = min(random.randint(100000000, 10000000000), max_int32)  # 100MB to 10GB, clamped
+        total_bytes_used_val = min(random.randint(101000000, 10100000000), max_int32)
+
         subscription = Subscription(
             user_id=user.id,
             plan_id=plan.id,
@@ -114,9 +124,9 @@ class SubscriptionSeeder:
             start_date=start_date,
             end_date=end_date,
             is_auto_renewal=random.choice([True, False]),
-            bytes_uploaded=random.randint(1000000, 100000000),  # 1MB to 100MB
-            bytes_downloaded=random.randint(100000000, 10000000000),  # 100MB to 10GB
-            total_bytes_used=random.randint(101000000, 10100000000),
+            bytes_uploaded=bytes_uploaded_val,
+            bytes_downloaded=bytes_downloaded_val,
+            total_bytes_used=total_bytes_used_val,
             session_count=random.randint(1, 100),
             last_activity=datetime.utcnow() - timedelta(hours=random.randint(1, 24)) if status == SubscriptionStatus.ACTIVE else None,
             router_config=self._get_subscription_router_config(subscription_type),
@@ -159,11 +169,9 @@ class SubscriptionSeeder:
                 log_date=log_date,
                 bytes_uploaded=bytes_used // 10,  # 10% upload
                 bytes_downloaded=bytes_used,
-                session_duration_minutes=session_duration,
-                session_count=sessions,
-                peak_bandwidth_mbps=random.uniform(0.5, 10.0) if sessions > 0 else 0,
-                average_bandwidth_mbps=random.uniform(0.1, 5.0) if sessions > 0 else 0,
-                logged_at=datetime.combine(log_date, datetime.min.time()) + timedelta(hours=23, minutes=59)
+                session_duration=session_duration * 60,  # convert minutes to seconds
+                ip_address=None,
+                mac_address=None
             )
             
             self.db.add(usage_log)
@@ -181,9 +189,10 @@ class SubscriptionSeeder:
         
         invoice_count = 0
         while billing_start < current_date and invoice_count < 12:  # Max 12 invoices
-            if plan_pricing.billing_cycle == BillingCycle.MONTHLY:
+            plan_billing_cycle = subscription.plan.billing_cycle if hasattr(subscription.plan, "billing_cycle") else PlanBillingCycle.ONE_TIME
+            if plan_billing_cycle == PlanBillingCycle.MONTHLY:
                 billing_end = billing_start + timedelta(days=30)
-            elif plan_pricing.billing_cycle == BillingCycle.WEEKLY:
+            elif plan_billing_cycle == PlanBillingCycle.WEEKLY:
                 billing_end = billing_start + timedelta(days=7)
             else:  # ONE_TIME
                 billing_end = billing_start + timedelta(days=1)
@@ -210,8 +219,8 @@ class SubscriptionSeeder:
         if billing_end < datetime.utcnow():
             status = random.choice([InvoiceStatus.PAID, InvoiceStatus.OVERDUE])
         else:
-            status = random.choice([InvoiceStatus.SENT, InvoiceStatus.DRAFT])
-        
+            status = random.choice([InvoiceStatus.PENDING, InvoiceStatus.DRAFT])
+
         invoice = Invoice(
             user_id=subscription.user_id,
             subscription_id=subscription.id,
@@ -244,7 +253,6 @@ class SubscriptionSeeder:
             unit_price=subtotal,
             total_price=subtotal,
             item_type="subscription",
-            plan_id=subscription.plan_id
         )
         
         self.db.add(item)
@@ -261,16 +269,13 @@ class SubscriptionSeeder:
             invoice_id=invoice.id,
             amount=invoice.total_amount,
             payment_method=payment_method,
-            payment_reference=f"MP{random.randint(100000000, 999999999)}" if payment_method == PaymentMethod.MPESA else f"TXN{random.randint(100000, 999999)}",
+            payment_number=f"PAY{random.randint(100000, 999999)}",
+            reference_number=f"MP{random.randint(100000000, 999999999)}" if payment_method == PaymentMethod.MPESA else f"TXN{random.randint(100000, 999999)}",
             status=PaymentStatus.COMPLETED,
             payment_date=invoice.paid_date or datetime.utcnow(),
             currency="KES",
-            transaction_fee=invoice.total_amount * Decimal("0.01"),  # 1% fee
-            payment_metadata={
-                "phone_number": invoice.user.phone if payment_method == PaymentMethod.MPESA else None,
-                "payment_type": "automatic" if payment_method == PaymentMethod.MPESA else "manual",
-                "seeded": True
-            },
+            mpesa_receipt_number=f"MP{random.randint(100000000, 999999999)}" if payment_method == PaymentMethod.MPESA else None,
+            mpesa_phone_number=invoice.user.phone if payment_method == PaymentMethod.MPESA else None,
             notes=f"Payment for invoice {invoice.invoice_number}"
         )
         
@@ -312,9 +317,12 @@ class SubscriptionSeeder:
         return result.scalars().all()
 
     async def _get_active_plans(self) -> List[ServicePlan]:
-        """Get active service plans."""
+        """Get active service plans with pricing eagerly loaded."""
+        from app.models.plan import PlanStatus
+        from sqlalchemy.orm import selectinload
+
         result = await self.db.execute(
-            select(ServicePlan).where(ServicePlan.is_active == True).limit(50)
+            select(ServicePlan).options(selectinload(ServicePlan.pricing_tiers)).where(ServicePlan.status == PlanStatus.ACTIVE).limit(50)
         )
         return result.scalars().all()
 

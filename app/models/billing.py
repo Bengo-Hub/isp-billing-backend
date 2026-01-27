@@ -55,13 +55,16 @@ class PaymentMethod(str, PyEnum):
 
 
 class Invoice(Base):
-    """Invoice model."""
+    """Invoice model with multi-tenant support."""
 
     __tablename__ = "invoices"
 
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
-    
+
+    # Organization (tenant)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+
     # Foreign keys
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     subscription_id = Column(Integer, ForeignKey("subscriptions.id"), nullable=True)
@@ -97,6 +100,7 @@ class Invoice(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     
     # Relationships
+    organization = relationship("Organization", back_populates="invoices")
     user = relationship("User", back_populates="invoices")
     subscription = relationship("Subscription", backref="invoices")
     payments = relationship("Payment", back_populates="invoice", cascade="all, delete-orphan")
@@ -149,13 +153,16 @@ class InvoiceItem(Base):
 
 
 class Payment(Base):
-    """Payment model."""
+    """Payment model with multi-tenant support."""
 
     __tablename__ = "payments"
 
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
-    
+
+    # Organization (tenant)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+
     # Foreign keys
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     invoice_id = Column(Integer, ForeignKey("invoices.id"), nullable=True)
@@ -202,6 +209,7 @@ class Payment(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationships
+    organization = relationship("Organization", back_populates="payments")
     user = relationship("User", back_populates="payments", foreign_keys=[user_id])
     invoice = relationship("Invoice", back_populates="payments")
     verifier = relationship("User", foreign_keys=[verified_by], backref="verified_payments")

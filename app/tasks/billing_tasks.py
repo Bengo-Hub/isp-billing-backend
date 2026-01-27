@@ -13,7 +13,7 @@ from app.core.logging import get_logger
 from app.models.billing import Invoice, InvoiceStatus, BillingCycle
 from app.models.subscription import Subscription, SubscriptionStatus
 from app.models.user import UserSession
-from app.services.billing_service import BillingService
+from app.modules.billing import BillingService
 
 logger = get_logger(__name__)
 
@@ -147,7 +147,7 @@ def send_invoice_reminder(self, invoice_id: int):
                     return None
                 
                 # Create notification for invoice reminder
-                from app.services.notification_service import NotificationService
+                from app.modules.notifications import NotificationService
                 notification_service = NotificationService(db)
                 
                 await notification_service.create_notification(
@@ -190,7 +190,7 @@ def suspend_expired_subscriptions(self):
     try:
         async def _suspend_expired():
             async with AsyncSessionLocal() as db:
-                from app.services.subscription_service import SubscriptionService
+                from app.modules.subscriptions import SubscriptionService
                 subscription_service = SubscriptionService(db)
                 
                 # Get expired subscriptions
@@ -267,7 +267,7 @@ def generate_monthly_reports(self):
     try:
         async def _generate_reports():
             async with AsyncSessionLocal() as db:
-                from app.services.reports_service import ReportsService
+                from app.modules.analytics import ReportsService
                 reports_service = ReportsService(db)
                 
                 # Generate reports for last month

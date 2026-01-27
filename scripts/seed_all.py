@@ -12,10 +12,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import seed_env
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from app.core.database import AsyncSessionLocal
 from app.core.logging import get_logger
 
 # Import individual seed functions
+from seed_organizations import seed_platform_tiers, seed_organizations
+from seed_rbac import seed_rbac
 from seed_users import seed_users
 from seed_plans import seed_plans, seed_package_templates, seed_package_categories
 from seed_routers import seed_routers
@@ -26,11 +29,11 @@ logger = get_logger(__name__)
 
 
 class MasterSeeder:
-    """Master seeder for all system data."""
+    """Master seeder for all system data with multi-tenancy support."""
 
     def __init__(self):
         self.logger = get_logger(__name__)
-        
+
         # Default seed counts
         self.default_counts = {
             "users": 50,
@@ -40,11 +43,15 @@ class MasterSeeder:
             "licences": 5,
             "subscriptions": 50
         }
-        
+
         # Seed order (important for foreign key dependencies)
+        # Organizations must come before users, routers, plans, etc.
         self.seed_order = [
-            "users",
-            "licences", 
+            "platform_tiers",      # Platform subscription tiers first
+            "organizations",       # ISP providers (tenants)
+            "rbac",                # Roles & permissions
+            "users",               # Platform owner, ISP admins, technicians, customers
+            "licences",
             "package_categories",
             "package_templates",
             "plans",
@@ -75,74 +82,99 @@ class MasterSeeder:
         results = {}
         
         self.logger.info("=" * 60)
-        self.logger.info("🌱 STARTING MASTER SEED PROCESS")
+        self.logger.info("[SEED] STARTING MASTER SEED PROCESS")
         self.logger.info("=" * 60)
         
         if clear_existing:
-            self.logger.warning("⚠️  CLEARING ALL EXISTING DATA")
-        
-        self.logger.info(f"📋 Models to seed: {', '.join(models_to_seed)}")
-        self.logger.info(f"📊 Seed counts: {seed_counts}")
+            self.logger.warning("[WARN]  CLEARING ALL EXISTING DATA")
+            # Ensure DB enums are complete (adds missing billing cycle values if needed)
+            try:
+                from ensure_billingcycle_values import ensure_billingcycle_values
+                await ensure_billingcycle_values()
+            except Exception:
+                self.logger.exception("Failed to ensure billing cycle enum values, continuing")
+
+            # Perform a full clear first to ensure a clean state before seeding
+            # Ensure system-level tables that reference users are cleared first to avoid FK issues
+            await self._clear_system_level_data()
+            await self.clear_all_data()
+            clear_existing = False
+
+        # List models to seed for visibility
+        self.logger.info(f"[LIST] Models to seed: {', '.join(models_to_seed)}")
+        self.logger.info(f"[CHART] Seed counts: {seed_counts}")
         
         try:
             # Seed each model in order
             for model_name in models_to_seed:
-                self.logger.info(f"🌱 Seeding {model_name}...")
-                
+                self.logger.info(f"[SEED] Seeding {model_name}...")
+
                 try:
-                    if model_name == "users":
+                    if model_name == "platform_tiers":
+                        result = await seed_platform_tiers(clear_existing=clear_existing)
+                        results["platform_tiers"] = {"count": len(result), "status": "success"}
+
+                    elif model_name == "organizations":
+                        result = await seed_organizations(clear_existing=clear_existing)
+                        results["organizations"] = {"count": len(result), "status": "success"}
+
+                    elif model_name == "rbac":
+                        result = await seed_rbac(clear_existing=clear_existing)
+                        results["rbac"] = {"count": len(result), "status": "success"}
+
+                    elif model_name == "users":
                         result = await seed_users(
                             count=seed_counts["users"],
                             clear_existing=clear_existing
                         )
                         results["users"] = {"count": len(result), "status": "success"}
-                    
+
                     elif model_name == "licences":
                         result = await seed_licences(
                             count=seed_counts["licences"],
                             clear_existing=clear_existing
                         )
                         results["licences"] = {"count": len(result), "status": "success"}
-                    
+
                     elif model_name == "package_categories":
                         result = await seed_package_categories(clear_existing=clear_existing)
                         results["package_categories"] = {"count": len(result), "status": "success"}
-                    
+
                     elif model_name == "package_templates":
                         result = await seed_package_templates(
                             count=seed_counts["package_templates"],
                             clear_existing=clear_existing
                         )
                         results["package_templates"] = {"count": len(result), "status": "success"}
-                    
+
                     elif model_name == "plans":
                         result = await seed_plans(
                             count=seed_counts["plans"],
                             clear_existing=clear_existing
                         )
                         results["plans"] = {"count": len(result), "status": "success"}
-                    
+
                     elif model_name == "routers":
                         result = await seed_routers(
                             count=seed_counts["routers"],
                             clear_existing=clear_existing
                         )
                         results["routers"] = {"count": len(result), "status": "success"}
-                    
+
                     elif model_name == "subscriptions":
                         result = await seed_subscriptions(
                             count=seed_counts["subscriptions"],
                             clear_existing=clear_existing
                         )
                         results["subscriptions"] = {"count": len(result), "status": "success"}
-                    
-                    self.logger.info(f"✅ {model_name} seeded successfully: {results[model_name]['count']} records")
-                    
+
+                    self.logger.info(f"[OK] {model_name} seeded successfully: {results[model_name]['count']} records")
+
                     # Clear existing flag after first model to avoid clearing dependencies
                     clear_existing = False
-                    
+
                 except Exception as e:
-                    self.logger.error(f"❌ Failed to seed {model_name}: {e}")
+                    self.logger.error(f"[FAIL] Failed to seed {model_name}: {e}")
                     results[model_name] = {"count": 0, "status": "failed", "error": str(e)}
             
             # Additional system data
@@ -157,12 +189,12 @@ class MasterSeeder:
             failed_models = sum(1 for r in results.values() if r.get("status") == "failed")
             
             self.logger.info("=" * 60)
-            self.logger.info("🎉 MASTER SEED PROCESS COMPLETED")
+            self.logger.info("[DONE] MASTER SEED PROCESS COMPLETED")
             self.logger.info("=" * 60)
-            self.logger.info(f"📊 Total records created: {total_records}")
-            self.logger.info(f"✅ Successful models: {successful_models}")
-            self.logger.info(f"❌ Failed models: {failed_models}")
-            self.logger.info(f"⏱️  Total duration: {duration:.2f} seconds")
+            self.logger.info(f"[CHART] Total records created: {total_records}")
+            self.logger.info(f"[OK] Successful models: {successful_models}")
+            self.logger.info(f"[FAIL] Failed models: {failed_models}")
+            self.logger.info(f"[TIME]️  Total duration: {duration:.2f} seconds")
             
             return {
                 "status": "completed",
@@ -175,13 +207,29 @@ class MasterSeeder:
             }
             
         except Exception as e:
-            self.logger.error(f"💥 Master seed process failed: {e}")
+            import traceback
+            self.logger.error(f"[ERROR] Master seed process failed: {e}")
+            self.logger.error(traceback.format_exc())
             return {
                 "status": "failed",
                 "error": str(e),
                 "results": results,
                 "completed_at": datetime.utcnow().isoformat()
             }
+
+    async def _clear_system_level_data(self):
+        """Clear system-level data that must be removed before deleting users."""
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import delete
+            from app.models.notification import NotificationTemplate
+            from app.models.user_settings import UIPreferences
+            from app.models.configuration import Configuration
+
+            await db.execute(delete(NotificationTemplate))
+            await db.execute(delete(UIPreferences))
+            await db.execute(delete(Configuration))
+            await db.commit()
+            self.logger.info("Cleared system-level data (notifications, ui prefs, configurations)")
 
     async def _seed_system_data(self):
         """Seed additional system data."""
@@ -197,14 +245,25 @@ class MasterSeeder:
 
     async def _seed_notification_templates(self, db: AsyncSession):
         """Seed notification templates."""
-        from app.models.notification import NotificationTemplate
+        import json
+        from app.models.notification import NotificationTemplate, NotificationType
+        from app.models.user import User
+        
+        # Get first admin user for created_by
+        result = await db.execute(
+            select(User).limit(1)
+        )
+        admin_user = result.scalar_one_or_none()
+        if not admin_user:
+            self.logger.warning("[WARN] No user found for notification templates created_by, skipping")
+            return
         
         templates = [
             {
                 "name": "Welcome Email",
-                "template_type": "email",
-                "subject": "Welcome to {company_name}",
-                "content": """
+                "notification_type": NotificationType.WELCOME,
+                "subject_template": "Welcome to {company_name}",
+                "body_template": """
                 <h1>Welcome {customer_name}!</h1>
                 <p>Thank you for choosing {company_name} for your internet needs.</p>
                 <p>Your account details:</p>
@@ -215,23 +274,23 @@ class MasterSeeder:
                 </ul>
                 <p>If you have any questions, please contact our support team.</p>
                 """,
-                "variables": ["company_name", "customer_name", "username", "plan_name", "download_speed"],
+                "variables": json.dumps(["company_name", "customer_name", "username", "plan_name", "download_speed"]),
                 "is_active": True
             },
             {
                 "name": "Payment Confirmation SMS",
-                "template_type": "sms",
-                "subject": None,
-                "content": "Payment confirmed! KES {amount} received for {plan_name}. Valid until {expiry_date}. Thank you!",
-                "variables": ["amount", "plan_name", "expiry_date"],
+                "notification_type": NotificationType.SMS,
+                "subject_template": None,
+                "body_template": "Payment confirmed! KES {amount} received for {plan_name}. Valid until {expiry_date}. Thank you!",
+                "variables": json.dumps(["amount", "plan_name", "expiry_date"]),
                 "is_active": True
             },
             {
                 "name": "Service Expiry Reminder",
-                "template_type": "sms",
-                "subject": None,
-                "content": "Hi {customer_name}, your {plan_name} expires on {expiry_date}. Renew now to avoid service interruption. Pay via MPESA: {paybill_number}",
-                "variables": ["customer_name", "plan_name", "expiry_date", "paybill_number"],
+                "notification_type": NotificationType.SUBSCRIPTION,
+                "subject_template": None,
+                "body_template": "Hi {customer_name}, your {plan_name} expires on {expiry_date}. Renew now to avoid service interruption. Pay via MPESA: {paybill_number}",
+                "variables": json.dumps(["customer_name", "plan_name", "expiry_date", "paybill_number"]),
                 "is_active": True
             }
         ]
@@ -239,18 +298,19 @@ class MasterSeeder:
         for template_data in templates:
             template = NotificationTemplate(
                 name=template_data["name"],
-                template_type=template_data["template_type"],
-                subject=template_data["subject"],
-                content=template_data["content"],
+                notification_type=template_data["notification_type"],
+                subject_template=template_data["subject_template"],
+                body_template=template_data["body_template"],
                 variables=template_data["variables"],
                 is_active=template_data["is_active"],
+                created_by=admin_user.id,
                 created_at=datetime.utcnow()
             )
             
             db.add(template)
         
         await db.commit()
-        self.logger.info("✅ Seeded notification templates")
+        self.logger.info("[OK] Seeded notification templates")
 
     async def _seed_ui_preferences(self, db: AsyncSession):
         """Seed UI preferences."""
@@ -315,7 +375,7 @@ class MasterSeeder:
             db.add(preference)
         
         await db.commit()
-        self.logger.info("✅ Seeded UI preferences")
+        self.logger.info("[OK] Seeded UI preferences")
 
     async def _seed_configuration_settings(self, db: AsyncSession):
         """Seed system configuration settings."""
@@ -376,25 +436,27 @@ class MasterSeeder:
         for config_data in configurations:
             config = Configuration(
                 key=config_data["key"],
-                value=config_data["value"],
+                value=str(config_data["value"]),
                 config_type=config_data["config_type"],
                 category=config_data["category"],
                 description=config_data["description"],
                 is_encrypted=False,
-                is_public=config_data["category"] in ["system", "company", "contact"]
+                is_sensitive=config_data["category"] == "security",
+                is_active=True
             )
             
             db.add(config)
         
         await db.commit()
-        self.logger.info("✅ Seeded configuration settings")
+        self.logger.info("[OK] Seeded configuration settings")
 
     async def clear_all_data(self):
         """Clear all data from the database."""
-        self.logger.warning("🗑️  CLEARING ALL DATA FROM DATABASE")
-        
+        self.logger.warning("[TRASH]  CLEARING ALL DATA FROM DATABASE")
+
         try:
             # Import all seed functions and call their clear methods
+            # Clear in reverse dependency order
             await seed_subscriptions(count=0, clear_existing=True)
             await seed_routers(count=0, clear_existing=True)
             await seed_plans(count=0, clear_existing=True)
@@ -402,63 +464,87 @@ class MasterSeeder:
             await seed_package_categories(clear_existing=True)
             await seed_licences(count=0, clear_existing=True)
             await seed_users(count=0, clear_existing=True)
-            
+
+            # Clear organization data
+            async with AsyncSessionLocal() as db:
+                from sqlalchemy import delete
+                from app.models.organization import OrganizationSettings, Organization
+                from app.models.platform_billing import (
+                    EarningsRecord, PlatformPayment, PlatformInvoice, PlatformSubscriptionTier
+                )
+
+                await db.execute(delete(EarningsRecord))
+                await db.execute(delete(PlatformPayment))
+                await db.execute(delete(PlatformInvoice))
+                await db.execute(delete(OrganizationSettings))
+                await db.execute(delete(Organization))
+                await db.execute(delete(PlatformSubscriptionTier))
+                await db.commit()
+
             # Clear additional system data
             async with AsyncSessionLocal() as db:
                 from sqlalchemy import delete
                 from app.models.notification import NotificationTemplate
                 from app.models.user_settings import UIPreferences
                 from app.models.configuration import Configuration
-                
+
                 await db.execute(delete(NotificationTemplate))
                 await db.execute(delete(UIPreferences))
                 await db.execute(delete(Configuration))
                 await db.commit()
-            
-            self.logger.info("✅ All data cleared successfully")
-            
+
+            self.logger.info("[OK] All data cleared successfully")
+
         except Exception as e:
-            self.logger.error(f"❌ Failed to clear data: {e}")
+            self.logger.error(f"[FAIL] Failed to clear data: {e}")
             raise
 
     def print_summary(self, results: Dict[str, Any]):
         """Print seeding summary."""
         print("\n" + "=" * 80)
-        print("🎉 SEEDING SUMMARY")
+        print("[DONE] SEEDING SUMMARY")
         print("=" * 80)
         
         if results["status"] == "completed":
-            print(f"✅ Status: {results['status'].upper()}")
-            print(f"📊 Total Records: {results['total_records']}")
-            print(f"✅ Successful Models: {results['successful_models']}")
-            print(f"❌ Failed Models: {results['failed_models']}")
-            print(f"⏱️  Duration: {results['duration_seconds']:.2f} seconds")
+            print(f"[OK] Status: {results['status'].upper()}")
+            print(f"[CHART] Total Records: {results['total_records']}")
+            print(f"[OK] Successful Models: {results['successful_models']}")
+            print(f"[FAIL] Failed Models: {results['failed_models']}")
+            print(f"[TIME]️  Duration: {results['duration_seconds']:.2f} seconds")
             
-            print("\n📋 DETAILED RESULTS:")
+            print("\n[LIST] DETAILED RESULTS:")
             for model, result in results["results"].items():
-                status_icon = "✅" if result["status"] == "success" else "❌"
+                status_icon = "[OK]" if result["status"] == "success" else "[FAIL]"
                 print(f"  {status_icon} {model.title()}: {result['count']} records")
                 if result["status"] == "failed":
                     print(f"     Error: {result.get('error', 'Unknown error')}")
         else:
-            print(f"❌ Status: {results['status'].upper()}")
-            print(f"💥 Error: {results.get('error', 'Unknown error')}")
+            print(f"[FAIL] Status: {results['status'].upper()}")
+            print(f"[ERROR] Error: {results.get('error', 'Unknown error')}")
         
-        print("\n🚀 NEXT STEPS:")
+        print("\n[GO] NEXT STEPS:")
         print("  1. Start the FastAPI server: uvicorn app.main:app --reload")
         print("  2. Access API docs: http://localhost:8000/docs")
-        print("  3. Login with admin credentials: admin / admin123")
+        print("  3. Login with credentials:")
+        print("     * Platform Owner: platformadmin / admin123")
+        print("     * ISP Admin (Demo ISP): demoispadmin / admin123")
+        print("     * ISP Technician: demoistech1 / tech123")
+        print("     * Customer: [customer username] / customer123")
         print("  4. Explore the seeded data through the API endpoints")
         
-        print("\n📚 SEEDED DATA INCLUDES:")
-        print("  • Admin, technician, and customer users")
-        print("  • Realistic ISP service plans and pricing")
-        print("  • MikroTik routers with devices and logs")
-        print("  • Centipid licences with payment history")
-        print("  • Customer subscriptions with billing data")
-        print("  • Package templates and categories")
-        print("  • Notification templates")
-        print("  • System configuration settings")
+        print("\n[DATA] SEEDED DATA INCLUDES:")
+        print("  * Platform subscription tiers (Hotspot & PPPoE)")
+        print("  * Demo organizations (ISP providers)")
+        print("  * Platform owner (super admin)")
+        print("  * ISP admins and technicians per organization")
+        print("  * Customer users across organizations")
+        print("  * Realistic ISP service plans and pricing")
+        print("  * MikroTik routers with devices and logs")
+        print("  * Centipid licences with payment history")
+        print("  * Customer subscriptions with billing data")
+        print("  * Package templates and categories")
+        print("  * Notification templates")
+        print("  * System configuration settings")
         
         print("=" * 80)
 
@@ -475,10 +561,10 @@ async def main():
     parser.add_argument("--subscriptions", type=int, default=100, help="Number of subscriptions to seed (default: 100)")
     parser.add_argument("--package-templates", type=int, default=15, help="Number of package templates to seed (default: 15)")
     
-    parser.add_argument("--skip", nargs="+", help="Models to skip", 
-                       choices=["users", "plans", "routers", "licences", "subscriptions", "package_templates"])
+    parser.add_argument("--skip", nargs="+", help="Models to skip",
+                       choices=["platform_tiers", "organizations", "users", "plans", "routers", "licences", "subscriptions", "package_templates"])
     parser.add_argument("--only", nargs="+", help="Only seed these models",
-                       choices=["users", "plans", "routers", "licences", "subscriptions", "package_templates"])
+                       choices=["platform_tiers", "organizations", "users", "plans", "routers", "licences", "subscriptions", "package_templates"])
     
     parser.add_argument("--clear-only", action="store_true", help="Only clear data, don't seed")
     parser.add_argument("--quiet", action="store_true", help="Reduce output verbosity")
@@ -495,7 +581,7 @@ async def main():
     try:
         if args.clear_only:
             await seeder.clear_all_data()
-            print("✅ All data cleared successfully")
+            print("[OK] All data cleared successfully")
             return
         
         # Prepare counts
@@ -530,7 +616,7 @@ async def main():
         print("\n🛑 Seeding interrupted by user")
         sys.exit(130)
     except Exception as e:
-        print(f"\n💥 Seeding failed: {e}")
+        print(f"\n[ERROR] Seeding failed: {e}")
         sys.exit(1)
 
 
