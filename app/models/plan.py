@@ -97,6 +97,18 @@ class ServicePlan(Base):
     is_popular = Column(Boolean, default=False, nullable=False)
     sort_order = Column(Integer, default=0, nullable=False)
     
+    # Template features
+    is_template = Column(Boolean, default=False, nullable=False)  # Is this a predefined template?
+    template_category = Column(String(50), nullable=True)  # popular, business, trial, etc.
+    enable_burst = Column(Boolean, default=False, nullable=False)
+    burst_download = Column(Integer, nullable=True)  # Mbps
+    burst_upload = Column(Integer, nullable=True)  # Mbps
+    burst_threshold = Column(Integer, nullable=True)  # percentage
+    burst_time = Column(Integer, nullable=True)  # seconds
+    enable_schedule = Column(Boolean, default=False, nullable=False)
+    schedule_start_time = Column(String(5), nullable=True)  # HH:MM format
+    schedule_end_time = Column(String(5), nullable=True)  # HH:MM format
+    
     # Configuration
     config = Column(Text, nullable=True)  # JSON configuration for router
     notes = Column(Text, nullable=True)

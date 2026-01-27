@@ -4,16 +4,102 @@ Handles initial device connection and script generation.
 """
 import logging
 import secrets
+import os
+import json
+import asyncio
 from datetime import datetime, timedelta
+from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import APIRouter, Depends, Query, HTTPException, Request
+from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query, HTTPException, Request, Path
 from fastapi.responses import PlainTextResponse
 from app.models.user import User
+from app.models.provisioning import ProvisioningSession
 from app.api.deps import require_technician_or_admin, get_db
 from app.core.security import create_access_token
+from app.core.secrets import get_secrets_manager
+from app.services.router_provisioning import can_use_direct_api
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+async def ping_device(ip_address: str, timeout_ms: int = 1000) -> dict:
+    """Check if device responds to ICMP ping.
+    
+    Args:
+        ip_address: IP address to ping
+        timeout_ms: Ping timeout in milliseconds
+        
+    Returns:
+        dict with 'reachable' (bool) and 'latency_ms' (float or None)
+    """
+    try:
+        # Windows uses -n for count, -w for timeout in ms
+        # Linux uses -c for count, -W for timeout in seconds
+        import platform
+        if platform.system().lower() == 'windows':
+            cmd = ['ping', '-n', '1', '-w', str(timeout_ms), ip_address]
+        else:
+            cmd = ['ping', '-c', '1', '-W', str(max(1, timeout_ms // 1000)), ip_address]
+        
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5.0)
+        
+        if process.returncode == 0:
+            # Try to extract latency from output
+            output = stdout.decode('utf-8', errors='ignore')
+            import re
+            # Match patterns like "time=1.23ms" or "time<1ms"
+            latency_match = re.search(r'time[=<]([0-9.]+)\s*ms', output)
+            latency = float(latency_match.group(1)) if latency_match else None
+            return {"reachable": True, "latency_ms": latency}
+        else:
+            return {"reachable": False, "latency_ms": None}
+    except Exception as e:
+        logger.warning(f"Ping failed for {ip_address}: {e}")
+        return {"reachable": False, "latency_ms": None}
+
+
+def generate_encrypted_payload(data: dict) -> str:
+    """Generate encrypted payload for secure URL parameter.
+    
+    Args:
+        data: Dictionary to encrypt (identity, api_port, user_id, etc.)
+        
+    Returns:
+        URL-safe encrypted string
+    """
+    secrets_manager = get_secrets_manager()
+    json_data = json.dumps(data)
+    encrypted = secrets_manager.encrypt(json_data)
+    # Make URL-safe by replacing + and / characters
+    return encrypted.replace('+', '-').replace('/', '_').replace('=', '')
+
+
+def decrypt_payload(encrypted: str) -> dict:
+    """Decrypt encrypted payload from URL.
+    
+    Args:
+        encrypted: URL-safe encrypted string
+        
+    Returns:
+        Decrypted dictionary
+    """
+    # Restore base64 padding and characters
+    restored = encrypted.replace('-', '+').replace('_', '/')
+    # Add padding if needed
+    padding = 4 - (len(restored) % 4)
+    if padding != 4:
+        restored += '=' * padding
+    
+    secrets_manager = get_secrets_manager()
+    decrypted = secrets_manager.decrypt(restored)
+    return json.loads(decrypted)
 
 
 @router.get("/command")
@@ -22,6 +108,8 @@ async def get_bootstrap_command(
     identity: str = Query("MikroTik"),
     api_port: int = Query(8728),
     interface: str = Query("ether2"),
+    ip_address: Optional[str] = Query(None, description="Device IP for pre-check"),
+    use_encrypted_url: bool = Query(False, description="Use encrypted payload URL"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_technician_or_admin()),
 ):
@@ -29,10 +117,31 @@ async def get_bootstrap_command(
 
     This command downloads and executes the bootstrap script from the current domain.
     The script enables API access and sets basic device configuration.
+    
+    Optional features:
+    - Device ping pre-check (if ip_address provided)
+    - Encrypted payload URL (if use_encrypted_url=true)
     """
     try:
-        # Get the current domain from the request
-        base = f"{request.url.scheme}://{request.url.netloc}"
+        # Optional: Ping pre-check if IP address provided
+        ping_result = None
+        if ip_address:
+            ping_result = await ping_device(ip_address)
+            if not ping_result["reachable"]:
+                logger.warning(f"Device {ip_address} not responding to ping")
+                # Return warning but don't block - device might block ICMP
+        
+        # Get backend URL from environment variable or use request URL
+        # This allows deployment flexibility (frontend != backend)
+        backend_url = os.getenv('BACKEND_URL')
+        
+        if backend_url:
+            base = backend_url
+            logger.info(f"Using configured BACKEND_URL: {base}")
+        else:
+            # Fallback to request URL (development mode)
+            base = f"{request.url.scheme}://{request.url.netloc}"
+            logger.warning(f"BACKEND_URL not set, using request URL: {base}")
 
         # Generate provisioning token with limited permissions (1 hour expiry)
         token_data = {
@@ -45,24 +154,50 @@ async def get_bootstrap_command(
         }
         provisioning_token = create_access_token(token_data, expires_delta=timedelta(hours=1))
 
-        # Generate the command with token similar to Centipid's approach
-        script_url = f"{base}/api/v1/provisioning/bootstrap/script?token={provisioning_token}&identity={identity}&api_port={api_port}&interface={interface}"
-        command = f"/tool fetch mode=https url=\"{script_url}\" dst-path=codevertex.rsc; delay 2s; import codevertex.rsc;"
+        # Choose between encrypted payload URL or traditional query params
+        if use_encrypted_url:
+            # Centipid-style encrypted payload
+            payload = {
+                "identity": identity,
+                "api_port": api_port,
+                "interface": interface,
+                "user_id": current_user.id,
+                "tenant_id": current_user.organization_id if hasattr(current_user, 'organization_id') else None,
+                "token": provisioning_token,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            encrypted = generate_encrypted_payload(payload)
+            script_url = f"{base}/api/v1/provisioning/bootstrap/script/{encrypted}"
+        else:
+            # Traditional query parameter approach
+            script_url = f"{base}/api/v1/provisioning/bootstrap/script?token={provisioning_token}&identity={identity}&api_port={api_port}&interface={interface}"
+        
+        # Use proper MikroTik syntax: :delay (with colon) and /import (with forward slash)
+        command = f"/tool fetch mode=https url=\"{script_url}\" dst-path=codevertex.rsc;:delay 2s;/import codevertex.rsc;"
 
         notes = [
-            "If device mode is not allowed, run: /system/device-mode update mode=advanced",
-            "Ensure the device has internet access to fetch the script",
-            "The delay ensures the file is fully downloaded before import",
-            "The token provides secure access to the provisioning script",
+            "Waiting for mikrotik to come online...",
+            "Please paste and execute the command in your Mikrotik terminal. The system will automatically detect when the command is executed.",
+            "If the device mode is not allowed, debug the power cord for 10 seconds, then restart power before retrying the provisioning command.",
+            "Attempt 10 of 300"
         ]
 
-        return {
+        response_data = {
             "command": command,
             "script_url": script_url,
             "token": provisioning_token,
             "expires_in": 3600,  # 1 hour
-            "notes": notes
+            "notes": notes,
+            "encrypted_url": use_encrypted_url
         }
+        
+        # Add ping result if available
+        if ping_result:
+            response_data["ping_check"] = ping_result
+            if not ping_result["reachable"]:
+                response_data["warnings"] = ["Device not responding to ping. Check network connection."]
+        
+        return response_data
 
     except Exception as e:
         logger.error(f"Failed to generate bootstrap command: {e}")
@@ -70,19 +205,46 @@ async def get_bootstrap_command(
 
 
 @router.get("/script", response_class=PlainTextResponse)
+@router.get("/script/{encrypted_payload}", response_class=PlainTextResponse)
 async def get_bootstrap_script(
     request: Request,
-    token: str = Query(...),
-    identity: str = Query("MikroTik"),
-    api_port: int = Query(8728),
-    interface: str = Query("ether2"),
+    encrypted_payload: Optional[str] = None,
+    token: Optional[str] = Query(None),
+    identity: Optional[str] = Query(None),
+    api_port: Optional[int] = Query(None),
+    interface: Optional[str] = Query(None),
 ):
     """Return a minimal RouterOS script for first-touch provisioning with token verification.
 
+    Supports two modes:
+    1. Traditional: Query parameters (token, identity, api_port, interface)
+    2. Encrypted: Single encrypted payload in URL path
+    
     This enables API on the specified port, sets identity, and ensures the interface exists.
     The advanced configuration is later handled by the provisioning workflow.
     """
     try:
+        # Determine which mode to use
+        if encrypted_payload:
+            # Decrypt the payload
+            try:
+                payload = decrypt_payload(encrypted_payload)
+                token = payload.get("token")
+                identity = payload.get("identity", "MikroTik")
+                api_port = payload.get("api_port", 8728)
+                interface = payload.get("interface", "ether2")
+                logger.info(f"Using encrypted payload for user {payload.get('user_id')}")
+            except Exception as e:
+                logger.error(f"Failed to decrypt payload: {e}")
+                raise HTTPException(status_code=400, detail="Invalid encrypted payload")
+        else:
+            # Traditional mode - validate required parameters
+            if not token:
+                raise HTTPException(status_code=400, detail="Token is required")
+            identity = identity or "MikroTik"
+            api_port = api_port or 8728
+            interface = interface or "ether2"
+        
         # Verify provisioning token using the security module
         from app.core.security import verify_token
 
@@ -198,3 +360,44 @@ async def get_complete_script(
     except Exception as e:
         logger.error(f"Failed to generate complete script: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate complete script")
+
+
+@router.get("/can-use-direct-api/{router_id}")
+async def check_direct_api_access(
+    router_id: int = Path(..., description="Router ID"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_technician_or_admin()),
+):
+    """Check if router has stored credentials for direct API reprovisioning.
+    
+    Returns:
+        {
+            "can_use_direct_api": bool,
+            "bootstrap_completed": bool,
+            "provisioning_status": str
+        }
+    """
+    try:
+        has_access = await can_use_direct_api(db, router_id)
+        
+        # Get router details
+        from sqlalchemy import select
+        from app.models.router import Router
+        result = await db.execute(select(Router).where(Router.id == router_id))
+        router = result.scalar_one_or_none()
+        
+        if not router:
+            raise HTTPException(status_code=404, detail="Router not found")
+        
+        return {
+            "can_use_direct_api": has_access,
+            "bootstrap_completed": router.bootstrap_completed or False,
+            "provisioning_status": router.provisioning_status or 'pending',
+            "last_provisioned_at": router.last_provisioned_at.isoformat() if router.last_provisioned_at else None
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to check direct API access for router {router_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to check API access")

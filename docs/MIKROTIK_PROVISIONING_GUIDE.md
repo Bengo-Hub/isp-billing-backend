@@ -1104,6 +1104,68 @@ async def rollback_provisioning(self, session_id: int):
 
 ---
 
+## Implementation Notes
+
+### Configuration Data Structure
+
+The provisioning system uses a flexible dictionary-based configuration structure instead of rigid enums:
+
+```python
+# Frontend sends configuration as:
+configuration = {
+    "identity": str,              # Router name
+    "selectedPorts": List[str],   # Interfaces to bridge
+    "enableAntiSharing": bool,    # TTL modification
+    "useCustomSubnet": bool,      # Custom vs default subnet
+    "subnetAddress": str,         # Network address
+    "cidr": int,                  # Subnet mask in CIDR
+    "enableHotspot": bool,        # Enable Hotspot service
+    "enablePppoe": bool,          # Enable PPPoE service
+}
+```
+
+**Why Dictionary Instead of Enum?**
+- Flexibility: Easy to add new fields without schema changes
+- Frontend Compatibility: Direct JSON serialization
+- Backward Compatibility: Old fields don't break new code
+- Validation: Pydantic schemas validate structure at API boundary
+
+### Command Display Formatting
+
+The `ProvisioningCommand` component uses specific CSS properties for proper command wrapping:
+
+```css
+.command-display {
+  white-space: pre-wrap;      /* Preserves whitespace but wraps */
+  word-break: break-all;       /* Breaks long URLs */
+  overflow-wrap: anywhere;     /* Modern browsers */
+}
+```
+
+**Why This Approach?**
+- Long URLs don't cause horizontal scroll
+- Command remains readable on mobile devices
+- Copy-paste preserves original formatting
+- No manual line breaks needed
+
+### Token Security
+
+Provisioning tokens are JWT tokens with:
+- **1-hour expiration**: Prevents unauthorized reuse
+- **Purpose field**: Restricted to provisioning operations only
+- **Permission scope**: Limited to `provisioning.execute` and `router.configure`
+- **User binding**: Tied to requesting user for audit trail
+
+### WebSocket Live Streaming
+
+Live log streaming uses WebSocket protocol:
+- **Endpoint**: `/ws/provisioning/{session_id}`
+- **Auth**: Token passed in query string or WebSocket headers
+- **Reconnection**: Automatic reconnection on disconnect
+- **Buffering**: Backend buffers messages if client disconnects
+
+---
+
 ## Best Practices
 
 ### 1. Pre-Provisioning Checklist

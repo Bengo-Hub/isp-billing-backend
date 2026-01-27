@@ -75,6 +75,12 @@ class Router(Base):
     config = Column(Text, nullable=True)  # JSON configuration
     notes = Column(Text, nullable=True)
     
+    # Provisioning and API credentials (for reprovisioning)
+    api_credentials_encrypted = Column(Text, nullable=True)  # Encrypted username:password for API access
+    last_provisioned_at = Column(DateTime, nullable=True)  # Last successful provisioning timestamp
+    provisioning_status = Column(String(50), default='pending', nullable=False)  # pending, provisioned, failed
+    bootstrap_completed = Column(Boolean, default=False, nullable=False)  # True if initial bootstrap was successful
+    
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

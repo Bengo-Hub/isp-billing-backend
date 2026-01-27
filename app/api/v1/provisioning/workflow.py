@@ -261,3 +261,120 @@ async def delete_provisioning_session(
     except Exception as e:
         logger.error(f"Failed to delete provisioning session: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete provisioning session")
+
+
+class DeviceStatusResponse(BaseModel):
+    """Response model for device status check."""
+    online: bool
+    details: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+@router.get("/device-status/{router_id}", response_model=DeviceStatusResponse)
+async def check_device_status(
+    router_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_technician_or_admin()),
+):
+    """
+    Check if a MikroTik device is online using stored API credentials.
+    Used for reprovisioning auto-detection.
+    """
+    from app.models.router import Router
+    from app.core.encryption import get_credential_encryption
+    from sqlalchemy import select, update
+    import librouteros
+    
+    try:
+        # Fetch the router from database
+        result = await db.execute(
+            select(Router).where(Router.id == router_id)
+        )
+        router = result.scalar_one_or_none()
+        
+        if not router:
+            raise HTTPException(status_code=404, detail="Router not found")
+        
+        # Check if router has stored API credentials
+        if not router.api_credentials_encrypted:
+            return DeviceStatusResponse(
+                online=False,
+                error="No stored API credentials found for this router"
+            )
+        
+        # Decrypt the API credentials using the existing encryption service
+        try:
+            encryption = get_credential_encryption()
+            creds_dict = encryption.decrypt_credentials(router.api_credentials_encrypted)
+            username = creds_dict["username"]
+            password = creds_dict["password"]
+        except Exception as e:
+            logger.error(f"Failed to decrypt API credentials: {e}")
+            return DeviceStatusResponse(
+                online=False,
+                error="Failed to decrypt stored credentials"
+            )
+        
+        # Try to connect to the device via API
+        try:
+            api = librouteros.connect(
+                host=router.ip_address,
+                username=username,
+                password=password,
+                port=router.port,
+                timeout=3
+            )
+            
+            # Test connection by getting system identity
+            identity = api.path("/system/identity")
+            identity_data = list(identity)
+            
+            # Get system resource info
+            resource = api.path("/system/resource")
+            resource_data = list(resource)
+            
+            api.close()
+            
+            # Update router status in database
+            from datetime import datetime as dt
+            await db.execute(
+                update(Router)
+                .where(Router.id == router_id)
+                .values(status="online", last_seen=dt.utcnow())
+            )
+            await db.commit()
+            
+            return DeviceStatusResponse(
+                online=True,
+                details={
+                    "identity": identity_data[0].get("name", "Unknown") if identity_data else "Unknown",
+                    "uptime": resource_data[0].get("uptime", "0s") if resource_data else "0s",
+                    "version": resource_data[0].get("version", "Unknown") if resource_data else "Unknown",
+                }
+            )
+            
+        except librouteros.exceptions.ConnectionClosed as e:
+            logger.warning(f"Device {router_id} connection closed: {e}")
+            return DeviceStatusResponse(
+                online=False,
+                error="Device not responding - connection closed"
+            )
+        except librouteros.exceptions.TrapError as e:
+            logger.warning(f"Device {router_id} authentication failed: {e}")
+            return DeviceStatusResponse(
+                online=False,
+                error="Authentication failed - invalid credentials"
+            )
+        except Exception as e:
+            logger.warning(f"Device {router_id} connection failed: {e}")
+            return DeviceStatusResponse(
+                online=False,
+                error=f"Connection failed: {str(e)}"
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to check device status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to check device status: {str(e)}")
+

@@ -30,7 +30,7 @@ class SubscriptionUsageLog(SubscriptionUsageLogBase):
 
     id: int
     subscription_id: int
-    created_at: datetime
+    # Note: created_at doesn't exist in the database model - using log_date as the timestamp
 
     class Config:
         from_attributes = True

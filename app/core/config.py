@@ -46,6 +46,21 @@ class Settings(BaseSettings):
     encryption_key: Optional[str] = None
     master_password: Optional[str] = None
     encryption_salt: Optional[str] = None
+    
+    @model_validator(mode="after")
+    def set_encryption_fallback(self) -> "Settings":
+        """Set fallback encryption key for development if not provided."""
+        if not self.encryption_key and not self.master_password:
+            if self.environment == "development":
+                # Use a fallback key derived from secret_key in development only
+                import hashlib
+                self.encryption_key = hashlib.sha256(self.secret_key.encode()).hexdigest()
+                warnings.warn(
+                    "No ENCRYPTION_KEY or MASTER_PASSWORD set. Using fallback derived from SECRET_KEY. "
+                    "This is only acceptable in development. Set proper encryption keys in production!",
+                    UserWarning
+                )
+        return self
 
     # URL Configuration
     backend_url: Optional[str] = None  # e.g., https://api.example.com

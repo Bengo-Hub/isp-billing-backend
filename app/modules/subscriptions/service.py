@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.subscription import (
     Subscription, 
@@ -41,7 +42,10 @@ class SubscriptionService:
         search: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get all subscriptions with pagination and filters."""
-        query = select(Subscription)
+        query = select(Subscription).options(
+            selectinload(Subscription.usage_logs),
+            selectinload(Subscription.history)
+        )
 
         # Apply filters
         if user_id:

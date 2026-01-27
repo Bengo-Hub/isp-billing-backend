@@ -81,6 +81,8 @@ class ProvisioningSession(Base):
     # Configuration data
     service_type = Column(Enum(ServiceType), nullable=True)
     configuration = Column(JSON, nullable=True)  # Stores all configuration parameters
+    configuration_version = Column(Integer, default=1, nullable=False)  # Config version for tracking changes
+    previous_configuration_id = Column(Integer, ForeignKey("router_configurations.id"), nullable=True)  # Link to previous config
     
     # Timing and scheduling
     priority = Column(Enum(ProvisioningPriority), default=ProvisioningPriority.NORMAL, nullable=False)
@@ -109,6 +111,11 @@ class ProvisioningSession(Base):
     user = relationship("User", backref="provisioning_sessions")
     steps = relationship("ProvisioningStepLog", back_populates="session", cascade="all, delete-orphan")
     commands = relationship("ProvisioningCommand", back_populates="session", cascade="all, delete-orphan")
+    previous_configuration = relationship(
+        "RouterConfiguration", 
+        foreign_keys=[previous_configuration_id],
+        backref="subsequent_sessions"
+    )
 
     def __repr__(self) -> str:
         """String representation."""
@@ -309,6 +316,7 @@ class RouterConfiguration(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     is_backup = Column(Boolean, default=False, nullable=False)
     checksum = Column(String(64), nullable=True)  # SHA256 of configuration
+    version = Column(Integer, default=1, nullable=False)  # Version number for tracking
     
     # Applied configuration tracking
     applied_at = Column(DateTime, nullable=True)
@@ -321,7 +329,11 @@ class RouterConfiguration(Base):
     
     # Relationships
     router = relationship("Router", backref="configurations")
-    session = relationship("ProvisioningSession", backref="configurations")
+    session = relationship(
+        "ProvisioningSession",
+        foreign_keys=[session_id],
+        backref="configurations"
+    )
     applied_by_user = relationship("User", backref="applied_configurations")
 
     def __repr__(self) -> str:

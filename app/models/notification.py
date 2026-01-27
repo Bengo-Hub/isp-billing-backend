@@ -150,6 +150,10 @@ class SupportTicket(Base):
     attachments = Column(Text, nullable=True)  # JSON array of file paths
     extra_data = Column(Text, nullable=True)  # JSON metadata
 
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
     # Relationships
     user = relationship("User", back_populates="tickets", foreign_keys=[user_id])
     assignee = relationship("User", foreign_keys=[assigned_to])
@@ -181,6 +185,10 @@ class TicketMessage(Base):
     
     # Additional information
     ip_address = Column(String(45), nullable=True)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationships
     ticket = relationship("SupportTicket", back_populates="messages")

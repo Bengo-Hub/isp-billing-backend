@@ -3,8 +3,9 @@
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import create_engine
 
-from app.core.database import engine
+from app.core.config import settings
 from app.core.security import get_password_hash
 from app.models.user import User, UserRole, UserStatus
 from app.models.rbac import Role, SystemLicence, Permission, UserPermission
@@ -30,9 +31,13 @@ class SeedMiddleware(BaseHTTPMiddleware):
     
     async def _ensure_seeded(self):
         """Ensure demo and superuser accounts exist."""
+        # Create synchronous engine from async database URL
+        sync_database_url = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+        sync_engine = create_engine(sync_database_url, pool_pre_ping=True)
+        
         # Create a session factory bound to the synchronous engine to avoid
         # mixing async engine with synchronous sessions (caused AsyncConnection errors)
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine.sync_engine)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
         db = SessionLocal()
         try:
             rbac_service = RBACService(db)

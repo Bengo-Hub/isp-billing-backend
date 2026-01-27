@@ -24,7 +24,7 @@ async def get_configurations(
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db)
 ) -> ConfigurationList:
-    """Get all configurations."""
+    """Get all configurations, optionally filtered by category."""
     try:
         config_service = ConfigurationService(db)
         configs = await config_service.get_all_configs(category=category)

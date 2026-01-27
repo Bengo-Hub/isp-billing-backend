@@ -315,55 +315,99 @@ class PlanSeeder:
         return templates
 
     async def _create_standard_templates(self) -> List[PackageTemplate]:
-        """Create standard package templates."""
+        """Create standard package templates matching Centipid screenshots."""
         templates = []
         
         template_data = [
+            # Popular Packages (Daily)
             {
-                "name": "Student Package",
-                "description": "Affordable internet for students",
+                "name": "Basic Hotspot",
+                "description": "1GB Daily Hotspot - Perfect for light browsing",
                 "category": PackageCategory.HOTSPOT,
-                "template_code": "STUDENT_001",
+                "template_code": "HOTSPOT_1GB_DAILY",
                 "plan_type": "hotspot",
-                "price_template": Decimal("500.00"),
-                "download_speed": 5,
-                "upload_speed": 2,
-                "data_limit": 10240,  # 10GB
-                "validity_days": 30,
+                "price_template": Decimal("50.00"),
+                "download_speed": 2,
+                "upload_speed": 1,
+                "data_limit": 1024,  # 1GB
+                "validity_days": 1,
                 "is_default": True,
                 "is_featured": True
             },
             {
-                "name": "Family Package",
-                "description": "Perfect for family internet needs",
+                "name": "Home Internet Daily",
+                "description": "5GB Daily Bundle - Great for home use",
+                "category": PackageCategory.DATA_PLANS,
+                "template_code": "HOME_5GB_DAILY",
+                "plan_type": "hotspot",
+                "price_template": Decimal("200.00"),
+                "download_speed": 5,
+                "upload_speed": 2,
+                "data_limit": 5120,  # 5GB
+                "validity_days": 1,
+                "is_featured": True
+            },
+            {
+                "name": "Data Bundle 10GB",
+                "description": "10GB Data Bundle - Weekly package",
+                "category": PackageCategory.DATA_PLANS,
+                "template_code": "DATA_10GB_WEEKLY",
+                "plan_type": "hotspot",
+                "price_template": Decimal("500.00"),
+                "download_speed": 8,
+                "upload_speed": 4,
+                "data_limit": 10240,  # 10GB
+                "validity_days": 7,
+                "is_featured": True
+            },
+            
+            # Business Packages
+            {
+                "name": "Premium Business",
+                "description": "Unlimited 20Mbps - Business Grade",
                 "category": PackageCategory.PPPOE,
-                "template_code": "FAMILY_001",
+                "template_code": "BIZ_PREMIUM_20M",
                 "plan_type": "pppoe",
-                "price_template": Decimal("2500.00"),
+                "price_template": Decimal("8000.00"),
+                "download_speed": 20,
+                "upload_speed": 10,
+                "data_limit": -1,  # Unlimited
+                "validity_days": 30,
+                "is_featured": True
+            },
+            {
+                "name": "Guest WiFi Package",
+                "description": "5Mbps Guest Network - Time Limited",
+                "category": PackageCategory.HOTSPOT,
+                "template_code": "GUEST_WIFI_5M",
+                "plan_type": "hotspot",
+                "price_template": Decimal("100.00"),
+                "download_speed": 5,
+                "upload_speed": 2,
+                "data_limit": -1,
+                "validity_days": 1,
+                "is_featured": False
+            },
+            {
+                "name": "Business Starter",
+                "description": "10Mbps SME Package - Monthly",
+                "category": PackageCategory.PPPOE,
+                "template_code": "BIZ_STARTER_10M",
+                "plan_type": "pppoe",
+                "price_template": Decimal("5000.00"),
                 "download_speed": 10,
                 "upload_speed": 5,
                 "data_limit": -1,
                 "validity_days": 30,
                 "is_featured": True
             },
-            {
-                "name": "Business Starter",
-                "description": "Small business internet package",
-                "category": PackageCategory.PPPOE,
-                "template_code": "BIZ_STARTER",
-                "plan_type": "pppoe",
-                "price_template": Decimal("5000.00"),
-                "download_speed": 20,
-                "upload_speed": 10,
-                "data_limit": -1,
-                "validity_days": 30,
-                "is_featured": True
-            },
+            
+            # Trial/Promo Packages
             {
                 "name": "Free Trial",
-                "description": "7-day free trial package",
+                "description": "7-Day Free Trial - 1GB Data",
                 "category": PackageCategory.FREE_TRIAL,
-                "template_code": "FREE_TRIAL",
+                "template_code": "FREE_TRIAL_7D",
                 "plan_type": "hotspot",
                 "price_template": Decimal("0.00"),
                 "download_speed": 2,
@@ -374,16 +418,116 @@ class PlanSeeder:
                 "is_featured": False
             },
             {
-                "name": "Data Only 20GB",
-                "description": "Data-only package for mobile devices",
+                "name": "Weekend Special",
+                "description": "20GB Weekend Bundle - 3 Days",
                 "category": PackageCategory.DATA_PLANS,
-                "template_code": "DATA_20GB",
+                "template_code": "WEEKEND_20GB",
                 "plan_type": "hotspot",
-                "price_template": Decimal("1000.00"),
-                "download_speed": 8,
-                "upload_speed": 4,
+                "price_template": Decimal("600.00"),
+                "download_speed": 10,
+                "upload_speed": 5,
                 "data_limit": 20480,  # 20GB
-                "validity_days": 30
+                "validity_days": 3,
+                "is_featured": False
+            },
+            
+            # PPPoE Home Packages
+            {
+                "name": "Home 5Mbps",
+                "description": "Unlimited 5Mbps Home Package",
+                "category": PackageCategory.PPPOE,
+                "template_code": "HOME_PPPOE_5M",
+                "plan_type": "pppoe",
+                "price_template": Decimal("2000.00"),
+                "download_speed": 5,
+                "upload_speed": 2,
+                "data_limit": -1,
+                "validity_days": 30,
+                "is_featured": True
+            },
+            {
+                "name": "Family 10Mbps",
+                "description": "Unlimited 10Mbps Family Package",
+                "category": PackageCategory.PPPOE,
+                "template_code": "FAMILY_PPPOE_10M",
+                "plan_type": "pppoe",
+                "price_template": Decimal("3500.00"),
+                "download_speed": 10,
+                "upload_speed": 5,
+                "data_limit": -1,
+                "validity_days": 30,
+                "is_featured": True
+            },
+            {
+                "name": "Premium Home 20Mbps",
+                "description": "Unlimited 20Mbps Premium Home",
+                "category": PackageCategory.PPPOE,
+                "template_code": "PREMIUM_HOME_20M",
+                "plan_type": "pppoe",
+                "price_template": Decimal("6000.00"),
+                "download_speed": 20,
+                "upload_speed": 10,
+                "data_limit": -1,
+                "validity_days": 30,
+                "is_featured": True
+            },
+            
+            # Student Packages
+            {
+                "name": "Student Package",
+                "description": "Affordable 15GB Student Bundle",
+                "category": PackageCategory.DATA_PLANS,
+                "template_code": "STUDENT_15GB",
+                "plan_type": "hotspot",
+                "price_template": Decimal("500.00"),
+                "download_speed": 5,
+                "upload_speed": 2,
+                "data_limit": 15360,  # 15GB
+                "validity_days": 30,
+                "is_featured": True
+            },
+            
+            # Night Packages
+            {
+                "name": "Night Owl 50GB",
+                "description": "50GB Night Browsing (12AM-6AM)",
+                "category": PackageCategory.DATA_PLANS,
+                "template_code": "NIGHT_50GB",
+                "plan_type": "hotspot",
+                "price_template": Decimal("800.00"),
+                "download_speed": 15,
+                "upload_speed": 7,
+                "data_limit": 51200,  # 50GB
+                "validity_days": 30,
+                "is_featured": False
+            },
+            
+            # Corporate Packages
+            {
+                "name": "Corporate 50Mbps",
+                "description": "Unlimited 50Mbps Corporate Package",
+                "category": PackageCategory.PPPOE,
+                "template_code": "CORP_PPPOE_50M",
+                "plan_type": "pppoe",
+                "price_template": Decimal("15000.00"),
+                "download_speed": 50,
+                "upload_speed": 25,
+                "data_limit": -1,
+                "validity_days": 30,
+                "is_featured": True
+            },
+            {
+                "name": "Enterprise 100Mbps",
+                "description": "Unlimited 100Mbps Enterprise Grade",
+                "category": PackageCategory.PPPOE,
+                "template_code": "ENT_PPPOE_100M",
+                "plan_type": "pppoe",
+                "price_template": Decimal("30000.00"),
+                "download_speed": 100,
+                "upload_speed": 50,
+                "data_limit": -1,
+                "validity_days": 30,
+                "is_featured": True
             }
         ]
         

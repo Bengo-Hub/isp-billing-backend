@@ -236,7 +236,22 @@ Returns:
 
 **Configuration Submission**:
 1. User clicks "Configure Services"
-2. **Frontend sends** complete configuration to backend
+2. **Frontend sends** complete configuration to backend:
+   ```json
+   {
+     "router_id": 123,
+     "configuration": {
+       "identity": "MikroTik-Branch-1",
+       "selectedPorts": ["ether2", "ether3", "ether4"],
+       "enableAntiSharing": true,
+       "useCustomSubnet": false,
+       "subnetAddress": "192.168.88.0",
+       "cidr": 24,
+       "enableHotspot": true,
+       "enablePppoe": true
+     }
+   }
+   ```
 3. **Backend creates** provisioning session with unique `session_id`
 4. **Returns** `session_id` for live log streaming
 
@@ -340,17 +355,34 @@ The backend executes a series of RouterOS commands in sequence:
 5. **Minimal Downtime**: Services remain active during reconfiguration where possible
 
 **Reprovisioning Workflow**:
-1. User clicks "Reprovision" from router list
+1. User clicks "Reprovision" from router details page
 2. Frontend navigates to `/routers/provision?reprovision=[ROUTER_ID]`
-3. System loads existing router configuration
-4. User can modify:
-   - Service selection (enable/disable Hotspot or PPPoE)
-   - Network configuration (subnet, CIDR)
-   - Interface selection (add/remove ports)
-   - Anti-sharing settings
-5. Provisioning executes only changed configurations
-6. Live logs show update progress
-7. Rollback available if errors occur
+3. **System Pre-loads Existing Configuration**:
+   - Router IP address
+   - API port
+   - Username (password must be re-entered for security)
+   - Router identity/name
+4. **Step 1 (Connection) is Skipped**: Bootstrap already completed
+5. **Step 2 (Device Details) Starts Immediately**:
+   - Pre-filled with existing router data
+   - User can update IP/credentials if needed
+   - Click "Continue" to scan device
+6. **Device Scanning**:
+   - System connects via existing credentials
+   - Scans current interfaces and services
+   - Detects configuration changes
+7. **Step 3 (Service Configuration)**:
+   - User modifies services (enable/disable Hotspot or PPPoE)
+   - Update network configuration (subnet, CIDR)
+   - Change interface selection (add/remove ports)
+   - Toggle anti-sharing settings
+8. **Provisioning Execution**:
+   - Backend creates new session with `session_id`
+   - Only changed configurations are updated
+   - Live logs show update progress
+   - Services remain active where possible (minimal downtime)
+9. **Rollback Available**: If errors occur, system can restore previous config
+10. **Completion**: Router updated with new configuration
 
 ## Command Generation & Execution
 
