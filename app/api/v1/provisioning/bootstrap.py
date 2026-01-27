@@ -19,6 +19,7 @@ from app.api.deps import require_technician_or_admin, get_db
 from app.core.security import create_access_token
 from app.core.secrets import get_secrets_manager
 from app.services.router_provisioning import can_use_direct_api
+from app.services.ping_monitor import ping_monitor
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -401,3 +402,125 @@ async def check_direct_api_access(
     except Exception as e:
         logger.error(f"Failed to check direct API access for router {router_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to check API access")
+
+
+@router.post("/ping/start/{session_id}")
+async def start_ping_monitoring(
+    session_id: str,
+    ip_address: str = Query(..., description="Device IP address to monitor"),
+    interval_seconds: float = Query(2.0, description="Ping interval in seconds", ge=0.5, le=10.0),
+    max_attempts: int = Query(300, description="Maximum ping attempts", ge=1, le=1000),
+    timeout_ms: int = Query(1000, description="Ping timeout in milliseconds", ge=100, le=5000),
+    current_user: User = Depends(require_technician_or_admin()),
+):
+    """
+    Start real-time ICMP ping monitoring for a provisioning session.
+    
+    Results will be broadcast via WebSocket to /ws/{session_id}
+    
+    Args:
+        session_id: Provisioning session identifier
+        ip_address: Target device IP address to ping
+        interval_seconds: Time between ping attempts (0.5-10 seconds)
+        max_attempts: Maximum number of ping attempts (1-1000)
+        timeout_ms: Ping timeout in milliseconds (100-5000)
+    """
+    try:
+        # Check if already monitoring
+        if ping_monitor.is_monitoring(session_id):
+            return {
+                "message": "Ping monitoring already active for this session",
+                "session_id": session_id,
+                "status": "already_running"
+            }
+        
+        # Start monitoring in background
+        await ping_monitor.start_monitoring(
+            session_id=session_id,
+            ip_address=ip_address,
+            interval_seconds=interval_seconds,
+            max_attempts=max_attempts,
+            timeout_ms=timeout_ms
+        )
+        
+        logger.info(
+            f"Started ping monitoring for session {session_id} "
+            f"targeting {ip_address} (user: {current_user.username})"
+        )
+        
+        return {
+            "message": "Ping monitoring started successfully",
+            "session_id": session_id,
+            "ip_address": ip_address,
+            "interval_seconds": interval_seconds,
+            "max_attempts": max_attempts,
+            "status": "started"
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to start ping monitoring: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start ping monitoring: {str(e)}")
+
+
+@router.post("/ping/stop/{session_id}")
+async def stop_ping_monitoring(
+    session_id: str,
+    current_user: User = Depends(require_technician_or_admin()),
+):
+    """
+    Stop ping monitoring for a provisioning session.
+    
+    Args:
+        session_id: Provisioning session identifier
+    """
+    try:
+        if not ping_monitor.is_monitoring(session_id):
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active ping monitoring for session {session_id}"
+            )
+        
+        await ping_monitor.stop_monitoring(session_id)
+        
+        logger.info(
+            f"Stopped ping monitoring for session {session_id} "
+            f"(user: {current_user.username})"
+        )
+        
+        return {
+            "message": "Ping monitoring stopped successfully",
+            "session_id": session_id,
+            "status": "stopped"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to stop ping monitoring: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop ping monitoring: {str(e)}")
+
+
+@router.get("/ping/status/{session_id}")
+async def get_ping_status(
+    session_id: str,
+    current_user: User = Depends(require_technician_or_admin()),
+):
+    """
+    Get the latest ping monitoring status for a session.
+    
+    Args:
+        session_id: Provisioning session identifier
+    """
+    try:
+        is_monitoring = ping_monitor.is_monitoring(session_id)
+        latest_result = ping_monitor.get_latest_result(session_id)
+        
+        return {
+            "session_id": session_id,
+            "is_monitoring": is_monitoring,
+            "latest_result": latest_result
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to get ping status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get ping status: {str(e)}")

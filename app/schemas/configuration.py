@@ -1,7 +1,8 @@
 """Configuration schemas."""
 
+from datetime import datetime
 from typing import Any, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 from app.models.configuration import ConfigType
 
 
@@ -35,8 +36,13 @@ class ConfigurationResponse(ConfigurationBase):
     """Schema for configuration response."""
     id: int = Field(..., description="Configuration ID")
     is_active: bool = Field(..., description="Whether the configuration is active")
-    created_at: str = Field(..., description="Creation timestamp")
-    updated_at: Optional[str] = Field(None, description="Last update timestamp")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: Optional[datetime] = Field(None, description="Last update timestamp")
+
+    @field_serializer('created_at', 'updated_at')
+    def serialize_datetime(self, value: Optional[datetime]) -> Optional[str]:
+        """Serialize datetime to ISO format string."""
+        return value.isoformat() if value else None
 
     class Config:
         from_attributes = True
