@@ -16,7 +16,7 @@ class CredentialEncryption:
     def __init__(self):
         """Initialize encryption with key from environment."""
         # Get encryption key from environment or generate one (for dev)
-        encryption_key = os.getenv('ENCRYPTION_KEY')
+        encryption_key = os.getenv('ENCRYPTION_KEY','development-only-key-please-change')
         
         if not encryption_key:
             # Development only - generate from SECRET_KEY

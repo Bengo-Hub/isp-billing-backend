@@ -22,8 +22,8 @@ class Configuration(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String(255), unique=True, index=True, nullable=False)
-    value = Column(Text, nullable=True)
-    encrypted_value = Column(Text, nullable=True)
+    value = Column(Text, nullable=True) # Plain text value
+    encrypted_value = Column(Text, nullable=True) # Encrypted value if is_encrypted is True
     config_type = Column(Enum(ConfigType), default=ConfigType.STRING, nullable=False)
     description = Column(Text, nullable=True)
     is_encrypted = Column(Boolean, default=False, nullable=False)
