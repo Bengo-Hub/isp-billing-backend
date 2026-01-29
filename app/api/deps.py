@@ -1,5 +1,6 @@
 """API dependencies and middleware."""
 
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional, Union
 
 from fastapi import Depends, HTTPException, status, Request
@@ -7,10 +8,31 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2Pas
 from fastapi.security.utils import get_authorization_scheme_param
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
+from app.core.database import get_db, AsyncSessionLocal
 from app.core.security import verify_token
 from app.models.user import User, UserRole
 from app.modules.auth import UserService
+
+
+@asynccontextmanager
+async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Async context manager for database sessions.
+
+    Use this when you need a database session outside of FastAPI's
+    dependency injection (e.g., in webhook handlers, background tasks).
+
+    Usage:
+        async with get_db_session() as db:
+            result = await db.execute(...)
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 class OAuth2PasswordBearerOrHTTPBearer(OAuth2PasswordBearer):

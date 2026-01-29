@@ -11,7 +11,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = 'add_router_credentials'
-down_revision = None  # Update this to the previous migration
+down_revision = '7c4d19524c5d'  # Depends on initial migration
 branch_labels = None
 depends_on = None
 
