@@ -125,7 +125,7 @@ class PaymentGatewayFactory:
         # Decrypt credentials if present
         credentials = {}
         if gateway_config.credentials:
-            key = encryption_key or getattr(settings, "gateway_encryption_key", None)
+            key = encryption_key or getattr(settings, "encryption_key", None)
             if key:
                 try:
                     credentials = cls._decrypt_credentials(
@@ -190,7 +190,7 @@ class PaymentGatewayFactory:
         Returns:
             Encrypted credentials string
         """
-        encryption_key = key or getattr(settings, "gateway_encryption_key", None)
+        encryption_key = key or getattr(settings, "encryption_key", None)
         if not encryption_key:
             # Return as plain JSON for development
             return json.dumps(credentials)

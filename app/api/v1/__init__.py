@@ -66,6 +66,7 @@ from .platform import router as platform_router
 from .portal import router as portal_router
 from .tenant import router as tenant_router
 from .onboarding import router as onboarding_router
+from .payments import router as payments_router
 
 api_router = APIRouter()
 
@@ -132,3 +133,8 @@ api_router.include_router(tenant_router)
 # 11. ISP Provider Onboarding
 # =============================================================================
 api_router.include_router(onboarding_router)
+
+# =============================================================================
+# 12. Public Payment Endpoints (No Auth Required)
+# =============================================================================
+api_router.include_router(payments_router)

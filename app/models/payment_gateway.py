@@ -65,17 +65,22 @@ class TransactionFeeType(str, PyEnum):
 
 class PaymentGatewayConfig(Base):
     """
-    Payment gateway configuration for an organization.
+    Payment gateway configuration for platform or organization.
 
-    Each organization can have multiple payment gateways configured,
-    with one marked as primary. Credentials are stored encrypted.
+    When organization_id is NULL, this is a platform-level gateway
+    where all customer payments are collected (Platform Owner config).
+
+    When organization_id is set, this is an organization-specific gateway.
+    Credentials are stored encrypted.
     """
 
     __tablename__ = "payment_gateway_configs"
 
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
-    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+    # NULL = platform-level gateway (collects all customer payments)
+    # Set = organization-specific gateway
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
 
     # Gateway information
     gateway_type = Column(Enum(GatewayType), nullable=False, index=True)

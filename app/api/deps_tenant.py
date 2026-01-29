@@ -88,20 +88,33 @@ async def get_current_organization(
     """
     Get the current organization for the authenticated user.
 
-    For platform owners, this will raise an error as they don't belong to an org.
+    For platform owners, checks for organization context from:
+    - X-Tenant-ID header
+    - Subdomain
+    - Custom domain
+
+    If no context is found, raises an error.
     Use get_optional_organization for endpoints that support both platform owners and ISP users.
     """
-    if current_user.role == UserRole.PLATFORM_OWNER:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Platform owners must specify an organization"
-        )
+    organization_id = None
 
-    if not current_user.organization_id:
+    if current_user.role == UserRole.PLATFORM_OWNER:
+        # Platform owners must specify organization via header or context
+        organization_id = get_current_organization_id()
+        if not organization_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Platform owners must specify an organization via X-Tenant-ID header"
+            )
+    else:
+        # Regular users use their assigned organization
+        organization_id = current_user.organization_id
+
+    if not organization_id:
         raise TenantNotFoundError()
 
     result = await db.execute(
-        select(Organization).where(Organization.id == current_user.organization_id)
+        select(Organization).where(Organization.id == organization_id)
     )
     organization = result.scalar_one_or_none()
 
