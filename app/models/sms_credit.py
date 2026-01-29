@@ -408,6 +408,90 @@ class PhoneNumberManagement(Base):
         return start_hour <= current_hour <= end_hour
 
 
+class SMSGatewayStatus(str, PyEnum):
+    """SMS gateway status enumeration."""
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    PENDING_VERIFICATION = "pending_verification"
+    ERROR = "error"
+
+
+class SMSGatewayConfig(Base):
+    """
+    SMS gateway configuration for platform-level SMS sending.
+
+    When organization_id is NULL, this is a platform-level gateway
+    that handles SMS for the entire platform.
+
+    When organization_id is set, this is an organization-specific gateway.
+    Credentials are stored encrypted.
+    """
+
+    __tablename__ = "sms_gateway_configs"
+
+    # Primary key
+    id = Column(Integer, primary_key=True, index=True)
+
+    # NULL = platform-level gateway (handles all SMS)
+    # Set = organization-specific gateway
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+
+    # Gateway information
+    provider_type = Column(Enum(SMSProviderType), nullable=False, index=True)
+    name = Column(String(100), nullable=False)  # Display name (e.g., "Twilio SMS")
+    description = Column(Text, nullable=True)
+
+    # Status
+    status = Column(Enum(SMSGatewayStatus), default=SMSGatewayStatus.PENDING_VERIFICATION, nullable=False)
+    is_active = Column(Boolean, default=False, nullable=False)
+    is_primary = Column(Boolean, default=False, nullable=False)
+
+    # Environment (sandbox/production)
+    environment = Column(String(20), default="sandbox", nullable=False)
+
+    # Credentials (encrypted JSON)
+    credentials = Column(Text, nullable=True)  # Encrypted JSON with API keys, secrets
+
+    # Provider-specific settings
+    default_sender_id = Column(String(50), nullable=True)  # Default sender phone/alphanumeric ID
+    webhook_url = Column(String(500), nullable=True)  # For delivery status callbacks
+
+    # Usage stats
+    total_messages = Column(Integer, default=0, nullable=False)
+    total_cost = Column(Numeric(14, 2), default=0, nullable=False)
+    last_message_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    last_error_at = Column(DateTime, nullable=True)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    verified_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    organization = relationship("Organization", backref="sms_gateways")
+
+    # Constraints
+    __table_args__ = (
+        UniqueConstraint('organization_id', 'provider_type', name='uq_org_sms_provider'),
+    )
+
+    def __repr__(self) -> str:
+        """String representation."""
+        return f"<SMSGatewayConfig(id={self.id}, org={self.organization_id}, type={self.provider_type})>"
+
+    def get_display_name(self) -> str:
+        """Get user-friendly display name for gateway."""
+        type_names = {
+            SMSProviderType.TWILIO: "Twilio",
+            SMSProviderType.AFRICASTALKING: "Africa's Talking",
+            SMSProviderType.SMS_GLOBAL: "SMS Global",
+            SMSProviderType.CUSTOM: "Custom Provider",
+        }
+        return type_names.get(self.provider_type, self.provider_type.value)
+
+
 class SMSCreditUsageStats(Base):
     """SMS credit usage statistics and analytics."""
 
