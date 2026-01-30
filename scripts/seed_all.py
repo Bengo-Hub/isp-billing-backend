@@ -248,7 +248,7 @@ class MasterSeeder:
         import json
         from app.models.notification import NotificationTemplate, NotificationType
         from app.models.user import User
-        
+
         # Get first admin user for created_by
         result = await db.execute(
             select(User).limit(1)
@@ -257,8 +257,9 @@ class MasterSeeder:
         if not admin_user:
             self.logger.warning("[WARN] No user found for notification templates created_by, skipping")
             return
-        
+
         templates = [
+            # Email Templates
             {
                 "name": "Welcome Email",
                 "notification_type": NotificationType.WELCOME,
@@ -278,39 +279,102 @@ class MasterSeeder:
                 "is_active": True
             },
             {
-                "name": "Payment Confirmation SMS",
-                "notification_type": NotificationType.SMS,
-                "subject_template": None,
-                "body_template": "Payment confirmed! KES {amount} received for {plan_name}. Valid until {expiry_date}. Thank you!",
-                "variables": json.dumps(["amount", "plan_name", "expiry_date"]),
-                "is_active": True
-            },
-            {
                 "name": "Service Expiry Reminder",
                 "notification_type": NotificationType.SUBSCRIPTION,
                 "subject_template": None,
                 "body_template": "Hi {customer_name}, your {plan_name} expires on {expiry_date}. Renew now to avoid service interruption. Pay via MPESA: {paybill_number}",
                 "variables": json.dumps(["customer_name", "plan_name", "expiry_date", "paybill_number"]),
                 "is_active": True
-            }
+            },
+            # SMS Templates
+            {
+                "name": "subscription_success",
+                "notification_type": NotificationType.SMS,
+                "subject_template": None,
+                "body_template": "Dear {username}, you have successfully subscribed to {plan_name}. Your subscription will expire on {expiry_date}. Your username is {username} and password is {password}.",
+                "hotspot_template": "Dear {username}, you have successfully subscribed to {plan_name}. Expires: {expiry_date}. Username: {username}, Password: {password}.",
+                "pppoe_template": "Dear {username}, your PPPoE subscription to {plan_name} is now active. Expires: {expiry_date}. Username: {username}, Password: {password}.",
+                "description": "Sent when a customer successfully subscribes to a plan",
+                "category": "subscription",
+                "variables": json.dumps(["username", "plan_name", "expiry_date", "password"]),
+                "user_type_specific": True,
+                "is_active": True
+            },
+            {
+                "name": "subscription_expiry_reminder",
+                "notification_type": NotificationType.SMS,
+                "subject_template": None,
+                "body_template": "Hi {username}, your {plan_name} subscription expires on {expiry_date}. Renew now to continue enjoying uninterrupted service. Visit {portal_url} or pay via M-PESA.",
+                "hotspot_template": "Hi {username}, your hotspot package {plan_name} expires on {expiry_date}. Renew to stay connected!",
+                "pppoe_template": "Hi {username}, your PPPoE subscription {plan_name} expires on {expiry_date}. Renew to avoid disconnection.",
+                "description": "Sent to remind customers before their subscription expires",
+                "category": "subscription",
+                "variables": json.dumps(["username", "plan_name", "expiry_date", "portal_url"]),
+                "user_type_specific": True,
+                "is_active": True
+            },
+            {
+                "name": "subscription_expired",
+                "notification_type": NotificationType.SMS,
+                "subject_template": None,
+                "body_template": "Dear {username}, your {plan_name} subscription has expired. Renew now at {portal_url} to restore your internet access.",
+                "hotspot_template": "Dear {username}, your hotspot package has expired. Buy a new package to get back online.",
+                "pppoe_template": "Dear {username}, your PPPoE subscription has expired. Please renew to restore your connection.",
+                "description": "Sent when a customer's subscription expires",
+                "category": "subscription",
+                "variables": json.dumps(["username", "plan_name", "portal_url"]),
+                "user_type_specific": True,
+                "is_active": True
+            },
+            {
+                "name": "payment_received",
+                "notification_type": NotificationType.SMS,
+                "subject_template": None,
+                "body_template": "Payment of {currency} {amount} received. Transaction ID: {transaction_id}. Thank you for your payment!",
+                "hotspot_template": "Payment of {currency} {amount} received for {plan_name}. Your hotspot is now active. Enjoy browsing!",
+                "pppoe_template": "Payment of {currency} {amount} received for {plan_name}. Your PPPoE subscription has been activated.",
+                "description": "Sent when a payment is successfully processed",
+                "category": "billing",
+                "variables": json.dumps(["currency", "amount", "transaction_id", "plan_name"]),
+                "user_type_specific": True,
+                "is_active": True
+            },
+            {
+                "name": "welcome_sms",
+                "notification_type": NotificationType.SMS,
+                "subject_template": None,
+                "body_template": "Welcome to {company_name}! Your account has been created. Username: {username}. Visit {portal_url} to manage your subscription.",
+                "hotspot_template": "Welcome to {company_name}! Connect to our WiFi hotspot and use username: {username} to login.",
+                "pppoe_template": "Welcome to {company_name}! Your PPPoE account is ready. Username: {username}. Contact support if you need help setting up.",
+                "description": "Sent when a new customer account is created",
+                "category": "welcome",
+                "variables": json.dumps(["company_name", "username", "portal_url"]),
+                "user_type_specific": True,
+                "is_active": True
+            },
         ]
-        
+
         for template_data in templates:
             template = NotificationTemplate(
                 name=template_data["name"],
                 notification_type=template_data["notification_type"],
-                subject_template=template_data["subject_template"],
+                subject_template=template_data.get("subject_template"),
                 body_template=template_data["body_template"],
-                variables=template_data["variables"],
-                is_active=template_data["is_active"],
+                hotspot_template=template_data.get("hotspot_template"),
+                pppoe_template=template_data.get("pppoe_template"),
+                description=template_data.get("description"),
+                category=template_data.get("category"),
+                variables=template_data.get("variables"),
+                user_type_specific=template_data.get("user_type_specific", False),
+                is_active=template_data.get("is_active", True),
                 created_by=admin_user.id,
                 created_at=datetime.utcnow()
             )
-            
+
             db.add(template)
-        
+
         await db.commit()
-        self.logger.info("[OK] Seeded notification templates")
+        self.logger.info("[OK] Seeded notification templates (including 5 SMS templates)")
 
     async def _seed_ui_preferences(self, db: AsyncSession):
         """Seed UI preferences."""
