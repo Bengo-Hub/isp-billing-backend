@@ -224,24 +224,31 @@ class MasterSeeder:
             from app.models.notification import NotificationTemplate
             from app.models.user_settings import UIPreferences
             from app.models.configuration import Configuration
+            from app.models.sms_credit import SMSTransaction, SMSCreditAccount, SMSTopUp
 
+            await db.execute(delete(SMSTransaction))
+            await db.execute(delete(SMSTopUp))
+            await db.execute(delete(SMSCreditAccount))
             await db.execute(delete(NotificationTemplate))
             await db.execute(delete(UIPreferences))
             await db.execute(delete(Configuration))
             await db.commit()
-            self.logger.info("Cleared system-level data (notifications, ui prefs, configurations)")
+            self.logger.info("Cleared system-level data (sms, notifications, ui prefs, configurations)")
 
     async def _seed_system_data(self):
         """Seed additional system data."""
         async with AsyncSessionLocal() as db:
             # Seed notification templates
             await self._seed_notification_templates(db)
-            
+
             # Seed UI preferences
             await self._seed_ui_preferences(db)
-            
+
             # Seed configuration settings
             await self._seed_configuration_settings(db)
+
+            # Seed SMS messages (for Messages page)
+            await self._seed_sms_messages(db)
 
     async def _seed_notification_templates(self, db: AsyncSession):
         """Seed notification templates."""
@@ -514,6 +521,110 @@ class MasterSeeder:
         await db.commit()
         self.logger.info("[OK] Seeded configuration settings")
 
+    async def _seed_sms_messages(self, db: AsyncSession):
+        """Seed SMS messages/transactions for the Messages page."""
+        import random
+        import uuid
+        from decimal import Decimal
+        from datetime import timedelta
+        from app.models.sms_credit import (
+            SMSTransaction, SMSTransactionType, SMSTransactionStatus,
+            SMSCreditAccount, SMSProviderType
+        )
+        from app.models.user import User
+
+        # Get some users to associate with messages
+        result = await db.execute(
+            select(User).limit(20)
+        )
+        users = result.scalars().all()
+        if not users:
+            self.logger.warning("[WARN] No users found for SMS messages, skipping")
+            return
+
+        # First, create an SMS credit account if it doesn't exist
+        account_result = await db.execute(
+            select(SMSCreditAccount).limit(1)
+        )
+        account = account_result.scalar_one_or_none()
+
+        if not account:
+            account = SMSCreditAccount(
+                account_name="Primary SMS Account",
+                account_code="SMS001",
+                provider_type=SMSProviderType.AFRICASTALKING,
+                phone_number="+254700000000",
+                country_code="+254",
+                current_balance=Decimal("5000.00"),
+                currency="KES",
+                is_active=True,
+                is_default=True,
+                created_by=users[0].id,
+                created_at=datetime.utcnow()
+            )
+            db.add(account)
+            await db.flush()
+
+        # Sample plan names
+        plan_names = [
+            "GoFiNet 2HR SURF UNLIMITED",
+            "GoFiNet DAILY UNLIMITED",
+            "GoFiNet WEEKLY PREMIUM",
+            "GoFiNet MONTHLY BASIC",
+            "GoFiNet MONTHLY PREMIUM",
+        ]
+
+        # Sample phone numbers (Kenyan format)
+        phone_prefixes = ["0719", "0720", "0722", "0723", "0724", "0725", "0726", "0728", "0729", "0796", "0758", "0713"]
+
+        messages = []
+        now = datetime.utcnow()
+
+        for i in range(15):
+            user = random.choice(users)
+            username = user.username or user.email or f"C{random.randint(100, 999)}"
+            phone = random.choice(phone_prefixes) + str(random.randint(100000, 999999))
+            plan = random.choice(plan_names)
+            password = str(random.randint(1000, 9999))
+
+            # Calculate expiry date (2-24 hours from sent time)
+            sent_time = now - timedelta(hours=random.randint(1, 72))
+            expiry_time = sent_time + timedelta(hours=random.randint(2, 24))
+
+            message_content = (
+                f"Dear {username}, you have successfully subscribed to {plan}. "
+                f"Your subscription will expire on {expiry_time.strftime('%d.%m.%Y %H:%M:%S')}. "
+                f"Your username is {username} and password is {password}."
+            )
+
+            balance_before = Decimal("5000.00") - Decimal(str(i * 0.80))
+            balance_after = balance_before - Decimal("0.80")
+
+            transaction = SMSTransaction(
+                transaction_id=str(uuid.uuid4()),
+                account_id=account.id,
+                transaction_type=SMSTransactionType.USAGE,
+                status=SMSTransactionStatus.COMPLETED,
+                amount=Decimal("0.80"),
+                currency="KES",
+                recipient_phone=phone,
+                message_content=message_content,
+                message_length=len(message_content),
+                sms_count=1,
+                delivery_status="delivered",
+                delivery_time=sent_time + timedelta(seconds=random.randint(2, 30)),
+                user_id=user.id,
+                balance_before=balance_before,
+                balance_after=balance_after,
+                created_at=sent_time,
+                processed_at=sent_time
+            )
+            messages.append(transaction)
+            db.add(transaction)
+
+        await db.commit()
+        self.logger.info(f"[OK] Seeded {len(messages)} SMS messages for Messages page")
+
     async def clear_all_data(self):
         """Clear all data from the database."""
         self.logger.warning("[TRASH]  CLEARING ALL DATA FROM DATABASE")
@@ -551,7 +662,11 @@ class MasterSeeder:
                 from app.models.notification import NotificationTemplate
                 from app.models.user_settings import UIPreferences
                 from app.models.configuration import Configuration
+                from app.models.sms_credit import SMSTransaction, SMSCreditAccount, SMSTopUp
 
+                await db.execute(delete(SMSTransaction))
+                await db.execute(delete(SMSTopUp))
+                await db.execute(delete(SMSCreditAccount))
                 await db.execute(delete(NotificationTemplate))
                 await db.execute(delete(UIPreferences))
                 await db.execute(delete(Configuration))
@@ -607,7 +722,8 @@ class MasterSeeder:
         print("  * Centipid licences with payment history")
         print("  * Customer subscriptions with billing data")
         print("  * Package templates and categories")
-        print("  * Notification templates")
+        print("  * Notification templates (including SMS templates)")
+        print("  * SMS messages/transactions for Messages page")
         print("  * System configuration settings")
         
         print("=" * 80)

@@ -34,12 +34,12 @@ class SMSProviderType(str, PyEnum):
 
 class SMSTransactionStatus(str, PyEnum):
     """SMS transaction status enumeration."""
-    
-    PENDING = "pending"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    REFUNDED = "refunded"
+
+    PENDING = "PENDING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    REFUNDED = "REFUNDED"
 
 
 class SMSTransactionType(str, PyEnum):
@@ -59,7 +59,10 @@ class SMSCreditAccount(Base):
 
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
-    
+
+    # Organization (tenant) - each ISP has their own SMS account
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+
     # Account identification
     account_name = Column(String(100), nullable=False)
     account_code = Column(String(50), unique=True, nullable=False, index=True)
@@ -105,7 +108,8 @@ class SMSCreditAccount(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     
     # Relationships
-    creator = relationship("User", backref="sms_credit_accounts")
+    organization = relationship("Organization", backref="sms_credit_accounts")
+    creator = relationship("User", backref="created_sms_credit_accounts")
     transactions = relationship("SMSTransaction", back_populates="account", cascade="all, delete-orphan")
     top_ups = relationship("SMSTopUp", back_populates="account", cascade="all, delete-orphan")
 
@@ -490,6 +494,56 @@ class SMSGatewayConfig(Base):
             SMSProviderType.CUSTOM: "Custom Provider",
         }
         return type_names.get(self.provider_type, self.provider_type.value)
+
+
+class PlatformSMSSettings(Base):
+    """
+    Platform-level SMS pricing and payment settings.
+
+    Defines how much platform charges ISPs for SMS and where
+    ISP payments are collected.
+    """
+
+    __tablename__ = "platform_sms_settings"
+
+    # Primary key
+    id = Column(Integer, primary_key=True, index=True)
+
+    # SMS Pricing
+    cost_per_sms = Column(Numeric(10, 4), default=0.50, nullable=False)  # Cost per SMS unit
+    currency = Column(String(3), default="KES", nullable=False)
+    minimum_top_up_amount = Column(Numeric(10, 2), default=100, nullable=False)
+
+    # Payment Collection Settings (where ISP payments go)
+    payment_method = Column(String(50), default="mpesa", nullable=False)  # mpesa, paystack, bank
+    mpesa_paybill = Column(String(20), nullable=True)
+    mpesa_till_number = Column(String(20), nullable=True)
+    mpesa_account_name = Column(String(100), nullable=True)
+    bank_account_number = Column(String(50), nullable=True)
+    bank_name = Column(String(100), nullable=True)
+    bank_branch = Column(String(100), nullable=True)
+    paystack_subaccount_code = Column(String(100), nullable=True)
+
+    # SMS Unit Conversion
+    sms_per_unit = Column(Integer, default=1, nullable=False)  # How many SMS per credit unit
+
+    # Active status
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def __repr__(self) -> str:
+        """String representation."""
+        return f"<PlatformSMSSettings(id={self.id}, cost_per_sms={self.cost_per_sms})>"
+
+    def calculate_sms_credits(self, amount: Decimal) -> int:
+        """Calculate how many SMS credits for a given amount."""
+        if self.cost_per_sms <= 0:
+            return 0
+        credits = amount / self.cost_per_sms
+        return int(credits) * self.sms_per_unit
 
 
 class SMSCreditUsageStats(Base):
