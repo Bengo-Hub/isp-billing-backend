@@ -119,6 +119,16 @@ class TestConnectionResponse(BaseModel):
     details: Optional[dict] = None
 
 
+class PlatformSMSBalanceResponse(BaseModel):
+    """Response for platform SMS gateway balance."""
+    success: bool
+    balance: float
+    currency: str
+    provider: str
+    environment: str
+    message: Optional[str] = None
+
+
 # =========================================================================
 # Endpoints
 # =========================================================================
@@ -155,6 +165,96 @@ async def list_platform_sms_gateways(
         )
         for g in gateways
     ]
+
+
+@router.get("/balance", response_model=PlatformSMSBalanceResponse)
+async def get_platform_sms_balance(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_platform_owner),
+):
+    """
+    Get the actual SMS provider account balance.
+
+    Platform Owner only. Returns the real-time balance from the primary
+    SMS gateway (e.g., Africa's Talking account balance).
+    """
+    # Get primary active gateway
+    result = await db.execute(
+        select(SMSGatewayConfig).where(
+            SMSGatewayConfig.organization_id.is_(None),
+            SMSGatewayConfig.is_active == True,
+            SMSGatewayConfig.is_primary == True,
+        )
+    )
+    gateway = result.scalar_one_or_none()
+
+    if not gateway:
+        # Try any active gateway
+        result = await db.execute(
+            select(SMSGatewayConfig).where(
+                SMSGatewayConfig.organization_id.is_(None),
+                SMSGatewayConfig.is_active == True,
+            )
+        )
+        gateway = result.scalar_one_or_none()
+
+    if not gateway:
+        return PlatformSMSBalanceResponse(
+            success=False,
+            balance=0,
+            currency="KES",
+            provider="none",
+            environment="unknown",
+            message="No SMS gateway configured",
+        )
+
+    if not gateway.credentials:
+        return PlatformSMSBalanceResponse(
+            success=False,
+            balance=0,
+            currency="KES",
+            provider=gateway.provider_type.value,
+            environment=gateway.environment or "sandbox",
+            message="Gateway credentials not configured",
+        )
+
+    try:
+        # Decrypt credentials
+        encryption_key = getattr(settings, 'encryption_key', None)
+        if encryption_key:
+            credentials = PaymentGatewayFactory._decrypt_credentials(
+                gateway.credentials, encryption_key
+            )
+        else:
+            import json
+            credentials = json.loads(gateway.credentials)
+
+        # Create provider and get balance
+        provider = await SMSProviderFactory.create(
+            provider_type=gateway.provider_type,
+            credentials=credentials,
+            is_active=gateway.is_active,
+        )
+
+        balance, currency = await provider.get_account_balance()
+
+        return PlatformSMSBalanceResponse(
+            success=True,
+            balance=balance,
+            currency=currency,
+            provider=gateway.provider_type.value,
+            environment=gateway.environment or "sandbox",
+        )
+
+    except Exception as e:
+        return PlatformSMSBalanceResponse(
+            success=False,
+            balance=0,
+            currency="KES",
+            provider=gateway.provider_type.value,
+            environment=gateway.environment or "sandbox",
+            message=str(e),
+        )
 
 
 @router.get("/providers")
@@ -278,6 +378,99 @@ async def create_platform_sms_gateway(
         has_credentials=bool(gateway.credentials),
         status=gateway.status.value if gateway.status else "pending_verification",
         last_error=gateway.last_error,
+    )
+
+
+# =========================================================================
+# ISP SMS Purchases Overview (Platform Admin View)
+# =========================================================================
+
+class ISPSMSPurchaseItem(BaseModel):
+    """Single ISP SMS purchase record."""
+    id: int
+    organization_id: int
+    organization_name: str
+    amount: float
+    sms_credits: int
+    status: str
+    payment_reference: Optional[str] = None
+    purchased_at: str
+    current_balance: float
+
+
+class ISPSMSPurchasesResponse(BaseModel):
+    """Response for ISP SMS purchases list."""
+    purchases: List[ISPSMSPurchaseItem]
+    total: int
+    total_revenue: float
+    total_sms_sold: int
+
+
+@router.get("/isp-purchases", response_model=ISPSMSPurchasesResponse)
+async def get_isp_sms_purchases(
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_platform_owner),
+) -> ISPSMSPurchasesResponse:
+    """
+    Get all ISP SMS purchases across the platform.
+
+    Returns a list of SMS top-up purchases made by ISPs, including
+    organization details, amounts, and current balances.
+    """
+    from sqlalchemy import func
+    from app.models.sms_credit import SMSTopUp, SMSTransactionStatus, SMSCreditAccount
+    from app.models.organization import Organization
+
+    # Query top-ups with organization info
+    query = (
+        select(SMSTopUp, SMSCreditAccount, Organization)
+        .join(SMSCreditAccount, SMSTopUp.account_id == SMSCreditAccount.id)
+        .join(Organization, SMSCreditAccount.organization_id == Organization.id)
+        .where(SMSTopUp.status == SMSTransactionStatus.COMPLETED)
+        .order_by(SMSTopUp.created_at.desc())
+        .limit(limit)
+    )
+
+    result = await db.execute(query)
+    rows = result.all()
+
+    purchases = []
+    total_revenue = 0.0
+    total_sms_sold = 0
+
+    for top_up, account, org in rows:
+        purchases.append(ISPSMSPurchaseItem(
+            id=top_up.id,
+            organization_id=org.id,
+            organization_name=org.name,
+            amount=float(top_up.amount),
+            sms_credits=top_up.sms_credits,
+            status=top_up.status.value if hasattr(top_up.status, 'value') else str(top_up.status),
+            payment_reference=top_up.payment_reference,
+            purchased_at=top_up.created_at.strftime("%Y-%m-%d %H:%M") if top_up.created_at else "",
+            current_balance=float(account.current_balance),
+        ))
+        total_revenue += float(top_up.amount)
+        total_sms_sold += top_up.sms_credits
+
+    # Get total count
+    count_query = (
+        select(func.count(SMSTopUp.id))
+        .join(SMSCreditAccount, SMSTopUp.account_id == SMSCreditAccount.id)
+        .where(
+            SMSTopUp.status == SMSTransactionStatus.COMPLETED,
+            SMSCreditAccount.organization_id.isnot(None),
+        )
+    )
+    count_result = await db.execute(count_query)
+    total = count_result.scalar() or 0
+
+    return ISPSMSPurchasesResponse(
+        purchases=purchases,
+        total=total,
+        total_revenue=total_revenue,
+        total_sms_sold=total_sms_sold,
     )
 
 
@@ -673,97 +866,4 @@ async def create_or_update_platform_sms_settings(
         paystack_subaccount_code=settings_obj.paystack_subaccount_code,
         sms_per_unit=settings_obj.sms_per_unit,
         is_active=settings_obj.is_active,
-    )
-
-
-# =========================================================================
-# ISP SMS Purchases Overview (Platform Admin View)
-# =========================================================================
-
-class ISPSMSPurchaseItem(BaseModel):
-    """Single ISP SMS purchase record."""
-    id: int
-    organization_id: int
-    organization_name: str
-    amount: float
-    sms_credits: int
-    status: str
-    payment_reference: Optional[str] = None
-    purchased_at: str
-    current_balance: float
-
-
-class ISPSMSPurchasesResponse(BaseModel):
-    """Response for ISP SMS purchases list."""
-    purchases: List[ISPSMSPurchaseItem]
-    total: int
-    total_revenue: float
-    total_sms_sold: int
-
-
-@router.get("/isp-purchases", response_model=ISPSMSPurchasesResponse)
-async def get_isp_sms_purchases(
-    limit: int = 50,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_platform_owner),
-) -> ISPSMSPurchasesResponse:
-    """
-    Get all ISP SMS purchases across the platform.
-
-    Returns a list of SMS top-up purchases made by ISPs, including
-    organization details, amounts, and current balances.
-    """
-    from sqlalchemy import func
-    from app.models.sms_credit import SMSTopUp, SMSTransactionStatus, SMSCreditAccount
-    from app.models.organization import Organization
-
-    # Query top-ups with organization info
-    query = (
-        select(SMSTopUp, SMSCreditAccount, Organization)
-        .join(SMSCreditAccount, SMSTopUp.account_id == SMSCreditAccount.id)
-        .join(Organization, SMSCreditAccount.organization_id == Organization.id)
-        .where(SMSTopUp.status == SMSTransactionStatus.COMPLETED)
-        .order_by(SMSTopUp.created_at.desc())
-        .limit(limit)
-    )
-
-    result = await db.execute(query)
-    rows = result.all()
-
-    purchases = []
-    total_revenue = 0.0
-    total_sms_sold = 0
-
-    for top_up, account, org in rows:
-        purchases.append(ISPSMSPurchaseItem(
-            id=top_up.id,
-            organization_id=org.id,
-            organization_name=org.name,
-            amount=float(top_up.amount),
-            sms_credits=top_up.sms_credits,
-            status=top_up.status.value if hasattr(top_up.status, 'value') else str(top_up.status),
-            payment_reference=top_up.payment_reference,
-            purchased_at=top_up.created_at.strftime("%Y-%m-%d %H:%M") if top_up.created_at else "",
-            current_balance=float(account.current_balance),
-        ))
-        total_revenue += float(top_up.amount)
-        total_sms_sold += top_up.sms_credits
-
-    # Get total count
-    count_query = (
-        select(func.count(SMSTopUp.id))
-        .join(SMSCreditAccount, SMSTopUp.account_id == SMSCreditAccount.id)
-        .where(
-            SMSTopUp.status == SMSTransactionStatus.COMPLETED,
-            SMSCreditAccount.organization_id.isnot(None),
-        )
-    )
-    count_result = await db.execute(count_query)
-    total = count_result.scalar() or 0
-
-    return ISPSMSPurchasesResponse(
-        purchases=purchases,
-        total=total,
-        total_revenue=total_revenue,
-        total_sms_sold=total_sms_sold,
     )

@@ -160,8 +160,11 @@ async def tenant_sms_topup(
     organization and initiates a Paystack payment.
     """
     from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
-    from app.models.sms_credit import PlatformSMSSettings
+    from app.models.sms_credit import PlatformSMSSettings, SMSGatewayConfig, SMSGatewayStatus
     from app.integrations.payment_gateways import PaymentGatewayFactory
+    from app.integrations.sms import SMSProviderFactory
+    from app.core.config import settings
+    import math
 
     # 1. Get organization ID
     organization_id = current_user.organization_id
@@ -198,7 +201,51 @@ async def tenant_sms_topup(
             message=f"Minimum amount is KES {cost_per_sms} for 1 SMS",
         )
 
-    # 4. Find or create SMS account for this organization
+    # 4. Check platform SMS gateway balance and limit purchase
+    result = await db.execute(
+        select(SMSGatewayConfig).where(
+            SMSGatewayConfig.organization_id.is_(None),
+            SMSGatewayConfig.is_active == True,
+            SMSGatewayConfig.is_primary == True,
+        )
+    )
+    platform_gateway = result.scalar_one_or_none()
+
+    if platform_gateway and platform_gateway.credentials:
+        try:
+            # Decrypt credentials and get balance
+            encryption_key = getattr(settings, 'encryption_key', None)
+            if encryption_key:
+                credentials = PaymentGatewayFactory._decrypt_credentials(
+                    platform_gateway.credentials, encryption_key
+                )
+            else:
+                import json
+                credentials = json.loads(platform_gateway.credentials)
+
+            provider = await SMSProviderFactory.create(
+                provider_type=platform_gateway.provider_type,
+                credentials=credentials,
+                is_active=platform_gateway.is_active,
+            )
+
+            platform_balance, currency = await provider.get_account_balance()
+
+            # Calculate max allowed SMS: floor(balance / 2) - half of available, truncated
+            max_allowed_sms = int(platform_balance / 2)  # Truncate, no rounding
+
+            if sms_credits > max_allowed_sms:
+                return TenantSMSTopUpResponse(
+                    success=False,
+                    message=f"Purchase limit exceeded. You can currently purchase up to {max_allowed_sms} SMS credits. "
+                            f"Platform balance allows maximum {max_allowed_sms} SMS at this time.",
+                )
+        except Exception as e:
+            # If we can't check the balance, log but allow the purchase
+            # (platform owner should monitor their balance)
+            pass
+
+    # 5. Find or create SMS account for this organization
     result = await db.execute(
         select(SMSCreditAccount).where(
             SMSCreditAccount.organization_id == organization_id,
@@ -223,7 +270,7 @@ async def tenant_sms_topup(
         db.add(account)
         await db.flush()
 
-    # 5. Get Paystack gateway
+    # 6. Get Paystack gateway
     result = await db.execute(
         select(PaymentGatewayConfig).where(
             PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
@@ -239,7 +286,7 @@ async def tenant_sms_topup(
             message="Payment gateway not configured",
         )
 
-    # 6. Create top-up record
+    # 7. Create top-up record
     reference = f"SMS-{account.id}-{uuid.uuid4().hex[:12].upper()}"
     top_up = SMSTopUp(
         top_up_reference=reference,
@@ -258,7 +305,7 @@ async def tenant_sms_topup(
     await db.commit()
     await db.refresh(top_up)
 
-    # 7. Initialize Paystack payment
+    # 8. Initialize Paystack payment
     try:
         gateway = PaymentGatewayFactory.create(gateway_config)
 

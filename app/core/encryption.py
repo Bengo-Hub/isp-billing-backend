@@ -76,3 +76,20 @@ def get_credential_encryption() -> CredentialEncryption:
     if _encryption_instance is None:
         _encryption_instance = CredentialEncryption()
     return _encryption_instance
+
+
+def encrypt_value(value: str) -> str:
+    """Encrypt a single value for storage."""
+    encryption = get_credential_encryption()
+    encrypted = encryption.fernet.encrypt(value.encode())
+    return encrypted.decode()
+
+
+def decrypt_value(encrypted_value: str) -> str:
+    """Decrypt a single encrypted value."""
+    try:
+        encryption = get_credential_encryption()
+        decrypted = encryption.fernet.decrypt(encrypted_value.encode())
+        return decrypted.decode()
+    except Exception as e:
+        raise ValueError(f"Failed to decrypt value: {str(e)}")
