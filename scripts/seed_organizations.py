@@ -259,6 +259,28 @@ class OrganizationSeeder:
 
         org_data = [
             {
+                "name": "Default Portal",
+                "slug": "default",
+                "organization_type": OrganizationType.HOTSPOT,
+                "status": OrganizationStatus.ACTIVE,
+                "email": "portal@default.local",
+                "phone": "+254700000001",
+                "address": "Default Address",
+                "city": "Nairobi",
+                "primary_color": "#ec4899",
+                "secondary_color": "#8b5cf6",
+                "portal_title": "WiFi Portal",
+                "portal_description": "Purchase internet packages",
+                "subscription_tier_id": hotspot_tier.id if hotspot_tier else None,
+                "max_routers": 5,
+                "max_customers": 500,
+                "max_users": 5,
+                "features": {
+                    "voucher_system": True,
+                    "sms_notifications": True,
+                },
+            },
+            {
                 "name": "Demo ISP Kenya",
                 "slug": "demo-isp",
                 "organization_type": OrganizationType.HYBRID,
@@ -376,11 +398,22 @@ class OrganizationSeeder:
             self.db.add(org)
             await self.db.flush()
 
-            # Create organization settings
+            # Create organization settings with hotspot configuration
+            # Use different username prefixes for each organization
+            username_prefixes = ["C", "H", "P", "L"]
+            templates = ["Aurora", "Modern", "Classic", "Minimal"]
+            idx = len(organizations)
+
             settings = OrganizationSettings(
                 organization_id=org.id,
                 invoice_prefix=data["slug"][:3].upper(),
                 voucher_format="XXXX-XXXX" if data["organization_type"] in [OrganizationType.HOTSPOT, OrganizationType.HYBRID] else None,
+                # Hotspot user generation settings
+                hotspot_username_prefix=username_prefixes[idx % len(username_prefixes)],
+                hotspot_username_counter=1,
+                hotspot_template=templates[idx % len(templates)],
+                prune_inactive_users_days=14,
+                hotspot_redirect_url="https://www.google.com",
             )
             self.db.add(settings)
 

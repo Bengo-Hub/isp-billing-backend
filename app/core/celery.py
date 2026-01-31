@@ -10,9 +10,10 @@ celery_app = Celery(
     backend=settings.celery_result_backend,
     include=[
         "app.tasks.billing_tasks",
-        "app.tasks.notification_tasks", 
+        "app.tasks.notification_tasks",
         "app.tasks.router_tasks",
         "app.tasks.provisioning_tasks",
+        "app.tasks.subscription_tasks",
     ]
 )
 
@@ -61,6 +62,31 @@ celery_app.conf.update(
         "update-provisioning-templates-stats": {
             "task": "app.tasks.provisioning_tasks.update_provisioning_templates_stats",
             "schedule": 60.0 * 60 * 6,  # Every 6 hours
+        },
+        # Subscription management tasks
+        "process-expired-subscriptions": {
+            "task": "app.tasks.subscription_tasks.process_expired_subscriptions",
+            "schedule": 60.0,  # Every minute - critical for timely disconnection
+        },
+        "send-expiring-soon-notifications": {
+            "task": "app.tasks.subscription_tasks.send_expiring_soon_notifications",
+            "schedule": 60.0 * 30,  # Every 30 minutes
+        },
+        "check-expired-sessions-fallback": {
+            "task": "app.tasks.subscription_tasks.check_and_disconnect_expired_sessions",
+            "schedule": 60.0 * 15,  # Every 15 minutes - fallback check
+        },
+        "sync-bandwidth-profiles": {
+            "task": "app.tasks.subscription_tasks.sync_bandwidth_profiles_to_all_routers",
+            "schedule": 60.0 * 60 * 6,  # Every 6 hours
+        },
+        "cleanup-orphaned-router-users": {
+            "task": "app.tasks.subscription_tasks.cleanup_orphaned_router_users",
+            "schedule": 60.0 * 60 * 24,  # Daily
+        },
+        "generate-expiry-report": {
+            "task": "app.tasks.subscription_tasks.generate_expiry_report",
+            "schedule": 60.0 * 60 * 24,  # Daily
         },
     },
 )

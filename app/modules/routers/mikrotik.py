@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.router import Router, RouterDevice, RouterLog
 from app.core.logging import get_logger
+from app.integrations.mikrotik import get_mikrotik_client
 
 logger = get_logger(__name__)
 
@@ -22,18 +23,24 @@ class MikroTikOperations:
 
     def __init__(self, db: AsyncSession):
         self.db = db
+        self.client = get_mikrotik_client()
+
+    async def _connect(self, router: Router):
+        """Helper to connect to router."""
+        return await self.client.connect(
+            ip_address=router.ip_address,
+            username=router.username,
+            password=router.password,
+            port=router.port
+        )
 
     async def check_connectivity(self, router: Router) -> bool:
         """Check router connectivity by attempting to connect and get system info."""
         try:
-            from app.integrations.mikrotik import MikroTikAPI
-
-            api = MikroTikAPI(router)
-            connected = await api.connect()
-
-            if connected:
-                system_info = await api.get_system_info()
-                await api.disconnect()
+            connection = await self._connect(router)
+            if connection:
+                system_info = await self.client.get_system_info(connection)
+                await self.client.disconnect(router.ip_address, router.port)
                 return system_info is not None
             return False
         except Exception as e:
@@ -43,16 +50,12 @@ class MikroTikOperations:
     async def sync_status(self, router: Router) -> Dict[str, Any]:
         """Sync router status from MikroTik device."""
         try:
-            from app.integrations.mikrotik import MikroTikAPI
-
-            api = MikroTikAPI(router)
-            connected = await api.connect()
-
-            if not connected:
+            connection = await self._connect(router)
+            if not connection:
                 return {"success": False, "error": "Failed to connect"}
 
             # Get system info
-            system_info = await api.get_system_info()
+            system_info = await self.client.get_system_info(connection)
             if system_info:
                 router.uptime = system_info.get("uptime", 0)
                 router.firmware_version = system_info.get("version", "Unknown")
@@ -60,13 +63,7 @@ class MikroTikOperations:
                 router.status = "online"
                 router.last_seen = datetime.utcnow()
 
-            # Get resource info
-            resources = await api.get_resources()
-            if resources:
-                router.cpu_usage = resources.get("cpu-load", 0)
-                router.memory_usage = resources.get("free-memory", 0)
-
-            await api.disconnect()
+            await self.client.disconnect(router.ip_address, router.port)
             await self.db.commit()
 
             return {"success": True, "system_info": system_info}
@@ -79,12 +76,8 @@ class MikroTikOperations:
     async def sync_devices(self, router: Router) -> int:
         """Sync devices from MikroTik router."""
         try:
-            from app.integrations.mikrotik import MikroTikAPI
-
-            api = MikroTikAPI(router)
-            connected = await api.connect()
-
-            if not connected:
+            connection = await self._connect(router)
+            if not connection:
                 logger.warning(f"Failed to connect to router {router.id} for device sync")
                 return 0
 
@@ -92,7 +85,7 @@ class MikroTikOperations:
 
             # Sync hotspot users
             try:
-                hotspot_users = await api.get_hotspot_users()
+                hotspot_users = await self.client.get_hotspot_users(connection)
                 synced_count += await self._sync_user_devices(
                     router.id, hotspot_users, "hotspot"
                 )
@@ -101,14 +94,14 @@ class MikroTikOperations:
 
             # Sync PPPoE users
             try:
-                pppoe_users = await api.get_pppoe_users()
+                pppoe_users = await self.client.get_pppoe_users(connection)
                 synced_count += await self._sync_user_devices(
                     router.id, pppoe_users, "pppoe"
                 )
             except Exception as e:
                 logger.error(f"Failed to sync PPPoE devices for router {router.id}: {e}")
 
-            await api.disconnect()
+            await self.client.disconnect(router.ip_address, router.port)
             await self.db.commit()
 
             logger.info(f"Synced {synced_count} devices for router {router.id}")
@@ -176,21 +169,17 @@ class MikroTikOperations:
     ) -> bool:
         """Create a subscription user on the MikroTik router."""
         try:
-            from app.integrations.mikrotik import MikroTikAPI
-
-            api = MikroTikAPI(router)
-            connected = await api.connect()
-
-            if not connected:
+            connection = await self._connect(router)
+            if not connection:
                 logger.warning(f"Failed to connect to router {router.id} for user creation")
                 return False
 
             if user_type == "hotspot":
-                result = await api.create_hotspot_user(username, password, profile)
+                result = await self.client.create_hotspot_user(connection, username, password, profile)
             else:
-                result = await api.create_pppoe_user(username, password, profile)
+                result = await self.client.create_pppoe_user(connection, username, password, profile)
 
-            await api.disconnect()
+            await self.client.disconnect(router.ip_address, router.port)
 
             if result:
                 logger.info(f"Created {user_type} user {username} on router {router.id}")
@@ -208,21 +197,15 @@ class MikroTikOperations:
     ) -> bool:
         """Delete a subscription user from the MikroTik router."""
         try:
-            from app.integrations.mikrotik import MikroTikAPI
-
-            api = MikroTikAPI(router)
-            connected = await api.connect()
-
-            if not connected:
+            connection = await self._connect(router)
+            if not connection:
                 logger.warning(f"Failed to connect to router {router.id} for user deletion")
                 return False
 
-            if user_type == "hotspot":
-                result = await api.delete_hotspot_user(username)
-            else:
-                result = await api.delete_pppoe_user(username)
+            # Use disable_user method to soft-delete
+            result = await self.client.disable_user(connection, username, user_type)
 
-            await api.disconnect()
+            await self.client.disconnect(router.ip_address, router.port)
 
             if result:
                 logger.info(f"Deleted {user_type} user {username} from router {router.id}")
@@ -235,22 +218,18 @@ class MikroTikOperations:
     async def backup_config(self, router: Router) -> Optional[str]:
         """Backup router configuration."""
         try:
-            from app.integrations.mikrotik import MikroTikAPI
             import json
 
-            api = MikroTikAPI(router)
-            connected = await api.connect()
-
-            if not connected:
+            connection = await self._connect(router)
+            if not connection:
                 logger.warning(f"Failed to connect to router {router.id} for config backup")
                 return None
 
             # Collect configuration data
-            system_info = await api.get_system_info()
-            interfaces = await api.get_interface_list()
-            hotspot_users = await api.get_hotspot_users()
-            pppoe_users = await api.get_pppoe_users()
-            routes = await api.get_routing_table()
+            system_info = await self.client.get_system_info(connection)
+            interfaces = await self.client.get_interfaces(connection)
+            hotspot_users = await self.client.get_hotspot_users(connection)
+            pppoe_users = await self.client.get_pppoe_users(connection)
 
             backup_data = {
                 "backup_timestamp": datetime.utcnow().isoformat(),
@@ -265,7 +244,6 @@ class MikroTikOperations:
                 "interfaces": interfaces,
                 "hotspot_users": hotspot_users,
                 "pppoe_users": pppoe_users,
-                "routes": routes,
             }
 
             backup_json = json.dumps(backup_data, indent=2, default=str)
@@ -274,7 +252,7 @@ class MikroTikOperations:
             router.config = backup_json
             await self.db.commit()
 
-            await api.disconnect()
+            await self.client.disconnect(router.ip_address, router.port)
 
             logger.info(f"Successfully backed up configuration for router {router.id}")
             return backup_json
@@ -284,38 +262,14 @@ class MikroTikOperations:
             return None
 
     async def update_firmware(self, router: Router, force: bool = False) -> Dict[str, Any]:
-        """Update router firmware via MikroTik RouterOS API.
-
-        This implementation:
-        1. Connects to the router
-        2. Checks current firmware version
-        3. Checks for available updates
-        4. Downloads and installs update if available
-        5. Schedules reboot if needed
-
-        Args:
-            router: Router instance to update
-            force: If True, reinstall current version
-
-        Returns:
-            Dictionary with update status, versions, and any errors
-        """
+        """Update router firmware via MikroTik RouterOS API."""
         try:
-            from app.integrations.mikrotik import MikroTikAPI
-
-            api = MikroTikAPI(router)
-            connected = await api.connect(
-                ip_address=router.ip_address,
-                username=router.username,
-                password=router.password,
-                port=router.port,
-            )
-
-            if not connected:
+            connection = await self._connect(router)
+            if not connection:
                 return {"status": "error", "message": "Failed to connect to router"}
 
             # Get current system info
-            system_info = await api.get_system_info(connected)
+            system_info = await self.client.get_system_info(connection)
             current_version = system_info.get("version", "Unknown") if system_info else "Unknown"
             board_name = system_info.get("board-name", "Unknown") if system_info else "Unknown"
             architecture = system_info.get("architecture-name", "Unknown") if system_info else "Unknown"
@@ -328,19 +282,18 @@ class MikroTikOperations:
             # Check for updates via /system/package/update
             try:
                 # Refresh update information
-                await api.execute_command(
-                    connected,
+                await self.client.execute_command(
+                    connection,
                     "/system/package/update",
                     method="call",
                     cmd="check-for-updates",
                 )
 
                 # Get update status (wait a moment for the check to complete)
-                import asyncio
                 await asyncio.sleep(2)
 
-                update_info = await api.execute_command(
-                    connected,
+                update_info = await self.client.execute_command(
+                    connection,
                     "/system/package/update",
                     method="get",
                 )
@@ -363,11 +316,10 @@ class MikroTikOperations:
 
                     # Check if update is available
                     if latest_version and latest_version != installed_version:
-                        # Download and install the update
                         logger.info(f"Router {router.id}: Update available from {installed_version} to {latest_version}")
 
-                        await api.execute_command(
-                            connected,
+                        await self.client.execute_command(
+                            connection,
                             "/system/package/update",
                             method="call",
                             cmd="download",
@@ -382,10 +334,7 @@ class MikroTikOperations:
                         )
                         self.db.add(log)
 
-                        # Schedule reboot to apply update (optional, can be done manually)
-                        # await api.execute_command(connected, "/system", method="call", cmd="reboot")
-
-                        await api.disconnect(router.ip_address, router.port)
+                        await self.client.disconnect(router.ip_address, router.port)
                         router.last_seen = datetime.utcnow()
                         await self.db.commit()
 
@@ -401,7 +350,7 @@ class MikroTikOperations:
                             "note": "Reboot the router to complete the update.",
                         }
                     else:
-                        await api.disconnect(router.ip_address, router.port)
+                        await self.client.disconnect(router.ip_address, router.port)
                         router.last_seen = datetime.utcnow()
                         await self.db.commit()
 
@@ -424,7 +373,7 @@ class MikroTikOperations:
                     )
                     self.db.add(log)
 
-                    await api.disconnect(router.ip_address, router.port)
+                    await self.client.disconnect(router.ip_address, router.port)
                     router.last_seen = datetime.utcnow()
                     await self.db.commit()
 
@@ -440,7 +389,6 @@ class MikroTikOperations:
             except Exception as update_error:
                 logger.warning(f"Router {router.id} update check failed: {update_error}")
 
-                # Log the failure but return partial success
                 log = RouterLog(
                     router_id=router.id,
                     action="firmware_check",
@@ -449,7 +397,7 @@ class MikroTikOperations:
                 )
                 self.db.add(log)
 
-                await api.disconnect(router.ip_address, router.port)
+                await self.client.disconnect(router.ip_address, router.port)
                 router.last_seen = datetime.utcnow()
                 await self.db.commit()
 
@@ -469,23 +417,17 @@ class MikroTikOperations:
     async def get_usage_stats(self, router: Router) -> Dict[str, Any]:
         """Get router usage statistics."""
         try:
-            from app.integrations.mikrotik import MikroTikAPI
-
-            api = MikroTikAPI(router)
-            connected = await api.connect()
-
-            if not connected:
+            connection = await self._connect(router)
+            if not connection:
                 return {"error": "Failed to connect to router"}
 
-            system_info = await api.get_system_info()
-            resources = await api.get_resources()
-            interfaces = await api.get_interface_list()
+            system_info = await self.client.get_system_info(connection)
+            interfaces = await self.client.get_interfaces(connection)
 
-            await api.disconnect()
+            await self.client.disconnect(router.ip_address, router.port)
 
             return {
                 "system_info": system_info,
-                "resources": resources,
                 "interfaces": interfaces,
                 "timestamp": datetime.utcnow().isoformat(),
             }

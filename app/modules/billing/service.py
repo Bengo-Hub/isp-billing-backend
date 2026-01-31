@@ -11,17 +11,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from app.models.billing import (
-    Invoice, 
-    InvoiceItem, 
-    Payment, 
+    Invoice,
+    InvoiceItem,
+    Payment,
     PaymentLog,
-    InvoiceStatus, 
-    PaymentStatus, 
+    InvoiceStatus,
+    PaymentStatus,
     PaymentMethod
 )
 from app.models.subscription import Subscription, SubscriptionStatus
 from app.models.user import User
-from app.integrations.mpesa import MpesaService
+from app.models.payment_gateway import PaymentGatewayConfig, PaymentTransaction, GatewayType
+from app.modules.billing.mpesa import MpesaService
+from app.integrations.payment_gateways import PaymentGatewayFactory
+from app.integrations.payment_gateways.base import PaymentStatus as GatewayPaymentStatus
 from app.api.deps import PaginationParams
 from app.core.logging import get_logger
 from app.core.exceptions import BillingError, PaymentError, ValidationError
@@ -472,7 +475,7 @@ class BillingService:
         """Handle MPESA payment callback."""
         try:
             result = await self.mpesa_service.handle_payment_callback(callback_data)
-            
+
             if result.get("success") and result.get("payment_successful"):
                 # Find payment by checkout request ID
                 checkout_request_id = result.get("checkout_request_id")
@@ -481,7 +484,7 @@ class BillingService:
                         select(Payment).where(Payment.reference_number == checkout_request_id)
                     )
                     payment = payment.scalar_one_or_none()
-                    
+
                     if payment:
                         # Update payment status
                         payment.status = PaymentStatus.COMPLETED
@@ -490,7 +493,7 @@ class BillingService:
                         payment.mpesa_transaction_date = datetime.utcnow()
                         payment.payment_date = datetime.utcnow()
                         payment.processed_date = datetime.utcnow()
-                        
+
                         await self.db.commit()
 
                         # Update invoice if linked
@@ -513,6 +516,373 @@ class BillingService:
                 "success": False,
                 "error": str(e),
             }
+
+    # ==================== PAYSTACK PAYMENT METHODS ====================
+
+    async def initiate_paystack_payment(
+        self,
+        invoice_id: int,
+        callback_url: str,
+        user_email: Optional[str] = None,
+        user_phone: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Initiate a Paystack payment for an invoice.
+
+        Args:
+            invoice_id: ID of the invoice to pay
+            callback_url: URL to redirect after payment
+            user_email: Customer email (required for Paystack)
+            user_phone: Customer phone number
+
+        Returns:
+            Dict with checkout_url, reference, and status
+        """
+        try:
+            # Get invoice
+            invoice = await self.get_invoice_by_id(invoice_id)
+            if not invoice:
+                return {"success": False, "error": "Invoice not found"}
+
+            if invoice.status == InvoiceStatus.PAID:
+                return {"success": False, "error": "Invoice is already paid"}
+
+            # Get user details
+            user = await self.db.get(User, invoice.user_id)
+            if not user:
+                return {"success": False, "error": "User not found"}
+
+            email = user_email or user.email or f"{user.phone}@customer.local"
+            phone = user_phone or user.phone or ""
+
+            # Get active Paystack gateway
+            gateway_config = await self._get_active_paystack_gateway()
+            if not gateway_config:
+                return {"success": False, "error": "Paystack gateway not configured"}
+
+            # Generate unique reference
+            reference = await self._generate_paystack_reference(invoice.invoice_number)
+
+            # Create transaction record
+            transaction = PaymentTransaction(
+                organization_id=invoice.organization_id if hasattr(invoice, 'organization_id') else 1,
+                gateway_id=gateway_config.id,
+                transaction_reference=reference,
+                amount=invoice.balance,
+                currency=invoice.currency if hasattr(invoice, 'currency') else "KES",
+                transaction_type="payment",
+                status="pending",
+                invoice_id=invoice_id,
+                subscription_id=invoice.subscription_id,
+                user_id=invoice.user_id,
+                phone_number=phone,
+                account_reference=invoice.invoice_number,
+            )
+            self.db.add(transaction)
+            await self.db.commit()
+            await self.db.refresh(transaction)
+
+            # Initialize payment with Paystack gateway
+            gateway = PaymentGatewayFactory.create(gateway_config)
+            initiation_result = await gateway.initiate_payment(
+                amount=invoice.balance,
+                phone_number=phone,
+                reference=reference,
+                description=f"Payment for invoice {invoice.invoice_number}",
+                callback_url=callback_url,
+                metadata={
+                    "email": email,
+                    "invoice_id": invoice_id,
+                    "subscription_id": invoice.subscription_id,
+                    "user_id": invoice.user_id,
+                    "invoice_number": invoice.invoice_number,
+                },
+            )
+
+            if initiation_result.success:
+                # Update transaction with gateway reference
+                transaction.external_reference = initiation_result.gateway_reference
+                transaction.extra_data = initiation_result.metadata
+                await self.db.commit()
+
+                self.logger.info(
+                    f"Paystack payment initiated for invoice {invoice.invoice_number}: ref={reference}"
+                )
+
+                return {
+                    "success": True,
+                    "checkout_url": initiation_result.checkout_url,
+                    "reference": reference,
+                    "access_code": initiation_result.metadata.get("access_code") if initiation_result.metadata else None,
+                }
+            else:
+                # Update transaction status to failed
+                transaction.status = "failed"
+                transaction.status_message = initiation_result.message
+                await self.db.commit()
+
+                self.logger.error(
+                    f"Paystack payment initiation failed for invoice {invoice.invoice_number}: "
+                    f"{initiation_result.message}"
+                )
+
+                return {"success": False, "error": initiation_result.message}
+
+        except Exception as e:
+            self.logger.error(f"Paystack payment initiation error: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def verify_paystack_payment(self, reference: str) -> Dict[str, Any]:
+        """
+        Verify a Paystack payment by reference.
+
+        Args:
+            reference: Transaction reference
+
+        Returns:
+            Dict with verification status and details
+        """
+        try:
+            # Get transaction record
+            tx_result = await self.db.execute(
+                select(PaymentTransaction).where(
+                    PaymentTransaction.transaction_reference == reference
+                )
+            )
+            transaction = tx_result.scalar_one_or_none()
+
+            if not transaction:
+                return {"success": False, "status": "not_found", "message": "Transaction not found"}
+
+            # Get gateway
+            gateway_config = await self._get_active_paystack_gateway()
+            if not gateway_config:
+                return {"success": False, "status": "error", "message": "Paystack gateway not configured"}
+
+            # Verify with gateway
+            gateway = PaymentGatewayFactory.create(gateway_config)
+            verification = await gateway.verify_payment(reference)
+
+            result = {
+                "success": verification.success,
+                "status": verification.status.value if verification.status else "pending",
+                "message": verification.message,
+            }
+
+            if verification.success:
+                result["data"] = {
+                    "reference": reference,
+                    "amount": float(verification.amount) if verification.amount else None,
+                    "currency": verification.currency,
+                    "paid_at": verification.paid_at.isoformat() if verification.paid_at else None,
+                }
+
+                # Process successful payment if not already processed
+                if transaction.status != "completed":
+                    await self._process_paystack_success(
+                        transaction,
+                        verification.amount or Decimal("0"),
+                        verification.paid_at,
+                    )
+            else:
+                # Update transaction status
+                if verification.status == GatewayPaymentStatus.FAILED:
+                    transaction.status = "failed"
+                elif verification.status == GatewayPaymentStatus.CANCELLED:
+                    transaction.status = "cancelled"
+
+                transaction.status_message = verification.message
+                await self.db.commit()
+
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Paystack verification error: {e}")
+            return {"success": False, "status": "error", "message": str(e)}
+
+    async def handle_paystack_webhook(
+        self,
+        event: str,
+        data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Process a Paystack webhook event.
+
+        Args:
+            event: Webhook event type (e.g., "charge.success")
+            data: Webhook payload data
+
+        Returns:
+            Dict with processing result
+        """
+        try:
+            reference = data.get("reference", "")
+
+            if not reference:
+                return {"success": False, "message": "No reference in webhook data"}
+
+            # Get transaction
+            tx_result = await self.db.execute(
+                select(PaymentTransaction).where(
+                    PaymentTransaction.transaction_reference == reference
+                )
+            )
+            transaction = tx_result.scalar_one_or_none()
+
+            if not transaction:
+                self.logger.warning(f"Webhook: Transaction not found for reference {reference}")
+                return {"success": False, "message": "Transaction not found"}
+
+            # Store raw callback data
+            transaction.callback_data = {"event": event, "data": data}
+
+            if event == "charge.success":
+                amount = Decimal(str(data.get("amount", 0))) / 100
+                paid_at = None
+                if data.get("paid_at"):
+                    paid_at = datetime.fromisoformat(data["paid_at"].replace("Z", "+00:00"))
+
+                await self._process_paystack_success(transaction, amount, paid_at)
+
+                return {"success": True, "message": "Payment processed successfully"}
+
+            elif event == "charge.failed":
+                transaction.status = "failed"
+                transaction.status_message = data.get("gateway_response", "Payment failed")
+                await self.db.commit()
+
+                return {"success": True, "message": "Payment failure recorded"}
+
+            elif event in ("transfer.success", "transfer.failed"):
+                transaction.status = "completed" if event == "transfer.success" else "failed"
+                transaction.completed_at = datetime.utcnow() if event == "transfer.success" else None
+                transaction.status_message = data.get("reason", "") if event == "transfer.failed" else None
+                await self.db.commit()
+
+                return {"success": True, "message": f"Transfer {event.split('.')[1]} recorded"}
+
+            else:
+                self.logger.info(f"Unhandled webhook event: {event}")
+                return {"success": True, "message": f"Event {event} acknowledged"}
+
+        except Exception as e:
+            self.logger.error(f"Paystack webhook processing error: {e}")
+            return {"success": False, "message": str(e)}
+
+    async def _process_paystack_success(
+        self,
+        transaction: PaymentTransaction,
+        amount: Decimal,
+        paid_at: Optional[datetime] = None,
+    ) -> None:
+        """Process a successful Paystack payment."""
+        try:
+            # Update transaction
+            transaction.status = "completed"
+            transaction.completed_at = paid_at or datetime.utcnow()
+            transaction.processed_at = datetime.utcnow()
+
+            # Calculate fees (Paystack Kenya: 1.5% + 100 KES capped at 2000 KES)
+            fee = min(amount * Decimal("0.015") + Decimal("100"), Decimal("2000"))
+            transaction.gateway_fee = fee
+            transaction.net_amount = amount - fee
+
+            # Create payment record
+            payment_number = await self._generate_payment_number()
+            payment = Payment(
+                payment_number=payment_number,
+                user_id=transaction.user_id,
+                invoice_id=transaction.invoice_id,
+                amount=amount,
+                currency=transaction.currency,
+                payment_method=PaymentMethod.CARD,
+                status=PaymentStatus.COMPLETED,
+                reference_number=transaction.transaction_reference,
+                payment_date=paid_at or datetime.utcnow(),
+            )
+            self.db.add(payment)
+
+            # Update invoice if linked
+            if transaction.invoice_id:
+                await self._apply_payment_to_invoice(transaction.invoice_id, amount)
+
+            # Activate subscription if linked
+            if transaction.subscription_id:
+                await self._activate_subscription_on_payment(transaction.subscription_id)
+
+            # Update gateway stats
+            gateway = await self.db.get(PaymentGatewayConfig, transaction.gateway_id)
+            if gateway:
+                gateway.total_transactions = (gateway.total_transactions or 0) + 1
+                gateway.total_amount = (gateway.total_amount or Decimal("0")) + amount
+                gateway.last_transaction_at = datetime.utcnow()
+
+            await self.db.commit()
+
+            self.logger.info(
+                f"Paystack payment processed: ref={transaction.transaction_reference}, "
+                f"amount={amount}, invoice={transaction.invoice_id}"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error processing Paystack payment: {e}")
+            await self.db.rollback()
+            raise
+
+    async def _activate_subscription_on_payment(self, subscription_id: int) -> None:
+        """Activate a subscription after successful payment."""
+        try:
+            subscription = await self.db.get(Subscription, subscription_id)
+            if not subscription:
+                return
+
+            if subscription.status == SubscriptionStatus.ACTIVE:
+                return  # Already active
+
+            # Update subscription status
+            subscription.status = SubscriptionStatus.ACTIVE
+            subscription.is_router_synced = False  # Mark for sync
+
+            await self.db.commit()
+
+            # Trigger router sync
+            try:
+                from app.modules.subscriptions.router_sync import SubscriptionRouterSyncService
+                sync_service = SubscriptionRouterSyncService(self.db)
+                sync_result = await sync_service.sync_subscription_to_router(subscription)
+
+                if sync_result["success"]:
+                    self.logger.info(f"Subscription {subscription_id} activated and synced to router")
+                else:
+                    self.logger.warning(
+                        f"Subscription {subscription_id} activated but router sync failed: "
+                        f"{sync_result.get('error')}"
+                    )
+            except Exception as e:
+                self.logger.error(f"Router sync error for subscription {subscription_id}: {e}")
+
+        except Exception as e:
+            self.logger.error(f"Error activating subscription {subscription_id}: {e}")
+
+    async def _get_active_paystack_gateway(self) -> Optional[PaymentGatewayConfig]:
+        """Get an active Paystack gateway configuration."""
+        result = await self.db.execute(
+            select(PaymentGatewayConfig).where(
+                and_(
+                    PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
+                    PaymentGatewayConfig.is_active == True,
+                )
+            ).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def _generate_paystack_reference(self, prefix: str = "PAY") -> str:
+        """Generate unique Paystack transaction reference."""
+        import secrets
+        import string
+        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        random_part = "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
+        return f"{prefix}-{timestamp}-{random_part}"
 
     async def _apply_payment_to_invoice(self, invoice_id: int, amount: Decimal) -> None:
         """Apply payment to invoice."""

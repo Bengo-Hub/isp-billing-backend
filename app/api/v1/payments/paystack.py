@@ -1,15 +1,20 @@
 """
 Paystack Payment API Endpoints.
 
-Public endpoints for payment verification and webhooks.
-These endpoints are used by the frontend callback page and Paystack webhooks.
+Complete payment flow endpoints including:
+- Payment initiation (get checkout URL)
+- Payment verification (callback handling)
+- Webhook processing
+- Bank/provider lists
+
+These endpoints are used by the frontend for the complete Paystack payment workflow.
 """
 
 import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, Header, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +30,23 @@ router = APIRouter(prefix="/payments/paystack", tags=["Payments - Paystack"])
 # =============================================================================
 # Schemas
 # =============================================================================
+
+class PaymentInitiationRequest(BaseModel):
+    """Request schema for payment initiation."""
+    invoice_id: int = Field(..., description="Invoice ID to pay")
+    callback_url: str = Field(..., description="URL to redirect after payment")
+    email: Optional[str] = Field(None, description="Customer email")
+    phone: Optional[str] = Field(None, description="Customer phone number")
+
+
+class PaymentInitiationResponse(BaseModel):
+    """Response schema for payment initiation."""
+    success: bool
+    checkout_url: Optional[str] = None
+    reference: Optional[str] = None
+    access_code: Optional[str] = None
+    error: Optional[str] = None
+
 
 class PaymentVerificationResponse(BaseModel):
     """Response schema for payment verification."""
@@ -44,6 +66,43 @@ class WebhookResponse(BaseModel):
 # Endpoints
 # =============================================================================
 
+@router.post("/initiate", response_model=PaymentInitiationResponse)
+async def initiate_payment(
+    request_data: PaymentInitiationRequest,
+    request: Request,
+):
+    """
+    Initialize a Paystack payment for an invoice.
+
+    This endpoint creates a payment transaction and returns a Paystack
+    checkout URL where the customer can complete the payment.
+
+    The callback_url is where the customer will be redirected after
+    completing (or abandoning) the payment on Paystack.
+    """
+    from app.api.deps import get_db_session
+    from app.modules.billing import BillingService
+
+    try:
+        async with get_db_session() as db:
+            billing_service = BillingService(db)
+
+            result = await billing_service.initiate_paystack_payment(
+                invoice_id=request_data.invoice_id,
+                callback_url=request_data.callback_url,
+                user_email=request_data.email,
+                user_phone=request_data.phone,
+            )
+
+            return PaymentInitiationResponse(**result)
+
+    except Exception as e:
+        logger.error(f"Payment initiation error: {e}")
+        return PaymentInitiationResponse(
+            success=False,
+            error=str(e),
+        )
+
 @router.get("/verify/{reference}", response_model=PaymentVerificationResponse)
 async def verify_payment(
     reference: str,
@@ -57,62 +116,24 @@ async def verify_payment(
 
     The reference is passed as a query parameter by Paystack
     when redirecting back to the callback URL.
+
+    This also processes the payment if successful (updates invoice,
+    activates subscription, syncs to router).
     """
     from app.api.deps import get_db_session
+    from app.modules.billing import BillingService
 
     try:
-        # Get database session
         async with get_db_session() as db:
-            # Find an active Paystack gateway
-            # In production, you'd extract org_id from the reference or metadata
-            result = await db.execute(
-                select(PaymentGatewayConfig).where(
-                    PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
-                    PaymentGatewayConfig.is_active == True,
-                ).limit(1)
+            billing_service = BillingService(db)
+            result = await billing_service.verify_paystack_payment(reference)
+
+            return PaymentVerificationResponse(
+                success=result.get("success", False),
+                status=result.get("status", "pending"),
+                message=result.get("message", ""),
+                data=result.get("data"),
             )
-            gateway_config = result.scalar_one_or_none()
-
-            if not gateway_config:
-                logger.error("No active Paystack gateway found")
-                return PaymentVerificationResponse(
-                    success=False,
-                    status="failed",
-                    message="Payment gateway not configured",
-                )
-
-            # Create gateway instance and verify payment
-            gateway = PaymentGatewayFactory.create(gateway_config)
-            verification = await gateway.verify_payment(reference)
-
-            if verification.success:
-                return PaymentVerificationResponse(
-                    success=True,
-                    status="success",
-                    message="Payment verified successfully",
-                    data={
-                        "reference": reference,
-                        "amount": float(verification.amount) if verification.amount else None,
-                        "currency": verification.currency,
-                        "paid_at": verification.paid_at.isoformat() if verification.paid_at else None,
-                        "channel": verification.raw_response.get("data", {}).get("channel") if verification.raw_response else None,
-                        "customer_email": verification.raw_response.get("data", {}).get("customer", {}).get("email") if verification.raw_response else None,
-                    },
-                )
-            else:
-                # Determine status from verification result
-                status_str = "failed"
-                if verification.status:
-                    status_str = verification.status.value.lower()
-
-                return PaymentVerificationResponse(
-                    success=False,
-                    status=status_str,
-                    message=verification.message or "Payment verification failed",
-                    data={
-                        "reference": reference,
-                    },
-                )
 
     except Exception as e:
         logger.error(f"Payment verification error: {e}")
@@ -143,6 +164,7 @@ async def paystack_webhook(
     All webhooks are signed with HMAC SHA512 using your secret key.
     """
     from app.api.deps import get_db_session
+    from app.modules.billing import BillingService
 
     try:
         # Get raw body for signature verification
@@ -183,48 +205,13 @@ async def paystack_webhook(
                         detail="Invalid signature",
                     )
 
-            # Process the webhook event
-            if event == "charge.success":
-                # Payment successful - update payment record
-                reference = data.get("reference")
-                amount = data.get("amount", 0) / 100  # Convert from kobo
-
-                logger.info(f"Payment successful: {reference}, amount: {amount}")
-
-                # TODO: Update your payment/invoice record here
-                # Example:
-                # await update_payment_status(db, reference, "completed", amount)
-
-            elif event == "charge.failed":
-                reference = data.get("reference")
-                logger.info(f"Payment failed: {reference}")
-
-                # TODO: Update payment record to failed
-                # await update_payment_status(db, reference, "failed")
-
-            elif event == "transfer.success":
-                reference = data.get("reference")
-                logger.info(f"Transfer successful: {reference}")
-
-            elif event == "transfer.failed":
-                reference = data.get("reference")
-                reason = data.get("reason", "Unknown")
-                logger.info(f"Transfer failed: {reference}, reason: {reason}")
-
-            elif event == "subscription.create":
-                subscription_code = data.get("subscription_code")
-                logger.info(f"Subscription created: {subscription_code}")
-
-            elif event == "invoice.payment_failed":
-                subscription_code = data.get("subscription", {}).get("subscription_code")
-                logger.info(f"Subscription payment failed: {subscription_code}")
-
-            else:
-                logger.info(f"Unhandled webhook event: {event}")
+            # Process the webhook event using BillingService
+            billing_service = BillingService(db)
+            webhook_result = await billing_service.handle_paystack_webhook(event, data)
 
             return WebhookResponse(
-                success=True,
-                message=f"Webhook processed: {event}",
+                success=webhook_result.get("success", False),
+                message=webhook_result.get("message", f"Webhook processed: {event}"),
             )
 
     except json.JSONDecodeError:

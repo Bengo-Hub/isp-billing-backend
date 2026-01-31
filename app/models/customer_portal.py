@@ -82,6 +82,10 @@ class VoucherCode(Base):
     # Value
     value = Column(Numeric(10, 2), nullable=True)  # Monetary value if sold
 
+    # Hotspot credentials (auto-generated on purchase)
+    hotspot_username = Column(String(50), nullable=True, index=True)  # e.g., C029, H0001
+    hotspot_password = Column(String(20), nullable=True)  # e.g., 865, 1234
+
     # Batch info
     batch_id = Column(String(50), nullable=True, index=True)  # For batch generation
     batch_name = Column(String(100), nullable=True)

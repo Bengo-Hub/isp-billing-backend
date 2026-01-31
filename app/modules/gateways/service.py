@@ -16,7 +16,8 @@ from app.core.exceptions import ValidationError, ExternalServiceError, Configura
 from app.models.configuration import Configuration, ConfigType
 from app.modules.system import ConfigurationService
 from app.modules.notifications import NotificationService
-from app.integrations.mpesa import MpesaService
+from app.modules.billing.mpesa import MpesaService
+from app.integrations.payment_gateways.mpesa import MPesaPaybillGateway
 
 logger = get_logger(__name__)
 
@@ -324,17 +325,23 @@ class GatewayManagementService:
     async def _test_mpesa_gateway(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Test MPESA payment gateway."""
         try:
-            # Create MPESA service instance
-            mpesa_service = MpesaService(self.db)
-            
-            # Test by getting access token
-            from app.integrations.mpesa import MpesaAPI
-            mpesa_api = MpesaAPI()
-            
-            # Test access token generation
-            token_result = await mpesa_api.get_access_token()
-            
-            if token_result:
+            # Create gateway configuration
+            gateway_config = {
+                "credentials": {
+                    "consumer_key": config.get("consumer_key", ""),
+                    "consumer_secret": config.get("consumer_secret", ""),
+                    "passkey": config.get("passkey", ""),
+                    "shortcode": config.get("shortcode", ""),
+                    "environment": "sandbox",
+                },
+                "callback_url": config.get("callback_url", ""),
+            }
+
+            # Create gateway instance and test by getting access token
+            gateway = MPesaPaybillGateway(gateway_config)
+            token = await gateway._get_access_token()
+
+            if token:
                 return {
                     "status": GatewayStatus.ONLINE,
                     "success": True,
@@ -347,7 +354,7 @@ class GatewayManagementService:
                     "success": False,
                     "error": "Failed to generate MPESA access token"
                 }
-                
+
         except Exception as e:
             return {
                 "status": GatewayStatus.ERROR,

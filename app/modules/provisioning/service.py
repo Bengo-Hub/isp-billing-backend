@@ -45,7 +45,7 @@ from app.models.provisioning import (
 )
 from app.models.router import Router, RouterStatus
 from app.models.user import User
-from app.integrations.mikrotik import MikroTikAPI
+from app.integrations.mikrotik import get_mikrotik_client
 from app.modules.routers import RouterService
 from .commands import (
     load_command_templates,
@@ -53,6 +53,7 @@ from .commands import (
     generate_hotspot_commands,
     generate_pppoe_commands,
     execute_command_with_retry,
+    cleanup_existing_provisioning,
     backup_router_configuration,
     apply_security_configuration,
 )
@@ -215,9 +216,23 @@ class ProvisioningService:
                 session.progress_percentage = 100.0
 
                 await self.db.commit()
+
+                # Mark the router itself as provisioned
+                try:
+                    from app.services.router_provisioning import mark_provisioning_complete
+                    service_type_str = session.service_type.value if hasattr(session.service_type, 'value') else str(session.service_type)
+                    await mark_provisioning_complete(
+                        db=self.db,
+                        router_id=session.router_id,
+                        service_type=service_type_str
+                    )
+                    self.logger.info(f"Marked router {session.router_id} as provisioned")
+                except Exception as e:
+                    self.logger.warning(f"Failed to mark router {session.router_id} as provisioned: {e}")
+
                 await streaming_manager.log_provisioning_step(
-                    session.session_id, 
-                    "completion", 
+                    session.session_id,
+                    "completion",
                     "Provisioning completed successfully",
                     "success"
                 )
@@ -244,31 +259,36 @@ class ProvisioningService:
             await self.db.commit()
 
             router = await self.router_service.get_by_id(session.router_id)
-            api = MikroTikAPI(router)
+            client = get_mikrotik_client()
 
             # Sub-step 1: Test connection (25%)
-            await self._update_step_progress(step_log, 25.0, "Testing connection...")
+            await self._update_step_progress(step_log, 25.0, "Testing connection...", session)
             await streaming_manager.log_provisioning_step(
-                session.session_id, 
-                "connection", 
+                session.session_id,
+                "connection",
                 "Testing connection to router..."
             )
-            connected = await api.connect()
-            
-            if not connected:
+            connection = await client.connect(
+                ip_address=router.ip_address,
+                username=router.username,
+                password=router.password,
+                port=router.port
+            )
+
+            if not connection:
                 raise RouterConnectionError(f"Failed to connect to router {router.ip_address}")
 
             # Sub-step 2: Get system information (50%)
-            await self._update_step_progress(step_log, 50.0, "Gathering system information...")
-            system_info = await api.get_system_info()
-            
+            await self._update_step_progress(step_log, 50.0, "Gathering system information...", session)
+            system_info = await client.get_system_info(connection)
+
             if not system_info:
                 raise RouterConnectionError("Failed to retrieve system information")
 
             # Sub-step 3: Verify RouterOS version (75%)
-            await self._update_step_progress(step_log, 75.0, "Verifying RouterOS version...")
-            version_info = await api.get_routeros_version()
-            
+            await self._update_step_progress(step_log, 75.0, "Verifying RouterOS version...", session)
+            version_info = system_info  # System info includes version
+
             # Store system information
             step_log.output_data = {
                 "system_info": system_info,
@@ -277,7 +297,7 @@ class ProvisioningService:
             }
 
             # Sub-step 4: Validate compatibility (100%)
-            await self._update_step_progress(step_log, 100.0, "Validating compatibility...")
+            await self._update_step_progress(step_log, 100.0, "Validating compatibility...", session)
             await self._validate_router_compatibility(system_info, version_info)
 
             # Update session and step
@@ -288,7 +308,7 @@ class ProvisioningService:
             session.current_step = ProvisioningStep.CONFIGURATION
             session.progress_percentage = 33.3
 
-            await api.disconnect()
+            await client.disconnect(connection)
             await self.db.commit()
 
         except Exception as e:
@@ -297,21 +317,38 @@ class ProvisioningService:
     async def _execute_configuration_step(self, session: ProvisioningSession) -> None:
         """Execute Step 2: Basic Configuration."""
         step_log = await self._get_step_log(session.id, ProvisioningStep.CONFIGURATION)
-        
+
         try:
             step_log.status = ProvisioningStatus.IN_PROGRESS
             step_log.started_at = datetime.utcnow()
             await self.db.commit()
 
             router = await self.router_service.get_by_id(session.router_id)
-            api = MikroTikAPI(router)
-            
-            await api.connect()
+            client = get_mikrotik_client()
+
+            connection = await client.connect(
+                ip_address=router.ip_address,
+                username=router.username,
+                password=router.password,
+                port=router.port
+            )
             config = session.get_configuration()
 
+            # Router info for reconnection on socket errors
+            router_info = {
+                "ip_address": router.ip_address,
+                "username": router.username,
+                "password": router.password,
+                "port": router.port
+            }
+
+            # Clean up any existing codevertex configuration (makes reprovisioning safe)
+            await self._update_step_progress(step_log, 5.0, "Cleaning up existing configuration...", session)
+            await cleanup_existing_provisioning(client, connection, self.logger, session.session_id)
+
             # Create backup of current configuration
-            await self._update_step_progress(step_log, 10.0, "Creating configuration backup...")
-            await backup_router_configuration(self.db, session, api, self.logger)
+            await self._update_step_progress(step_log, 10.0, "Creating configuration backup...", session)
+            await backup_router_configuration(self.db, session, client, connection, self.logger)
 
             # Apply basic configuration commands
             commands = generate_configuration_commands(config, session.service_type)
@@ -320,32 +357,35 @@ class ProvisioningService:
             for i, command_data in enumerate(commands):
                 progress = 10.0 + (80.0 * (i + 1) / total_commands)
                 await self._update_step_progress(
-                    step_log, 
-                    progress, 
-                    f"Executing command {i+1}/{total_commands}: {command_data['description']}"
+                    step_log,
+                    progress,
+                    f"Executing command {i+1}/{total_commands}: {command_data['description']}",
+                    session
                 )
-                
-                # Execute command with retry logic
-                success = await execute_command_with_retry(self.db, self.retry_delays, self.logger, session, api, command_data)
-                
+
+                # Execute command with retry logic - connection may be refreshed on socket errors
+                success, connection = await execute_command_with_retry(
+                    self.db, self.retry_delays, self.logger, session, client, connection, command_data, router_info
+                )
+
                 if not success and command_data.get('critical', True):
                     raise ConfigurationError(f"Critical command failed: {command_data['description']}")
 
             # Verify configuration
-            await self._update_step_progress(step_log, 95.0, "Verifying configuration...")
-            await verify_basic_configuration(api, config)
+            await self._update_step_progress(step_log, 95.0, "Verifying configuration...", session)
+            await verify_basic_configuration(client, connection, config)
 
             # Finalize step
-            await self._update_step_progress(step_log, 100.0, "Configuration completed")
-            
+            await self._update_step_progress(step_log, 100.0, "Configuration completed", session)
+
             step_log.status = ProvisioningStatus.COMPLETED
             step_log.completed_at = datetime.utcnow()
             step_log.duration_seconds = (step_log.completed_at - step_log.started_at).total_seconds()
-            
+
             session.current_step = ProvisioningStep.SERVICE_SETUP
             session.progress_percentage = 66.6
 
-            await api.disconnect()
+            await client.disconnect(connection)
             await self.db.commit()
 
         except Exception as e:
@@ -354,17 +394,30 @@ class ProvisioningService:
     async def _execute_service_setup_step(self, session: ProvisioningSession) -> None:
         """Execute Step 3: Service Setup (PPPoE/Hotspot)."""
         step_log = await self._get_step_log(session.id, ProvisioningStep.SERVICE_SETUP)
-        
+
         try:
             step_log.status = ProvisioningStatus.IN_PROGRESS
             step_log.started_at = datetime.utcnow()
             await self.db.commit()
 
             router = await self.router_service.get_by_id(session.router_id)
-            api = MikroTikAPI(router)
-            
-            await api.connect()
+            client = get_mikrotik_client()
+
+            connection = await client.connect(
+                ip_address=router.ip_address,
+                username=router.username,
+                password=router.password,
+                port=router.port
+            )
             config = session.get_configuration()
+
+            # Router info for reconnection on socket errors
+            router_info = {
+                "ip_address": router.ip_address,
+                "username": router.username,
+                "password": router.password,
+                "port": router.port
+            }
 
             # Generate service-specific commands
             if session.service_type == ServiceType.HOTSPOT:
@@ -381,33 +434,37 @@ class ProvisioningService:
             for i, command_data in enumerate(commands):
                 progress = 10.0 + (80.0 * (i + 1) / total_commands)
                 await self._update_step_progress(
-                    step_log, 
-                    progress, 
-                    f"Configuring service {i+1}/{total_commands}: {command_data['description']}"
+                    step_log,
+                    progress,
+                    f"Configuring service {i+1}/{total_commands}: {command_data['description']}",
+                    session
                 )
-                
-                success = await execute_command_with_retry(self.db, self.retry_delays, self.logger, session, api, command_data)
-                
+
+                # Execute command with retry logic - connection may be refreshed on socket errors
+                success, connection = await execute_command_with_retry(
+                    self.db, self.retry_delays, self.logger, session, client, connection, command_data, router_info
+                )
+
                 if not success and command_data.get('critical', True):
                     raise ConfigurationError(f"Service configuration failed: {command_data['description']}")
 
             # Apply security configurations
-            await self._update_step_progress(step_log, 90.0, "Applying security configurations...")
-            await apply_security_configuration(api, config, self.command_templates, self.logger)
+            await self._update_step_progress(step_log, 90.0, "Applying security configurations...", session)
+            await apply_security_configuration(client, connection, config, self.command_templates, self.logger, session.session_id)
 
             # Final verification
-            await self._update_step_progress(step_log, 95.0, "Performing final verification...")
-            await verify_service_configuration(api, session.service_type, config)
+            await self._update_step_progress(step_log, 95.0, "Performing final verification...", session)
+            await verify_service_configuration(client, connection, session.service_type, config)
 
-            await self._update_step_progress(step_log, 100.0, "Service setup completed")
-            
+            await self._update_step_progress(step_log, 100.0, "Service setup completed", session)
+
             step_log.status = ProvisioningStatus.COMPLETED
             step_log.completed_at = datetime.utcnow()
             step_log.duration_seconds = (step_log.completed_at - step_log.started_at).total_seconds()
-            
+
             session.progress_percentage = 100.0
 
-            await api.disconnect()
+            await client.disconnect(connection)
             await self.db.commit()
 
         except Exception as e:
@@ -548,9 +605,10 @@ class ProvisioningService:
         return commands
 
     async def _execute_command_with_retry(
-        self, 
-        session: ProvisioningSession, 
-        api: MikroTikAPI, 
+        self,
+        session: ProvisioningSession,
+        client,
+        connection,
         command_data: Dict[str, Any]
     ) -> bool:
         """Execute a command with retry logic."""
@@ -563,31 +621,31 @@ class ProvisioningService:
             is_critical=command_data.get('critical', True),
             rollback_command=command_data.get('rollback', None)
         )
-        
+
         self.db.add(command)
         await self.db.commit()
 
         max_retries = command.max_retries
-        
+
         for attempt in range(max_retries + 1):
             try:
                 command.executed_at = datetime.utcnow()
                 command.status = ProvisioningStatus.IN_PROGRESS
-                
+
                 start_time = datetime.utcnow()
-                
+
                 # Execute the command
                 if command_data['type'] == 'api_call':
-                    result = await api.execute_command(command_data['command'])
+                    result = await client.execute_command(connection, command_data['command'])
                 else:
-                    result = await api.execute_script(command_data['command'])
-                
+                    result = await client.execute_script(connection, command_data['command'])
+
                 end_time = datetime.utcnow()
                 command.duration_seconds = (end_time - start_time).total_seconds()
                 command.output = str(result) if result else None
                 command.success = True
                 command.status = ProvisioningStatus.COMPLETED
-                
+
                 await self.db.commit()
                 return True
 
@@ -595,7 +653,7 @@ class ProvisioningService:
                 command.retry_count = attempt + 1
                 command.error_message = str(e)
                 command.success = False
-                
+
                 if attempt < max_retries:
                     # Wait before retry with exponential backoff
                     delay = self.retry_delays[min(attempt, len(self.retry_delays) - 1)]
@@ -603,17 +661,17 @@ class ProvisioningService:
                     command.status = ProvisioningStatus.PENDING
                 else:
                     command.status = ProvisioningStatus.FAILED
-                
+
                 await self.db.commit()
 
         return False
 
-    async def _backup_router_configuration(self, session: ProvisioningSession, api: MikroTikAPI) -> None:
+    async def _backup_router_configuration(self, session: ProvisioningSession, client, connection) -> None:
         """Create a backup of the current router configuration."""
         try:
             # Get current configuration
-            config_data = await api.export_configuration()
-            
+            config_data = await client.export_configuration(connection)
+
             if config_data:
                 # Create configuration record
                 config = RouterConfiguration(
@@ -626,10 +684,10 @@ class ProvisioningService:
                     rollback_available=True,
                     checksum=hashlib.sha256(json.dumps(config_data, sort_keys=True).encode()).hexdigest()
                 )
-                
+
                 self.db.add(config)
                 await self.db.commit()
-                
+
                 self.logger.info(f"Created configuration backup for router {session.router_id}")
 
         except Exception as e:
@@ -637,8 +695,8 @@ class ProvisioningService:
             # Don't fail provisioning for backup failure
 
     async def _validate_configuration(
-        self, 
-        service_type: ServiceType, 
+        self,
+        service_type: ServiceType,
         configuration: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Validate and normalize configuration parameters."""
@@ -650,6 +708,11 @@ class ProvisioningService:
 
         if 'dns_servers' not in validated_config:
             validated_config['dns_servers'] = ['8.8.8.8', '8.8.4.4']
+
+        # CRITICAL: Ensure WAN interface is always set for safeguard in command generation
+        # This prevents the WAN interface from being added to the LAN bridge
+        if 'wan_interface' not in validated_config:
+            validated_config['wan_interface'] = 'ether1'
 
         # Service-specific validation
         if service_type == ServiceType.HOTSPOT:
@@ -732,10 +795,11 @@ class ProvisioningService:
         return result.scalar_one()
 
     async def _update_step_progress(
-        self, 
-        step_log: ProvisioningStepLog, 
-        progress: float, 
-        operation: str
+        self,
+        step_log: ProvisioningStepLog,
+        progress: float,
+        operation: str,
+        session: ProvisioningSession = None
     ) -> None:
         """Update step progress and current operation."""
         step_log.progress_percentage = progress
@@ -743,18 +807,43 @@ class ProvisioningService:
         if not step_log.output_data:
             step_log.output_data = {}
         step_log.output_data['current_operation'] = operation
-        
+
         await self.db.commit()
+
+        # Stream progress update via WebSocket
+        if session:
+            await streaming_manager.update_progress(
+                session.session_id,
+                progress,
+                operation
+            )
 
     async def _handle_provisioning_error(self, session: ProvisioningSession, error_message: str) -> None:
         """Handle provisioning error and cleanup."""
         session.status = ProvisioningStatus.FAILED
         session.error_message = error_message
         session.completed_at = datetime.utcnow()
-        
+
+        # Stream the error to WebSocket clients
+        await streaming_manager.log_provisioning_step(
+            session.session_id,
+            "error",
+            f"[FAIL] Provisioning failed: {error_message}",
+            "error"
+        )
+
         # Check if rollback is needed
         if session.get_config_item('rollback_on_failure', True):
             session.rollback_required = True
+
+            # Notify about rollback starting
+            await streaming_manager.log_provisioning_step(
+                session.session_id,
+                "rollback",
+                "[ROLLBACK] Starting automatic rollback to restore previous configuration...",
+                "warning"
+            )
+
             # Schedule rollback task
             asyncio.create_task(execute_rollback(self.db, self.router_service, session, self.logger))
 
@@ -797,18 +886,23 @@ class ProvisioningService:
             commands = result.scalars().all()
 
             router = await self.router_service.get_by_id(session.router_id)
-            api = MikroTikAPI(router)
-            await api.connect()
+            client = get_mikrotik_client()
+            connection = await client.connect(
+                ip_address=router.ip_address,
+                username=router.username,
+                password=router.password,
+                port=router.port
+            )
 
             # Execute rollback commands
             for command in commands:
                 try:
-                    await api.execute_command(command.rollback_command)
+                    await client.execute_command(connection, command.rollback_command)
                     command.rollback_executed = True
                 except Exception as e:
                     self.logger.error(f"Rollback command failed: {e}")
 
-            await api.disconnect()
+            await client.disconnect(connection)
             
             session.rollback_completed = True
             await self.db.commit()
@@ -887,19 +981,42 @@ class ProvisioningService:
         if self._compare_versions(current_version, min_version) < 0:
             raise ValidationError(f"RouterOS version {current_version} is not supported. Minimum version: {min_version}")
 
-        # Check available resources
-        cpu_load = system_info.get('cpu-load', 0)
+        # Check available resources (values from MikroTik API may be strings)
+        try:
+            cpu_load = int(system_info.get('cpu-load', 0))
+        except (ValueError, TypeError):
+            cpu_load = 0  # Default to 0 if parsing fails
+
         if cpu_load > 90:
             raise ValidationError(f"Router CPU load too high: {cpu_load}%")
 
-        free_memory = system_info.get('free-memory', 0)
+        try:
+            free_memory = int(system_info.get('free-memory', 0))
+        except (ValueError, TypeError):
+            free_memory = 100 * 1024 * 1024  # Default to 100MB if parsing fails
+
         if free_memory < 10 * 1024 * 1024:  # 10MB minimum
             raise ValidationError(f"Insufficient free memory: {free_memory / 1024 / 1024:.1f}MB")
 
     def _compare_versions(self, version1: str, version2: str) -> int:
-        """Compare two version strings. Returns -1, 0, or 1."""
-        v1_parts = [int(x) for x in version1.split('.')]
-        v2_parts = [int(x) for x in version2.split('.')]
+        """Compare two version strings. Returns -1, 0, or 1.
+
+        Handles RouterOS version formats like "7.18.2 (stable)" by stripping
+        any text after a space or parenthesis.
+        """
+        def parse_version(version: str) -> list:
+            # Strip "(stable)" or similar suffixes - take only the numeric part
+            # e.g., "7.18.2 (stable)" -> "7.18.2"
+            version = version.split(' ')[0].split('(')[0].strip()
+            parts = []
+            for part in version.split('.'):
+                # Extract only numeric characters from each part
+                numeric = ''.join(c for c in part if c.isdigit())
+                parts.append(int(numeric) if numeric else 0)
+            return parts
+
+        v1_parts = parse_version(version1)
+        v2_parts = parse_version(version2)
         
         # Pad with zeros to make equal length
         max_len = max(len(v1_parts), len(v2_parts))
@@ -914,31 +1031,32 @@ class ProvisioningService:
         
         return 0
 
-    async def _verify_basic_configuration(self, api: MikroTikAPI, config: Dict[str, Any]) -> None:
+    async def _verify_basic_configuration(self, client, connection, config: Dict[str, Any]) -> None:
         """Verify basic configuration was applied correctly."""
         # Verify identity
         if 'identity' in config:
-            identity = await api.get_system_identity()
+            identity = await client.get_system_identity(connection)
             if identity != config['identity']:
                 raise ConfigurationError(f"System identity not set correctly. Expected: {config['identity']}, Got: {identity}")
 
         # Verify IP pools
         if 'pool_name' in config:
-            pools = await api.get_ip_pools()
+            pools = await client.get_ip_pools(connection)
             pool_names = [pool.get('name') for pool in pools]
             if config['pool_name'] not in pool_names:
                 raise ConfigurationError(f"IP pool {config['pool_name']} not created")
 
     async def _verify_service_configuration(
-        self, 
-        api: MikroTikAPI, 
-        service_type: ServiceType, 
+        self,
+        client,
+        connection,
+        service_type: ServiceType,
         config: Dict[str, Any]
     ) -> None:
         """Verify service configuration was applied correctly."""
         if service_type == ServiceType.HOTSPOT:
             # Verify hotspot exists
-            hotspots = await api.get_hotspots()
+            hotspots = await client.get_hotspot_servers(connection)
             hotspot_names = [hs.get('name') for hs in hotspots]
             expected_name = config.get('hotspot_name', 'ISP-Hotspot')
             if expected_name not in hotspot_names:
@@ -946,22 +1064,22 @@ class ProvisioningService:
 
         elif service_type == ServiceType.PPPOE_SERVER:
             # Verify PPPoE server is running
-            pppoe_servers = await api.get_pppoe_servers()
+            pppoe_servers = await client.get_pppoe_servers(connection)
             if not pppoe_servers:
                 raise ConfigurationError("PPPoE server not configured")
 
-    async def _apply_security_configuration(self, api: MikroTikAPI, config: Dict[str, Any]) -> None:
+    async def _apply_security_configuration(self, client, connection, config: Dict[str, Any]) -> None:
         """Apply security configuration."""
         try:
             # Disable unnecessary services
             for command in self.command_templates['security']['disable_default_services']:
-                await api.execute_command(command)
+                await client.execute_command(connection, command)
 
             # Apply firewall rules
             management_ip = config.get('management_ip', '0.0.0.0/0')
             for rule_template in self.command_templates['security']['create_firewall_rules']:
                 rule = rule_template.format(management_ip=management_ip)
-                await api.execute_command(rule)
+                await client.execute_command(connection, rule)
 
         except Exception as e:
             self.logger.warning(f"Security configuration partially failed: {e}")

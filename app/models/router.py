@@ -5,6 +5,7 @@ from enum import Enum as PyEnum
 from typing import Optional
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -56,16 +57,31 @@ class Router(Base):
     
     # Network configuration
     ip_address = Column(String(45), nullable=False)
-    port = Column(Integer, default=8728, nullable=False)
+    port = Column(Integer, default=8728, nullable=False)  # API port
     username = Column(String(50), nullable=False)
     password = Column(String(255), nullable=False)  # Encrypted
+
+    # Remote Winbox access (VPN tunnel)
+    winbox_port = Column(Integer, nullable=True, unique=True)  # Unique VPN port for remote Winbox (e.g., 51255)
     
     # Status and monitoring
     status = Column(Enum(RouterStatus), default=RouterStatus.OFFLINE, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     last_seen = Column(DateTime, nullable=True)
     uptime = Column(Integer, default=0, nullable=False)  # in seconds
-    
+
+    # System resource information (from /system/resource)
+    routeros_version = Column(String(50), nullable=True)  # e.g., "7.18.2 (stable)"
+    board_name = Column(String(100), nullable=True)  # e.g., "RB951Ui-2HnD"
+    architecture = Column(String(50), nullable=True)  # e.g., "mipsbe"
+    cpu_count = Column(Integer, nullable=True)  # Number of CPUs
+    cpu_frequency = Column(Integer, nullable=True)  # MHz
+    cpu_load = Column(Integer, nullable=True)  # Percentage (0-100)
+    total_memory = Column(BigInteger, nullable=True)  # Total RAM in bytes
+    free_memory = Column(BigInteger, nullable=True)  # Free RAM in bytes
+    total_hdd_space = Column(BigInteger, nullable=True)  # Total storage in bytes
+    free_hdd_space = Column(BigInteger, nullable=True)  # Free storage in bytes
+
     # Location
     location = Column(String(200), nullable=True)
     latitude = Column(String(20), nullable=True)
@@ -89,6 +105,7 @@ class Router(Base):
     organization = relationship("Organization", back_populates="routers")
     subscriptions = relationship("Subscription", back_populates="router", cascade="all, delete-orphan")
     devices = relationship("RouterDevice", back_populates="router", cascade="all, delete-orphan")
+    logs = relationship("RouterLog", back_populates="router", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         """String representation."""
@@ -146,7 +163,7 @@ class RouterLog(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationships
-    router = relationship("Router", backref="logs")
+    router = relationship("Router", back_populates="logs")
 
     def __repr__(self) -> str:
         """String representation."""

@@ -310,12 +310,22 @@ class RouterSeeder:
     async def _clear_routers(self):
         """Clear existing routers."""
         from sqlalchemy import delete
-        
+        from app.models.provisioning import (
+            ProvisioningSession,
+            ProvisioningStepLog,
+            ProvisioningCommand,
+            RouterConfiguration,
+        )
+
         # Delete in correct order to respect foreign key constraints
+        await self.db.execute(delete(ProvisioningStepLog))
+        await self.db.execute(delete(ProvisioningCommand))
+        await self.db.execute(delete(RouterConfiguration))
+        await self.db.execute(delete(ProvisioningSession))
         await self.db.execute(delete(RouterLog))
         await self.db.execute(delete(RouterDevice))
         await self.db.execute(delete(Router))
-        
+
         await self.db.commit()
         self.logger.info("Cleared existing routers")
 

@@ -166,6 +166,36 @@ class Organization(Base):
             return False
         return datetime.utcnow() < self.subscription_ends_at
 
+    @property
+    def subscription_status(self) -> str:
+        """Get subscription status as string."""
+        return self.status.value if self.status else "inactive"
+
+    @property
+    def subscription_expires_at(self) -> Optional[datetime]:
+        """Alias for subscription_ends_at."""
+        return self.subscription_ends_at
+
+    @property
+    def subscription_days_remaining(self) -> int:
+        """Get remaining subscription days."""
+        if self.is_trial:
+            return self.trial_days_remaining
+        if not self.subscription_ends_at:
+            return 0
+        delta = self.subscription_ends_at - datetime.utcnow()
+        return max(0, delta.days)
+
+    @property
+    def max_staff_users(self) -> int:
+        """Alias for max_users (staff users like admin, technician)."""
+        return self.max_users
+
+    @property
+    def currency(self) -> str:
+        """Alias for default_currency."""
+        return self.default_currency
+
     def to_dict(self) -> dict:
         """Convert organization to dictionary."""
         return {
@@ -232,9 +262,21 @@ class OrganizationSettings(Base):
     show_packages_on_portal = Column(Boolean, default=True, nullable=False)
     allow_guest_purchases = Column(Boolean, default=True, nullable=False)
 
+    # Hotspot user generation settings (for auto-created users when purchasing packages)
+    hotspot_username_prefix = Column(String(10), default="C", nullable=False)  # Prefix for generated usernames (e.g., "C" -> C001, C002)
+    hotspot_username_counter = Column(Integer, default=1, nullable=False)  # Auto-increment counter for unique usernames
+    hotspot_template = Column(String(50), default="Aurora", nullable=False)  # Login page template name
+    prune_inactive_users_days = Column(Integer, default=14, nullable=False)  # Auto-delete inactive hotspot users after N days
+    hotspot_redirect_url = Column(String(500), default="https://www.google.com", nullable=False)  # Redirect URL after login/purchase
+
     # PPPoE settings
     require_username_approval = Column(Boolean, default=False, nullable=False)
     allow_self_registration = Column(Boolean, default=False, nullable=False)
+
+    # Remote Winbox/VPN settings
+    vpn_domain = Column(String(200), default="vpn.codevertex.com", nullable=False)  # VPN domain for remote Winbox
+    winbox_port_start = Column(Integer, default=51000, nullable=False)  # Starting port for VPN Winbox allocation
+    winbox_port_end = Column(Integer, default=59999, nullable=False)  # Ending port for VPN Winbox allocation
 
     # Advanced settings
     api_rate_limit = Column(Integer, default=100, nullable=False)  # Requests per minute

@@ -309,30 +309,23 @@ class BaseIntegrationClient(ABC, Generic[T]):
         Returns:
             Result of the operation.
         """
-
-        def sync_wrapper() -> T:
-            """Wrapper for circuit breaker (which expects sync)."""
-            # We'll run the async operation in the event loop
-            return asyncio.get_event_loop().run_until_complete(
-                asyncio.wait_for(operation(*args, **kwargs), timeout=timeout)
-            )
-
-        # For async operations, we use a different approach
-        # First check circuit state
+        # Check circuit state first
         if self._breaker.current_state == "open":
             raise pybreaker.CircuitBreakerError(self._breaker)
 
+        # Execute the async operation with timeout
+        # We track success/failure manually since pybreaker is sync-only
         try:
-            # Execute with timeout
             result = await asyncio.wait_for(
                 operation(*args, **kwargs), timeout=timeout
             )
             # Record success
-            self._breaker.success()
+            self._listener.last_success = datetime.now(timezone.utc)
             return result
         except Exception as e:
             # Record failure
-            self._breaker.fail()
+            self._listener.last_failure = datetime.now(timezone.utc)
+            logger.debug(f"Circuit breaker '{self.name}' recorded failure: {type(e).__name__}: {e}")
             raise
 
     def get_health(self) -> IntegrationHealth:

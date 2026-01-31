@@ -15,6 +15,173 @@
 
 The Codevertex ISP Billing platform provides a comprehensive, automated provisioning system for MikroTik routers. This system enables ISP providers to configure and manage MikroTik devices remotely with minimal manual intervention, supporting both Hotspot and PPPoE services with advanced features like anti-sharing protection, custom subnets, and bandwidth management.
 
+How MikroTik Router Manages ISP Billing Functions
+1. Captive Portal (Hotspot) Flow
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    CAPTIVE PORTAL FLOW                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌──────────┐     ┌──────────────┐     ┌──────────────┐                 │
+│  │  Client  │────▶│  WiFi/LAN    │────▶│   MikroTik   │                 │
+│  │  Device  │     │  Connection  │     │   Router     │                 │
+│  └──────────┘     └──────────────┘     └──────────────┘                 │
+│       │                                       │                         │
+│       │ DHCP Request                         │ Assigns IP               │
+│       │◀─────────────────────────────────────┤ (172.31.1.x)             │
+│       │                                       │                         │
+│       │ HTTP Request (any website)           │                         │
+│       │─────────────────────────────────────▶│                         │
+│       │                                       │                         │
+│       │         ┌──────────────────────────────┐                        │
+│       │         │  Firewall NAT Rule:          │                        │
+│       │         │  Redirect HTTP to            │                        │
+│       │         │  Hotspot Login Page          │                        │
+│       │         │  (port 64873)                │                        │
+│       │         └──────────────────────────────┘                        │
+│       │                                       │                         │
+│       │ Redirect to Login Page               │                         │
+│       │◀─────────────────────────────────────┤                         │
+│       │                                       │                         │
+│       ▼                                       │                         │
+│  ┌──────────────────────────────────┐        │                         │
+│  │     CAPTIVE PORTAL OPTIONS       │        │                         │
+│  ├──────────────────────────────────┤        │                         │
+│  │  1. Login with credentials       │        │                         │
+│  │  2. Purchase package (M-PESA)    │        │                         │
+│  │  3. Redeem voucher code          │        │                         │
+│  └──────────────────────────────────┘        │                         │
+│                                              │                         │
+│  WALLED GARDEN: Allows access to these      │                         │
+│  without authentication:                     │                         │
+│  - Payment portal (*.yourportal.com)        │                         │
+│  - M-PESA API endpoints                     │                         │
+│  - DNS resolution                           │                         │
+│                                              │                         │
+└─────────────────────────────────────────────────────────────────────────┘
+2. User Access Control Mechanism
+MikroTik manages access through these components:
+
+Component	Purpose	RouterOS Path
+Hotspot Users	User credentials & limits	/ip/hotspot/user
+User Profiles	Bandwidth, session rules	/ip/hotspot/user/profile
+Active Sessions	Connected users tracking	/ip/hotspot/active
+Walled Garden	URLs accessible without auth	/ip/hotspot/walled-garden
+IP Bindings	MAC/IP reservations	/ip/hotspot/ip-binding
+Access Control Flow:
+
+
+# When user attempts to connect:
+1. DHCP assigns IP from pool → User in "unauthorized" state
+2. All HTTP traffic redirected to login page
+3. User authenticates (username/password OR voucher)
+4. MikroTik checks /ip/hotspot/user:
+   - If disabled=yes → Access denied
+   - If limit-bytes-total exceeded → Access denied
+   - If limit-uptime exceeded → Access denied
+   - Otherwise → Access granted
+5. Profile rate-limit applied (e.g., "5M/2M" = 5Mbps down/2Mbps up)
+6. Session tracked in /ip/hotspot/active
+3. Package Subscription Models
+Automatic Mode (Purchase through Portal):
+
+
+1. User clicks "Buy Package" on captive portal
+2. Portal allows access to M-PESA via walled garden
+3. User completes payment
+4. Backend receives M-PESA callback
+5. Backend creates user via MikroTik API:
+   /ip/hotspot/user add name=<phone> password=<random> profile=<plan>
+6. User credentials displayed OR auto-login triggered
+7. Session starts with plan limits applied
+Manual Mode (Admin Creates Credentials):
+
+
+1. Admin creates subscription in billing system
+2. Backend provisions user on router:
+   /ip/hotspot/user add name=<username> password=<password> profile=<plan>
+3. Admin provides credentials to customer
+4. Customer enters credentials on captive portal
+5. MikroTik authenticates and applies profile
+4. Package Expiry & Disconnection
+The ISP billing backend tracks expiry and syncs with router:
+
+
+# Backend scheduled task (runs every minute):
+async def check_expired_subscriptions():
+    expired = await get_expired_subscriptions()
+    
+    for subscription in expired:
+        if subscription.type == "hotspot":
+            # Disable user on router
+            await mikrotik.execute(
+                "/ip/hotspot/user",
+                method="set",
+                name=subscription.username,
+                disabled="yes"
+            )
+            # Kick active session if any
+            active = await mikrotik.execute("/ip/hotspot/active")
+            for session in active:
+                if session["user"] == subscription.username:
+                    await mikrotik.execute(
+                        "/ip/hotspot/active",
+                        method="remove",
+                        id=session[".id"]
+                    )
+        
+        elif subscription.type == "pppoe":
+            # Disable PPPoE secret
+            await mikrotik.execute(
+                "/ppp/secret",
+                method="set",
+                name=subscription.username,
+                disabled="yes"
+            )
+            # Disconnect active PPPoE session
+            await mikrotik.execute(
+                "/ppp/active",
+                method="remove",
+                name=subscription.username
+            )
+5. Bandwidth Management
+MikroTik applies bandwidth limits through:
+
+Profile Rate Limits (simplest):
+
+
+/ip/hotspot/user/profile set profile1 rate-limit=5M/2M
+Format: download/upload in bps, k, M, or G
+
+Simple Queues (per-user):
+
+
+/queue/simple add name=user1 target=172.31.1.50 max-limit=5M/2M
+PCQ (Per Connection Queue) - for many users:
+
+
+/queue/type add name=pcq-download kind=pcq pcq-rate=5M pcq-classifier=dst-address
+/queue/tree add name=download parent=ether1 queue=pcq-download
+6. Usage Tracking
+MikroTik tracks usage in:
+
+/ip/hotspot/active → bytes-in, bytes-out, uptime per session
+/ip/hotspot/user → bytes-in, bytes-out, uptime totals
+/ppp/active → session uptime, caller-id
+The backend periodically syncs this data:
+
+
+async def sync_usage_stats():
+    # Get hotspot user stats
+    users = await mikrotik.execute("/ip/hotspot/user")
+    for user in users:
+        await update_subscription_usage(
+            username=user["name"],
+            bytes_down=user.get("bytes-in", 0),
+            bytes_up=user.get("bytes-out", 0),
+            uptime=user.get("uptime", "0s")
+        )
+Test Suite Summary
+
 ### Key Features
 
 - **Automated Configuration**: Complete router setup with a single command

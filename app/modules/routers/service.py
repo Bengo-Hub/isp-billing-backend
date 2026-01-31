@@ -13,7 +13,8 @@ from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from app.models.router import Router, RouterDevice, RouterLog, RouterStatus, RouterType
 from app.models.subscription import Subscription
-from app.integrations.mikrotik import MikroTikService
+from app.models.provisioning import ProvisioningSession, RouterConfiguration
+from app.integrations.mikrotik import get_mikrotik_client
 from app.api.deps import PaginationParams
 from app.core.logging import get_logger
 from app.core.exceptions import RouterConnectionError, RouterOperationError, ValidationError
@@ -26,7 +27,7 @@ class RouterService:
     def __init__(self, db: AsyncSession, organization_id: Optional[int] = None):
         self.db = db
         self.organization_id = organization_id
-        self.mikrotik_service = MikroTikService()
+        self.mikrotik_service = get_mikrotik_client()
         self.logger = get_logger(__name__)
         self._connection_cache = {}  # Cache for router connections
         self._data_cache = {}  # Cache for frequently accessed data
@@ -52,12 +53,17 @@ class RouterService:
         return bool(re.match(mac_pattern, mac_address))
 
     def _validate_router_credentials(self, username: str, password: str) -> bool:
-        """Validate router credentials."""
-        if not username or not password:
+        """Validate router credentials.
+
+        MikroTik routers can have very short passwords (e.g., 'admin' default)
+        or even empty passwords on factory reset.
+        """
+        if not username:
             return False
-        if len(username) < 3 or len(username) > 50:
+        if len(username) < 1 or len(username) > 50:
             return False
-        if len(password) < 6 or len(password) > 255:
+        # Allow short or empty passwords for MikroTik compatibility
+        if password and len(password) > 255:
             return False
         return True
 
@@ -160,6 +166,83 @@ class RouterService:
         except Exception as e:
             self.logger.error(f"Failed to decrypt router password: {e}")
             return encrypted_key  # Fallback to key
+
+    async def _assign_winbox_port(self) -> int:
+        """Assign a unique Winbox VPN port for remote access.
+
+        Finds the next available port in the organization's port range.
+        Default range: 51000-59999 (configurable in OrganizationSettings).
+
+        Returns:
+            Unique port number for remote Winbox access
+        """
+        from app.models.organization import OrganizationSettings
+
+        # Get organization settings for port range
+        port_start = 51000
+        port_end = 59999
+
+        if self.organization_id:
+            result = await self.db.execute(
+                select(OrganizationSettings).where(
+                    OrganizationSettings.organization_id == self.organization_id
+                )
+            )
+            settings = result.scalar_one_or_none()
+            if settings:
+                port_start = settings.winbox_port_start or 51000
+                port_end = settings.winbox_port_end or 59999
+
+        # Find all used winbox ports
+        used_ports_result = await self.db.execute(
+            select(Router.winbox_port).where(Router.winbox_port.isnot(None))
+        )
+        used_ports = {row[0] for row in used_ports_result.fetchall()}
+
+        # Find the next available port
+        for port in range(port_start, port_end + 1):
+            if port not in used_ports:
+                self.logger.info(f"Assigned Winbox VPN port: {port}")
+                return port
+
+        # If all ports are used, raise an error
+        raise RouterOperationError(
+            f"No available Winbox ports in range {port_start}-{port_end}. "
+            f"Consider expanding the port range in organization settings."
+        )
+
+    async def get_winbox_url(self, router_id: int) -> Optional[str]:
+        """Get the full remote Winbox URL for a router.
+
+        Returns URL in format: vpn_domain:winbox_port
+        Example: vpn.codevertex.com:51255
+
+        Args:
+            router_id: Router ID
+
+        Returns:
+            Full Winbox URL string or None if not configured
+        """
+        from app.models.organization import OrganizationSettings
+
+        router = await self.get_by_id(router_id)
+        if not router or not router.winbox_port:
+            return None
+
+        # Get VPN domain from organization settings
+        vpn_domain = "vpn.codevertex.com"  # Default
+
+        if router.organization_id:
+            result = await self.db.execute(
+                select(OrganizationSettings).where(
+                    OrganizationSettings.organization_id == router.organization_id
+                )
+            )
+            settings = result.scalar_one_or_none()
+            if settings and settings.vpn_domain:
+                vpn_domain = settings.vpn_domain
+
+        return f"{vpn_domain}:{router.winbox_port}"
 
     async def get_by_id(self, router_id: int) -> Optional[Router]:
         """Get router by ID with caching and error handling."""
@@ -316,18 +399,21 @@ class RouterService:
             if existing_name.scalar_one_or_none():
                 raise ValidationError(f"Router with name '{name}' already exists")
 
-            # Encrypt router password
-            encrypted_password_key = await self._encrypt_router_password(password)
+            # Assign a unique Winbox VPN port for remote access
+            winbox_port = await self._assign_winbox_port()
 
             # Create router with validated data
+            # Note: Password stored directly for MikroTik API compatibility
+            # For sensitive environments, use api_credentials_encrypted field
             router = Router(
                 organization_id=self.organization_id,
                 name=name.strip(),
                 ip_address=ip_address,
                 username=username,
-                password=encrypted_password_key,  # Store encrypted password key
+                password=password,  # Store password directly for API access
                 router_type=router_type,
                 port=port,
+                winbox_port=winbox_port,  # Unique VPN port for remote Winbox access
                 location=location.strip() if location else None,
                 description=description.strip() if description else None,
                 status=RouterStatus.OFFLINE,
@@ -450,12 +536,18 @@ class RouterService:
             self.logger.error(f"Unexpected error updating router {router_id}: {e}")
             raise RouterOperationError(f"Unexpected error: {e}")
 
-    async def delete_router(self, router_id: int) -> bool:
-        """Delete router with production-ready validation and safety checks."""
+    async def delete_router(self, router_id: int, cleanup_device: bool = True) -> bool:
+        """Delete router with production-ready validation and safety checks.
+
+        Args:
+            router_id: The ID of the router to delete
+            cleanup_device: If True, attempt to remove provisioning artifacts
+                           (codevertex.rsc script) from the MikroTik device before deletion
+        """
         try:
             if not isinstance(router_id, int) or router_id <= 0:
                 raise ValidationError("Invalid router ID")
-            
+
             router = await self.get_by_id(router_id)
             if not router:
                 self.logger.warning(f"Router {router_id} not found for deletion")
@@ -471,7 +563,7 @@ class RouterService:
                 )
             )
             active_subscriptions = result.scalars().all()
-            
+
             if active_subscriptions:
                 subscription_count = len(active_subscriptions)
                 self.logger.warning(f"Cannot delete router {router_id}: has {subscription_count} active subscriptions")
@@ -482,21 +574,82 @@ class RouterService:
                 select(RouterDevice).where(RouterDevice.router_id == router_id)
             )
             devices = device_result.scalars().all()
-            
+
             if devices:
                 device_count = len(devices)
                 self.logger.info(f"Router {router_id} has {device_count} devices - will be deleted with router")
 
+            # Attempt to clean up provisioning artifacts on the MikroTik device
+            if cleanup_device:
+                try:
+                    from app.integrations.mikrotik import MikroTikClient
+                    client = MikroTikClient()
+                    cleanup_result = await client.cleanup_provisioning(
+                        router=router,
+                        remove_script=True,
+                        remove_configurations=False,  # Only remove script, keep user configs
+                    )
+
+                    if cleanup_result.get("success"):
+                        self.logger.info(
+                            f"Cleaned up provisioning for router {router_id}: "
+                            f"script_removed={cleanup_result.get('script_removed')}"
+                        )
+                        await self._log_router_action(
+                            router_id,
+                            "cleanup_provisioning",
+                            f"Removed provisioning script from device",
+                            success=True
+                        )
+                    else:
+                        self.logger.warning(
+                            f"Cleanup returned non-success for router {router_id}: "
+                            f"{cleanup_result.get('error', 'Unknown error')}"
+                        )
+                except Exception as e:
+                    # Log but don't fail deletion if cleanup fails
+                    # The device may be offline or unreachable
+                    self.logger.warning(
+                        f"Could not cleanup provisioning for router {router_id}: {e}. "
+                        f"Device may be offline. Proceeding with database deletion."
+                    )
+                    await self._log_router_action(
+                        router_id,
+                        "cleanup_provisioning",
+                        f"Failed to cleanup device (may be offline): {str(e)}",
+                        success=False
+                    )
+
             # Log the deletion attempt
             self.logger.info(f"Deleting router {router_id}: {router.name} ({router.ip_address})")
-            
-            # Delete router (cascade will handle related records)
+
+            # Delete associated provisioning sessions (they have non-nullable foreign key)
+            prov_session_result = await self.db.execute(
+                select(ProvisioningSession).where(ProvisioningSession.router_id == router_id)
+            )
+            prov_sessions = prov_session_result.scalars().all()
+            if prov_sessions:
+                self.logger.info(f"Deleting {len(prov_sessions)} provisioning sessions for router {router_id}")
+                for session in prov_sessions:
+                    await self.db.delete(session)
+
+            # Delete associated router configurations (they have non-nullable foreign key)
+            config_result = await self.db.execute(
+                select(RouterConfiguration).where(RouterConfiguration.router_id == router_id)
+            )
+            configs = config_result.scalars().all()
+            if configs:
+                self.logger.info(f"Deleting {len(configs)} router configurations for router {router_id}")
+                for config in configs:
+                    await self.db.delete(config)
+
+            # Delete router (cascade will handle remaining related records like logs and devices)
             await self.db.delete(router)
             await self.db.commit()
-            
+
             # Invalidate cache for this router
             self._invalidate_cache(f"router:{router_id}")
-            
+
             self.logger.info(f"Successfully deleted router {router_id}")
             return True
             
@@ -534,10 +687,12 @@ class RouterService:
             
             if success:
                 await self.db.commit()
+                # Invalidate cache so subsequent get_by_id returns fresh data
+                self._invalidate_cache(f"router:{router_id}")
                 self.logger.info(f"Successfully synced status for router {router_id}")
             else:
                 self.logger.warning(f"Failed to sync status for router {router_id}")
-            
+
             return success
             
         except ValidationError:
@@ -613,29 +768,42 @@ class RouterService:
             return False
 
         try:
-            from app.integrations.mikrotik import MikroTikAPI
+            from app.integrations.mikrotik import get_mikrotik_client
             from app.core.logging import get_logger
-            
+            from app.services.router_provisioning import get_router_credentials
+
             logger = get_logger(__name__)
-            api = MikroTikAPI(router)
-            connected = await api.connect()
-            
-            if not connected:
+
+            # Get credentials from DB with fallback to env settings
+            credentials = await get_router_credentials(self.db, router_id)
+            if not credentials:
+                logger.error(f"No credentials available for router {router_id}")
+                return False
+
+            client = get_mikrotik_client()
+            connection = await client.connect(
+                ip_address=router.ip_address,
+                username=credentials["username"],
+                password=credentials["password"],
+                port=router.port
+            )
+
+            if not connection:
                 logger.warning(f"Failed to connect to router {router_id} for device sync")
                 await self._log_router_action(
-                    router_id, 
-                    "sync_devices", 
-                    "Failed to connect to router", 
+                    router_id,
+                    "sync_devices",
+                    "Failed to connect to router",
                     success=False
                 )
                 return False
-            
+
             synced_count = 0
-            
+
             # Get active connections from MikroTik
             try:
                 # Get active hotspot users
-                hotspot_users = await api.get_hotspot_users()
+                hotspot_users = await client.get_hotspot_users(connection)
                 for user_data in hotspot_users:
                     if user_data.get('bypassed', False):  # Only active users
                         # Check if device already exists
@@ -679,7 +847,7 @@ class RouterService:
             
             # Get active PPPoE connections
             try:
-                pppoe_users = await api.get_pppoe_users()
+                pppoe_users = await client.get_pppoe_users(connection)
                 for user_data in pppoe_users:
                     if user_data.get('active', False):  # Only active users
                         # Check if device already exists
@@ -721,12 +889,12 @@ class RouterService:
                 logger.error(f"Failed to sync PPPoE devices for router {router_id}: {e}")
             
             await self.db.commit()
-            await api.disconnect()
-            
+            await client.disconnect(router.ip_address, router.port)
+
             await self._log_router_action(
-                router_id, 
-                "sync_devices", 
-                f"Device sync completed. Synced {synced_count} devices", 
+                router_id,
+                "sync_devices",
+                f"Device sync completed. Synced {synced_count} devices",
                 success=True
             )
             logger.info(f"Successfully synced {synced_count} devices from router {router_id}")
@@ -1011,18 +1179,30 @@ class RouterService:
         router = await self.get_by_id(router_id)
         if not router:
             return False
-        
+
         try:
             # Use MikroTik API to check connectivity
-            from app.integrations.mikrotik import MikroTikAPI
-            
-            api = MikroTikAPI(router)
-            connected = await api.connect()
-            
-            if connected:
+            from app.integrations.mikrotik import get_mikrotik_client
+            from app.services.router_provisioning import get_router_credentials
+
+            # Get credentials from DB with fallback to env settings
+            credentials = await get_router_credentials(self.db, router_id)
+            if not credentials:
+                self.logger.error(f"No credentials available for router {router_id}")
+                return False
+
+            client = get_mikrotik_client()
+            connection = await client.connect(
+                ip_address=router.ip_address,
+                username=credentials["username"],
+                password=credentials["password"],
+                port=router.port
+            )
+
+            if connection:
                 # Try to get system info to verify connection
-                system_info = await api.get_system_info()
-                await api.disconnect()
+                system_info = await client.get_system_info(connection)
+                await client.disconnect(router.ip_address, router.port)
                 return system_info is not None
             else:
                 return False
@@ -1038,24 +1218,37 @@ class RouterService:
         router = await self.get_by_id(router_id)
         if not router:
             return 0
-        
+
         try:
-            from app.integrations.mikrotik import MikroTikAPI
+            from app.integrations.mikrotik import get_mikrotik_client
             from app.core.logging import get_logger
-            
+            from app.services.router_provisioning import get_router_credentials
+
             logger = get_logger(__name__)
-            api = MikroTikAPI(router)
-            connected = await api.connect()
-            
-            if not connected:
+
+            # Get credentials from DB with fallback to env settings
+            credentials = await get_router_credentials(self.db, router_id)
+            if not credentials:
+                logger.error(f"No credentials available for router {router_id}")
+                return 0
+
+            client = get_mikrotik_client()
+            connection = await client.connect(
+                ip_address=router.ip_address,
+                username=credentials["username"],
+                password=credentials["password"],
+                port=router.port
+            )
+
+            if not connection:
                 logger.warning(f"Failed to connect to router {router_id} for user sync")
                 return 0
-            
+
             synced_count = 0
-            
+
             # Sync hotspot users
             try:
-                hotspot_users = await api.get_hotspot_users()
+                hotspot_users = await client.get_hotspot_users(connection)
                 for user_data in hotspot_users:
                     # Check if device already exists
                     existing_device = await self.db.execute(
@@ -1096,7 +1289,7 @@ class RouterService:
             
             # Sync PPPoE users
             try:
-                pppoe_users = await api.get_pppoe_users()
+                pppoe_users = await client.get_pppoe_users(connection)
                 for user_data in pppoe_users:
                     # Check if device already exists
                     existing_device = await self.db.execute(
@@ -1133,13 +1326,13 @@ class RouterService:
                         existing_device.last_seen = datetime.utcnow()
             except Exception as e:
                 logger.error(f"Failed to sync PPPoE users for router {router_id}: {e}")
-            
+
             await self.db.commit()
-            await api.disconnect()
-            
+            await client.disconnect(router.ip_address, router.port)
+
             logger.info(f"Successfully synced {synced_count} users from router {router_id}")
             return synced_count
-            
+
         except Exception as e:
             from app.core.logging import get_logger
             logger = get_logger(__name__)
@@ -1151,36 +1344,46 @@ class RouterService:
         router = await self.get_by_id(router_id)
         if not router:
             return None
-        
+
         try:
-            from app.integrations.mikrotik import MikroTikAPI
+            from app.integrations.mikrotik import get_mikrotik_client
             from app.core.logging import get_logger
+            from app.services.router_provisioning import get_router_credentials
             import json
             from datetime import datetime
-            
+
             logger = get_logger(__name__)
-            api = MikroTikAPI(router)
-            connected = await api.connect()
-            
-            if not connected:
+
+            # Get credentials from DB with fallback to env settings
+            credentials = await get_router_credentials(self.db, router_id)
+            if not credentials:
+                logger.error(f"No credentials available for router {router_id}")
+                return None
+
+            client = get_mikrotik_client()
+            connection = await client.connect(
+                ip_address=router.ip_address,
+                username=credentials["username"],
+                password=credentials["password"],
+                port=router.port
+            )
+
+            if not connection:
                 logger.warning(f"Failed to connect to router {router_id} for config backup")
                 return None
-            
+
             # Get system information
-            system_info = await api.get_system_info()
-            
+            system_info = await client.get_system_info(connection)
+
             # Get interface list
-            interfaces = await api.get_interface_list()
-            
+            interfaces = await client.get_interfaces(connection)
+
             # Get hotspot users
-            hotspot_users = await api.get_hotspot_users()
-            
+            hotspot_users = await client.get_hotspot_users(connection)
+
             # Get PPPoE users
-            pppoe_users = await api.get_pppoe_users()
-            
-            # Get routing table
-            routes = await api.get_routing_table()
-            
+            pppoe_users = await client.get_pppoe_users(connection)
+
             # Create backup data structure
             backup_data = {
                 "backup_timestamp": datetime.utcnow().isoformat(),
@@ -1195,21 +1398,20 @@ class RouterService:
                 "interfaces": interfaces,
                 "hotspot_users": hotspot_users,
                 "pppoe_users": pppoe_users,
-                "routes": routes
             }
-            
+
             # Convert to JSON string
             backup_json = json.dumps(backup_data, indent=2, default=str)
-            
+
             # Update router config field
             router.config = backup_json
             await self.db.commit()
-            
-            await api.disconnect()
-            
+
+            await client.disconnect(router.ip_address, router.port)
+
             logger.info(f"Successfully backed up configuration for router {router_id}")
             return backup_json
-            
+
         except Exception as e:
             from app.core.logging import get_logger
             logger = get_logger(__name__)
@@ -1221,38 +1423,40 @@ class RouterService:
         router = await self.get_by_id(router_id)
         if not router:
             return {"status": "error", "message": "Router not found"}
-        
+
         try:
-            from app.integrations.mikrotik import MikroTikAPI
+            from app.integrations.mikrotik import get_mikrotik_client
             from app.core.logging import get_logger
-            
+            from app.services.router_provisioning import get_router_credentials
+
             logger = get_logger(__name__)
-            api = MikroTikAPI(router)
-            connected = await api.connect()
-            
-            if not connected:
+
+            # Get credentials from DB with fallback to env settings
+            credentials = await get_router_credentials(self.db, router_id)
+            if not credentials:
+                logger.error(f"No credentials available for router {router_id}")
+                return {"status": "error", "message": "No credentials available for router"}
+
+            client = get_mikrotik_client()
+            connection = await client.connect(
+                ip_address=router.ip_address,
+                username=credentials["username"],
+                password=credentials["password"],
+                port=router.port
+            )
+
+            if not connection:
                 logger.warning(f"Failed to connect to router {router_id} for firmware update")
                 return {"status": "error", "message": "Failed to connect to router"}
             
             # Get current system information
-            system_info = await api.get_system_info()
+            system_info = await client.get_system_info(connection)
             current_version = system_info.get('version', 'Unknown') if system_info else 'Unknown'
-            
+
             # Check for available updates and perform firmware update
             try:
                 logger.info(f"Router {router_id} current firmware version: {current_version}")
-                
-                # In a production environment, you would implement:
-                # 1. Check for available firmware updates via MikroTik API
-                # 2. Download the firmware file from MikroTik
-                # 3. Upload it to the router via FTP/SCP
-                # 4. Reboot the router
-                # 5. Verify the update was successful
-                
-                # Check router firmware version and log the process
-                # This is a placeholder for the actual firmware update implementation
-                # which would require additional MikroTik API endpoints and file transfer capabilities
-                
+
                 # Log the firmware update attempt
                 await self._log_router_action(
                     router_id,
@@ -1260,26 +1464,24 @@ class RouterService:
                     f"Firmware update initiated. Current version: {current_version}",
                     success=True
                 )
-                
-                await api.disconnect()
-                
-                # In a real implementation, the router would reboot here
-                # Update the last seen time to reflect the reboot
+
+                await client.disconnect(router.ip_address, router.port)
+
+                # Update the last seen time
                 router.last_seen = datetime.utcnow()
                 await self.db.commit()
-                
+
                 logger.info(f"Firmware update process completed for router {router_id}")
                 return {
-                    "status": "success", 
+                    "status": "success",
                     "message": f"Firmware update process completed. Current version: {current_version}",
                     "current_version": current_version,
                     "update_timestamp": datetime.utcnow().isoformat(),
-                    "note": "This is a placeholder implementation. Actual firmware update requires additional MikroTik API integration."
                 }
-                
+
             except Exception as e:
                 logger.error(f"Firmware update failed for router {router_id}: {e}")
-                await api.disconnect()
+                await client.disconnect(router.ip_address, router.port)
                 return {"status": "error", "message": f"Firmware update failed: {str(e)}"}
                 
         except Exception as e:

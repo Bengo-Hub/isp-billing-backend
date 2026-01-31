@@ -61,10 +61,20 @@ class SecretsManager:
         elif master_password:
             self._initialize_with_password(master_password, salt)
         else:
-            # Try to get from environment
+            # Try to get from environment first, then fall back to settings
             env_key = os.environ.get("ENCRYPTION_KEY")
             env_password = os.environ.get("MASTER_PASSWORD")
             env_salt = os.environ.get("ENCRYPTION_SALT")
+
+            # If not in os.environ, try pydantic settings (loads from .env)
+            if not env_key and not env_password:
+                try:
+                    from app.core.config import settings
+                    env_key = settings.encryption_key
+                    env_password = settings.master_password
+                    env_salt = settings.encryption_salt
+                except Exception:
+                    pass  # Settings not available, will raise error below
 
             if env_key:
                 self._initialize_with_key(env_key)

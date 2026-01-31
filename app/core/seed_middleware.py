@@ -22,10 +22,14 @@ class SeedMiddleware(BaseHTTPMiddleware):
     
     async def dispatch(self, request: Request, call_next):
         """Ensure seeding is done on first request."""
+        # Skip seeding check for CORS preflight requests
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         if not self._seeded:
             await self._ensure_seeded()
             self._seeded = True
-        
+
         response = await call_next(request)
         return response
     

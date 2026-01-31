@@ -19,11 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.api.deps_tenant import get_organization_by_slug
-from app.models.organization import Organization
+from app.models.organization import Organization, OrganizationSettings
 from app.models.plan import ServicePlan, PlanType, PlanStatus
 from app.models.customer_portal import VoucherCode, CustomerSession, CustomerPurchase, VoucherStatus, SessionStatus
 from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
 from app.integrations.payment_gateways import PaymentGatewayFactory
+from app.utils.hotspot_username import generate_hotspot_credentials
 
 router = APIRouter(prefix="/hotspot", tags=["Portal - Hotspot"])
 
@@ -55,8 +56,9 @@ class PurchaseRequest(BaseModel):
     """Schema for purchase request."""
 
     plan_id: int
-    phone_number: str = Field(..., pattern=r"^(\+?254|0)?[17]\d{8}$")
-    email: Optional[str] = None
+    phone_number: str = Field(default="", description="Phone number for M-PESA payments")
+    email: Optional[str] = Field(None, description="Email for card/Paystack payments")
+    payment_method: Optional[str] = Field("mpesa", description="Payment method: mpesa or paystack")
 
 
 class PurchaseResponse(BaseModel):
@@ -215,9 +217,9 @@ async def purchase_package(
     organization: Organization = Depends(get_organization_by_slug),
 ):
     """
-    Purchase a hotspot package via M-PESA.
+    Purchase a hotspot package via M-PESA or Paystack.
 
-    Public endpoint - initiates STK push to customer's phone.
+    Public endpoint - initiates payment based on selected method.
     """
     # Get the plan
     result = await db.execute(
@@ -236,19 +238,41 @@ async def purchase_package(
             detail="Package not found"
         )
 
-    # Get primary payment gateway
-    gateway_result = await db.execute(
-        select(PaymentGatewayConfig)
-        .where(
-            PaymentGatewayConfig.organization_id == organization.id,
-            PaymentGatewayConfig.is_active == True,
-            PaymentGatewayConfig.is_primary == True,
-        )
-    )
-    gateway_config = gateway_result.scalar_one_or_none()
+    # Determine gateway type based on payment method
+    requested_gateway_type = None
+    if data.payment_method == "paystack":
+        requested_gateway_type = GatewayType.PAYSTACK
+    elif data.payment_method == "mpesa":
+        requested_gateway_type = GatewayType.MPESA
 
+    # Get payment gateway based on requested method
+    gateway_config = None
+    if requested_gateway_type:
+        gateway_result = await db.execute(
+            select(PaymentGatewayConfig)
+            .where(
+                PaymentGatewayConfig.organization_id == organization.id,
+                PaymentGatewayConfig.gateway_type == requested_gateway_type,
+                PaymentGatewayConfig.is_active == True,
+            )
+            .limit(1)
+        )
+        gateway_config = gateway_result.scalar_one_or_none()
+
+    # Fallback to primary gateway if requested gateway not found
     if not gateway_config:
-        # Try to get any active gateway
+        gateway_result = await db.execute(
+            select(PaymentGatewayConfig)
+            .where(
+                PaymentGatewayConfig.organization_id == organization.id,
+                PaymentGatewayConfig.is_active == True,
+                PaymentGatewayConfig.is_primary == True,
+            )
+        )
+        gateway_config = gateway_result.scalar_one_or_none()
+
+    # Try any active gateway as last resort
+    if not gateway_config:
         gateway_result = await db.execute(
             select(PaymentGatewayConfig)
             .where(
@@ -299,16 +323,28 @@ async def purchase_package(
     db.add(purchase)
     await db.commit()
 
+    # Build callback URL for Paystack
+    callback_url = None
+    if gateway_config.gateway_type == GatewayType.PAYSTACK:
+        # Use the request origin for callback
+        origin = request.headers.get("origin", "")
+        if origin:
+            callback_url = f"{origin}/payment/callback"
+
     # Initiate payment
     payment_result = await gateway.initiate_payment(
         amount=Decimal(str(plan.price)),
-        phone_number=data.phone_number,
+        phone_number=data.phone_number or "",
+        email=data.email,
         reference=reference,
         description=f"{plan.name} - {organization.name}",
+        callback_url=callback_url,
         metadata={
             "organization_id": organization.id,
             "plan_id": plan.id,
+            "purchase_id": purchase.id,
             "email": data.email,
+            "phone_number": data.phone_number,
         },
     )
 
@@ -510,17 +546,172 @@ async def get_session_status(
 @router.post("/{org_slug}/webhooks/payment")
 async def payment_webhook(
     org_slug: str,
-    payload: dict,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     organization: Organization = Depends(get_organization_by_slug),
 ):
     """
     Payment callback webhook.
 
-    Receives payment notifications from payment gateways.
+    Receives payment notifications from payment gateways and activates customer sessions.
     """
-    # This would be called by the payment gateway
-    # Process the callback and activate the customer's session
+    import json
+    from app.core.logging import get_logger
 
-    # For now, return acknowledgment
-    return {"status": "received"}
+    logger = get_logger(__name__)
+
+    try:
+        body = await request.body()
+        payload = json.loads(body.decode("utf-8"))
+    except Exception as e:
+        logger.error(f"Invalid webhook payload: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    # Extract reference from different gateway formats
+    reference = None
+    payment_status = None
+
+    # M-PESA callback format
+    if "Body" in payload and "stkCallback" in payload.get("Body", {}):
+        stk = payload["Body"]["stkCallback"]
+        reference = stk.get("CheckoutRequestID")
+        result_code = stk.get("ResultCode")
+        payment_status = "completed" if result_code == 0 else "failed"
+
+    # Paystack callback format
+    elif "event" in payload and "data" in payload:
+        event_type = payload.get("event", "")
+        data = payload.get("data", {})
+        reference = data.get("reference")
+
+        if event_type == "charge.success":
+            payment_status = "completed"
+        elif event_type in ["charge.failed", "transfer.failed"]:
+            payment_status = "failed"
+
+    # Generic format (direct reference)
+    elif "reference" in payload:
+        reference = payload.get("reference")
+        payment_status = payload.get("status", "completed")
+
+    if not reference:
+        logger.warning(f"No reference found in webhook payload: {payload}")
+        return {"status": "received", "message": "No reference found"}
+
+    # Find the purchase record
+    result = await db.execute(
+        select(CustomerPurchase)
+        .where(
+            CustomerPurchase.payment_reference == reference,
+            CustomerPurchase.organization_id == organization.id,
+        )
+    )
+    purchase = result.scalar_one_or_none()
+
+    if not purchase:
+        logger.warning(f"Purchase not found for reference: {reference}")
+        return {"status": "received", "message": "Purchase not found"}
+
+    # Update purchase status
+    purchase.payment_status = payment_status
+
+    if payment_status == "completed":
+        purchase.completed_at = datetime.utcnow()
+
+        # Get the plan
+        plan_result = await db.execute(
+            select(ServicePlan).where(ServicePlan.id == purchase.plan_id)
+        )
+        plan = plan_result.scalar_one_or_none()
+
+        if plan:
+            # Generate a voucher code for the customer
+            voucher_code = VoucherCode.generate_code(format_pattern="XXXX-XXXX-XXXX")
+
+            # Generate hotspot credentials (username like C029, password like 865)
+            hotspot_username, hotspot_password = await generate_hotspot_credentials(
+                db=db,
+                organization_id=organization.id,
+                password_length=3
+            )
+
+            # Create voucher with hotspot credentials
+            voucher = VoucherCode(
+                organization_id=organization.id,
+                code=voucher_code,
+                plan_id=plan.id,
+                status=VoucherStatus.ACTIVE,
+                value=purchase.amount,
+                expires_at=datetime.utcnow() + timedelta(days=30),  # Voucher valid for 30 days
+                hotspot_username=hotspot_username,
+                hotspot_password=hotspot_password,
+            )
+            db.add(voucher)
+            await db.flush()
+
+            # Link voucher to purchase
+            purchase.voucher_code_id = voucher.id
+
+            logger.info(f"Generated voucher {voucher_code} with hotspot credentials {hotspot_username} for purchase {purchase.id}")
+
+    await db.commit()
+
+    logger.info(f"Processed webhook for reference {reference}: status={payment_status}")
+    return {"status": "received", "payment_status": payment_status}
+
+
+@router.get("/{org_slug}/payment/status")
+async def get_payment_status(
+    org_slug: str,
+    reference: str = Query(..., description="Payment reference"),
+    db: AsyncSession = Depends(get_db),
+    organization: Organization = Depends(get_organization_by_slug),
+):
+    """
+    Check payment status and get voucher code if payment is complete.
+
+    Used by frontend to poll for payment completion.
+    """
+    # Find the purchase record
+    result = await db.execute(
+        select(CustomerPurchase)
+        .where(
+            CustomerPurchase.payment_reference == reference,
+            CustomerPurchase.organization_id == organization.id,
+        )
+    )
+    purchase = result.scalar_one_or_none()
+
+    if not purchase:
+        return {
+            "status": "not_found",
+            "is_completed": False,
+            "message": "Payment reference not found",
+        }
+
+    # Check if payment is completed
+    is_completed = purchase.payment_status in ["completed", "failed"]
+    is_success = purchase.payment_status == "completed"
+
+    response = {
+        "status": purchase.payment_status,
+        "is_completed": is_completed,
+        "message": "Payment successful" if is_success else (
+            "Payment failed" if purchase.payment_status == "failed" else "Payment pending"
+        ),
+    }
+
+    # Include voucher and hotspot credentials if payment was successful
+    if is_success and purchase.voucher_code_id:
+        voucher_result = await db.execute(
+            select(VoucherCode).where(VoucherCode.id == purchase.voucher_code_id)
+        )
+        voucher = voucher_result.scalar_one_or_none()
+        if voucher:
+            response["voucher_code"] = voucher.code
+            # Include hotspot credentials for login
+            if voucher.hotspot_username:
+                response["hotspot_username"] = voucher.hotspot_username
+                response["hotspot_password"] = voucher.hotspot_password
+
+    return response

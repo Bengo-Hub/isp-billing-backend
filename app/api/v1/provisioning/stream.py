@@ -116,6 +116,14 @@ async def broadcast_provisioning_update(session_id: str, update_type: str, data:
         await manager.broadcast_log(session_id, data)
     elif update_type == "status":
         await manager.broadcast_status(session_id, data)
+    elif update_type == "provisioning_complete":
+        # Send a dedicated provisioning_complete message type for frontend redirect
+        message = {
+            "type": "provisioning_complete",
+            "session_id": session_id,
+            "data": data
+        }
+        await manager.send_message(session_id, message)
 
 
 # Function to broadcast router logs (called by router monitoring)
