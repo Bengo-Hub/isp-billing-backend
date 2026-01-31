@@ -165,15 +165,35 @@ class NotificationService:
         to_phone: str,
         message: str
     ) -> Dict[str, Any]:
-        """Send SMS notification."""
+        """Send SMS notification using platform gateway credentials."""
         try:
-            if settings.sms_provider == "africas_talking":
+            from sqlalchemy import and_
+            from app.models.sms_credit import SMSGatewayConfig, SMSProviderType, SMSGatewayStatus
+
+            # Get primary active platform-level gateway
+            result = await self.db.execute(
+                select(SMSGatewayConfig).where(
+                    and_(
+                        SMSGatewayConfig.organization_id.is_(None),
+                        SMSGatewayConfig.is_active == True,
+                        SMSGatewayConfig.is_primary == True,
+                        SMSGatewayConfig.status == SMSGatewayStatus.ACTIVE,
+                    )
+                )
+            )
+            gateway = result.scalar_one_or_none()
+
+            if not gateway:
+                logger.warning("No primary active SMS gateway configured at platform level")
+                return {"status": "error", "message": "SMS gateway not configured"}
+
+            if gateway.provider_type == SMSProviderType.AFRICASTALKING:
                 return await self._send_africas_talking_sms(to_phone, message)
-            elif settings.sms_provider == "twilio":
+            elif gateway.provider_type == SMSProviderType.TWILIO:
                 return await self._send_twilio_sms(to_phone, message)
             else:
-                logger.warning(f"Unknown SMS provider: {settings.sms_provider}")
-                return {"status": "error", "message": "SMS provider not configured"}
+                logger.warning(f"Unknown SMS provider type: {gateway.provider_type}")
+                return {"status": "error", "message": "Unknown SMS provider"}
         except Exception as e:
             logger.error(f"Failed to send SMS to {to_phone}: {e}")
             return {"status": "error", "message": str(e)}
@@ -296,17 +316,58 @@ class NotificationService:
         to_phone: str,
         message: str
     ) -> Dict[str, Any]:
-        """Send SMS via Africa's Talking."""
+        """Send SMS via Africa's Talking using platform gateway credentials."""
         try:
-            import africastalking
+            import json
+            from sqlalchemy import and_
+            from app.models.sms_credit import SMSGatewayConfig, SMSProviderType, SMSGatewayStatus
+            from app.integrations.payment_gateways import PaymentGatewayFactory
 
-            africastalking.initialize(
-                username=settings.africastalking_username,
-                api_key=settings.africastalking_api_key
+            # Get platform-level AT gateway (organization_id IS NULL)
+            result = await self.db.execute(
+                select(SMSGatewayConfig).where(
+                    and_(
+                        SMSGatewayConfig.organization_id.is_(None),
+                        SMSGatewayConfig.provider_type == SMSProviderType.AFRICASTALKING,
+                        SMSGatewayConfig.is_active == True,
+                        SMSGatewayConfig.status == SMSGatewayStatus.ACTIVE,
+                    )
+                )
             )
+            gateway = result.scalar_one_or_none()
+
+            if not gateway:
+                logger.error("No active Africa's Talking gateway configured at platform level")
+                return {"status": "error", "message": "SMS gateway not configured"}
+
+            # Decrypt credentials JSON (same approach as sms_gateways.py)
+            encryption_key = getattr(settings, 'encryption_key', None)
+            if encryption_key:
+                credentials = PaymentGatewayFactory._decrypt_credentials(
+                    gateway.credentials, encryption_key
+                )
+            else:
+                # Development mode - try plain JSON
+                try:
+                    credentials = json.loads(gateway.credentials) if gateway.credentials else {}
+                except json.JSONDecodeError:
+                    credentials = {}
+
+            username = credentials.get("username") or credentials.get("api_username")
+            api_key = credentials.get("api_key")
+
+            if not api_key or not username:
+                logger.error(f"Africa's Talking credentials not properly configured. Keys found: {list(credentials.keys())}")
+                return {"status": "error", "message": "SMS gateway credentials missing"}
+
+            # Ensure phone number has + prefix for Africa's Talking
+            formatted_phone = to_phone if to_phone.startswith('+') else f'+{to_phone}'
+
+            import africastalking
+            africastalking.initialize(username=username, api_key=api_key)
 
             sms = africastalking.SMS
-            response = sms.send(message, [to_phone])
+            response = sms.send(message, [formatted_phone])
 
             if response['SMSMessageData']['Recipients'][0]['statusCode'] == 101:
                 logger.info(f"Africa's Talking SMS sent successfully to {to_phone}")

@@ -360,22 +360,25 @@ class AfricasTalkingSMSProvider(SMSProviderInterface):
     
     async def get_account_balance(self) -> Tuple[float, str]:
         """Get Africa's Talking account balance.
-        
+
         Returns:
             Tuple of (balance, currency)
         """
         try:
+            url = f"{self._base_url}/user?username={self._username}"
+            logger.info(f"Checking AT balance: URL={url}, sandbox={self._is_sandbox}")
+
             async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
                 response = await client.get(
-                    f"{self._base_url}/user?username={self._username}",
+                    url,
                     headers=self._headers,
                 )
-                
+
                 if response.status_code == 200:
                     data = response.json()
                     user_data = data.get("UserData", {})
                     balance_str = user_data.get("balance", "0")
-                    
+
                     # Parse balance string like "KES 1500.00" or "USD 100.00"
                     parts = balance_str.split()
                     if len(parts) == 2:
@@ -384,11 +387,26 @@ class AfricasTalkingSMSProvider(SMSProviderInterface):
                     else:
                         currency = "KES"
                         balance = float(balance_str.replace("KES", "").replace("USD", "").strip() or 0)
-                    
+
                     return balance, currency
+                elif response.status_code == 401:
+                    logger.error(
+                        f"Africa's Talking 401 Unauthorized: "
+                        f"username={self._username}, sandbox={self._is_sandbox}"
+                    )
+                    raise Exception(
+                        f"Authentication failed (401). "
+                        f"For sandbox: username must be 'sandbox', use sandbox API key from AT dashboard. "
+                        f"For production: use your actual AT username and production API key."
+                    )
                 else:
+                    error_detail = response.text
+                    logger.error(
+                        f"Africa's Talking balance check failed: "
+                        f"status={response.status_code}, response={error_detail}"
+                    )
                     raise Exception(f"Balance check failed: {response.status_code}")
-        
+
         except Exception as e:
             logger.error(f"Africa's Talking balance check error: {e}")
             raise

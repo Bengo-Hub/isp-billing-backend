@@ -198,17 +198,70 @@ class AuthService:
                 detail="Incorrect username or password",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        
+
         access_token = self.create_access_token(
             data={"sub": user.id, "username": user.username, "role": user.role.value}
         )
         refresh_token = self.create_refresh_token(
             data={"sub": user.id, "username": user.username}
         )
-        
+
         return Token(
             access_token=access_token,
             refresh_token=refresh_token,
             token_type="bearer",
             expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60
         )
+
+    async def register_user(self, user_data) -> User:
+        """Register a new user."""
+        from sqlalchemy.exc import IntegrityError
+
+        # Check if username already exists
+        existing_user = await self.db.execute(
+            select(User).where(User.username == user_data.username)
+        )
+        if existing_user.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username already registered"
+            )
+
+        # Check if email already exists
+        existing_email = await self.db.execute(
+            select(User).where(User.email == user_data.email)
+        )
+        if existing_email.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+
+        # Create user
+        hashed_password = self.get_password_hash(user_data.password)
+
+        user = User(
+            username=user_data.username,
+            email=user_data.email,
+            hashed_password=hashed_password,
+            first_name=user_data.first_name,
+            last_name=user_data.last_name,
+            phone=getattr(user_data, 'phone', None),
+            role=getattr(user_data, 'role', UserRole.CUSTOMER),
+            is_active=True,
+            is_verified=False,
+        )
+
+        try:
+            self.db.add(user)
+            await self.db.commit()
+            await self.db.refresh(user)
+            logger.info(f"User registered: {user.username}")
+            return user
+        except IntegrityError as e:
+            await self.db.rollback()
+            logger.error(f"Failed to register user: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to register user. Username or email may already exist."
+            )
