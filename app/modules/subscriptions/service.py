@@ -8,10 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.subscription import (
-    Subscription, 
-    SubscriptionUsageLog, 
+    Subscription,
+    SubscriptionUsageLog,
     SubscriptionHistory,
-    SubscriptionStatus, 
+    SubscriptionStatus,
     SubscriptionType
 )
 from app.models.user import User
@@ -19,13 +19,52 @@ from app.models.plan import ServicePlan
 from app.models.router import Router
 from app.api.deps import PaginationParams
 from app.core.datetime_utils import normalize_datetime
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class SubscriptionService:
     """Subscription management service."""
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, auto_sync_router: bool = True):
+        """
+        Initialize subscription service.
+
+        Args:
+            db: Database session
+            auto_sync_router: Whether to automatically sync changes to router
+        """
         self.db = db
+        self.auto_sync_router = auto_sync_router
+        self._router_sync = None
+
+    @property
+    def router_sync(self):
+        """Lazy load router sync service."""
+        if self._router_sync is None:
+            from .router_sync import SubscriptionRouterSyncService
+            self._router_sync = SubscriptionRouterSyncService(self.db)
+        return self._router_sync
+
+    async def _sync_to_router(self, subscription: Subscription) -> Dict[str, Any]:
+        """Sync subscription to router if auto_sync is enabled."""
+        if not self.auto_sync_router:
+            return {"skipped": True, "reason": "auto_sync_router disabled"}
+
+        try:
+            result = await self.router_sync.sync_subscription_to_router(subscription)
+            if result["success"]:
+                logger.info(f"Subscription {subscription.id} synced to router")
+            else:
+                logger.warning(
+                    f"Failed to sync subscription {subscription.id} to router: "
+                    f"{result.get('error')}"
+                )
+            return result
+        except Exception as e:
+            logger.error(f"Router sync error for subscription {subscription.id}: {e}")
+            return {"success": False, "error": str(e)}
 
     async def get_by_id(self, subscription_id: int) -> Optional[Subscription]:
         """Get subscription by ID."""
@@ -138,6 +177,7 @@ class SubscriptionService:
             created_by=created_by,
             notes=notes,
             status=SubscriptionStatus.PENDING,
+            is_router_synced=False,
         )
 
         self.db.add(subscription)
@@ -152,20 +192,28 @@ class SubscriptionService:
             created_by
         )
 
+        # Note: Don't sync PENDING subscriptions to router
+        # They should be synced when activated
+
         return subscription
 
     async def update_subscription(
-        self, 
-        subscription_id: int, 
+        self,
+        subscription_id: int,
         update_data: Dict[str, Any],
         updated_by: Optional[int] = None
     ) -> Optional[Subscription]:
-        """Update subscription."""
+        """Update subscription and sync to router if status changed."""
         subscription = await self.get_by_id(subscription_id)
         if not subscription:
             return None
 
-        old_status = subscription.status.value if subscription.status else None
+        old_status = subscription.status if subscription.status else None
+        status_changing = 'status' in update_data and update_data['status'] != old_status
+
+        # Mark for router sync if status is changing
+        if status_changing:
+            update_data['is_router_synced'] = False
 
         # Update fields
         for field, value in update_data.items():
@@ -176,27 +224,31 @@ class SubscriptionService:
         await self.db.refresh(subscription)
 
         # Log status change if applicable
-        if old_status and subscription.status.value != old_status:
+        if old_status and subscription.status != old_status:
             await self._log_subscription_action(
                 subscription_id,
                 "status_changed",
-                f"Status changed from {old_status} to {subscription.status.value}",
+                f"Status changed from {old_status.value} to {subscription.status.value}",
                 updated_by
             )
+
+            # Sync to router on status change
+            await self._sync_to_router(subscription)
 
         return subscription
 
     async def activate_subscription(
-        self, 
-        subscription_id: int, 
+        self,
+        subscription_id: int,
         activated_by: Optional[int] = None
     ) -> Optional[Subscription]:
-        """Activate subscription."""
+        """Activate subscription and sync to router."""
         subscription = await self.get_by_id(subscription_id)
         if not subscription:
             return None
 
         subscription.status = SubscriptionStatus.ACTIVE
+        subscription.is_router_synced = False  # Mark for sync
         await self.db.commit()
         await self.db.refresh(subscription)
 
@@ -207,20 +259,24 @@ class SubscriptionService:
             activated_by
         )
 
+        # Sync to router (enable user)
+        await self._sync_to_router(subscription)
+
         return subscription
 
     async def suspend_subscription(
-        self, 
-        subscription_id: int, 
+        self,
+        subscription_id: int,
         suspended_by: Optional[int] = None,
         reason: Optional[str] = None
     ) -> Optional[Subscription]:
-        """Suspend subscription."""
+        """Suspend subscription and disable on router."""
         subscription = await self.get_by_id(subscription_id)
         if not subscription:
             return None
 
         subscription.status = SubscriptionStatus.SUSPENDED
+        subscription.is_router_synced = False  # Mark for sync
         await self.db.commit()
         await self.db.refresh(subscription)
 
@@ -231,20 +287,24 @@ class SubscriptionService:
             suspended_by
         )
 
+        # Sync to router (disable user)
+        await self._sync_to_router(subscription)
+
         return subscription
 
     async def cancel_subscription(
-        self, 
-        subscription_id: int, 
+        self,
+        subscription_id: int,
         cancelled_by: Optional[int] = None,
         reason: Optional[str] = None
     ) -> Optional[Subscription]:
-        """Cancel subscription."""
+        """Cancel subscription and disable on router."""
         subscription = await self.get_by_id(subscription_id)
         if not subscription:
             return None
 
         subscription.status = SubscriptionStatus.CANCELLED
+        subscription.is_router_synced = False  # Mark for sync
         await self.db.commit()
         await self.db.refresh(subscription)
 
@@ -254,6 +314,9 @@ class SubscriptionService:
             f"Subscription cancelled. Reason: {reason or 'No reason provided'}",
             cancelled_by
         )
+
+        # Sync to router (disable user)
+        await self._sync_to_router(subscription)
 
         return subscription
 
@@ -329,20 +392,22 @@ class SubscriptionService:
         return result.scalars().all()
 
     async def renew_subscription(
-        self, 
-        subscription_id: int, 
+        self,
+        subscription_id: int,
         new_end_date: datetime,
         renewed_by: Optional[int] = None
     ) -> Optional[Subscription]:
-        """Renew subscription."""
+        """Renew subscription and re-enable on router."""
         subscription = await self.get_by_id(subscription_id)
         if not subscription:
             return None
 
         old_end_date = subscription.end_date
+        old_status = subscription.status
         subscription.end_date = new_end_date
         subscription.status = SubscriptionStatus.ACTIVE
-        
+        subscription.is_router_synced = False  # Mark for sync
+
         await self.db.commit()
         await self.db.refresh(subscription)
 
@@ -352,6 +417,10 @@ class SubscriptionService:
             f"Subscription renewed from {old_end_date} to {new_end_date}",
             renewed_by
         )
+
+        # Sync to router (re-enable user if was expired/suspended)
+        if old_status != SubscriptionStatus.ACTIVE:
+            await self._sync_to_router(subscription)
 
         return subscription
 

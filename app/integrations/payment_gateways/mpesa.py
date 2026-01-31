@@ -12,16 +12,26 @@ Implements the complete Safaricom M-PESA Daraja API including:
 - Transaction Status Query
 - Transaction Reversal
 - Account Balance Query
+- Callback signature verification
+
+Reference: https://developer.safaricom.co.ke/Documentation
 """
 
+import asyncio
 import base64
+import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import httpx
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.backends import default_backend
 
+from app.core.config import settings
 from app.models.payment_gateway import GatewayType
 from .base import (
     PaymentGatewayInterface,
@@ -45,6 +55,11 @@ class MPesaAPIError(Exception):
         super().__init__(message)
         self.response_code = response_code
         self.response = response or {}
+
+
+class MPesaValidationError(Exception):
+    """M-PESA validation error."""
+    pass
 
 
 @PaymentGatewayFactory.register(GatewayType.MPESA_PAYBILL)
@@ -667,6 +682,282 @@ class MPesaPaybillGateway(PaymentGatewayInterface):
         except Exception as e:
             logger.error(f"M-PESA transaction status error: {e}")
             return {"error": str(e)}
+
+    async def simulate_c2b_payment(
+        self,
+        phone_number: str,
+        amount: int,
+        account_number: str,
+        command_id: str = "CustomerPayBillOnline",
+    ) -> Dict[str, Any]:
+        """
+        Simulate C2B payment (for sandbox testing).
+
+        This is only available in the sandbox environment.
+        """
+        try:
+            access_token = await self._get_access_token()
+            phone = self.format_phone_number(phone_number)
+
+            url = f"{self._base_url}/mpesa/c2b/v1/simulate"
+            payload = {
+                "ShortCode": self._shortcode,
+                "CommandID": command_id,
+                "Amount": amount,
+                "Msisdn": phone,
+                "BillRefNumber": account_number,
+            }
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=30.0,
+                )
+
+                data = response.json()
+                logger.info(f"M-PESA C2B simulation response: {data}")
+                return data
+
+        except Exception as e:
+            logger.error(f"M-PESA C2B simulation error: {e}")
+            return {"error": str(e)}
+
+    def validate_phone_number(self, phone_number: str) -> str:
+        """
+        Validate and format phone number for M-PESA.
+
+        Converts various formats to the 2547XXXXXXXX format.
+        Raises MPesaValidationError if invalid.
+        """
+        if not phone_number:
+            raise MPesaValidationError("Phone number is required")
+
+        # Remove any non-digit characters except +
+        cleaned = "".join(c for c in phone_number if c.isdigit() or c == "+")
+
+        # Remove + if present
+        if cleaned.startswith("+"):
+            cleaned = cleaned[1:]
+
+        # Handle different formats
+        if cleaned.startswith("0"):
+            # Convert 07xxxxxxxx to 2547xxxxxxxx
+            cleaned = f"254{cleaned[1:]}"
+        elif not cleaned.startswith("254"):
+            # Add 254 prefix if not present
+            cleaned = f"254{cleaned}"
+
+        # Validate final format
+        if not cleaned.startswith("254") or len(cleaned) != 12:
+            raise MPesaValidationError(f"Invalid phone number format: {phone_number}")
+
+        return cleaned
+
+    def validate_amount(self, amount: int) -> None:
+        """
+        Validate payment amount.
+
+        Raises MPesaValidationError if invalid.
+        """
+        if not isinstance(amount, int) or amount <= 0:
+            raise MPesaValidationError("Amount must be a positive integer")
+
+        if amount < 1:
+            raise MPesaValidationError("Amount must be at least 1 KES")
+
+        if amount > 150000:
+            raise MPesaValidationError("Amount cannot exceed 150,000 KES")
+
+    def verify_callback_signature(
+        self, callback_data: Dict[str, Any], public_key_path: Optional[str] = None
+    ) -> bool:
+        """
+        Verify M-PESA callback signature using official Safaricom public key.
+
+        Reference: https://developer.safaricom.co.ke/Documentation
+        """
+        try:
+            if not callback_data or not isinstance(callback_data, dict):
+                logger.warning("Invalid callback data provided for signature verification")
+                return False
+
+            # Extract signature from callback data
+            signature = callback_data.get("signature", "")
+
+            if not signature:
+                logger.warning("M-PESA callback missing signature")
+                return False
+
+            # Load public key if path provided
+            public_key = None
+            if public_key_path:
+                key_path = Path(public_key_path)
+                if key_path.exists():
+                    with open(key_path, "rb") as key_file:
+                        public_key = serialization.load_pem_public_key(
+                            key_file.read(), backend=default_backend()
+                        )
+
+            # If no public key, fall back to basic validation
+            if not public_key:
+                return self._basic_signature_validation(callback_data, signature)
+
+            # Perform cryptographic signature verification
+            return self._cryptographic_signature_verification(
+                callback_data, signature, public_key
+            )
+
+        except Exception as e:
+            logger.error(f"Callback signature verification failed: {e}")
+            return False
+
+    def _basic_signature_validation(
+        self, callback_data: Dict[str, Any], signature: str
+    ) -> bool:
+        """Perform basic signature validation when public key is not available."""
+        try:
+            # Check signature format (should be base64 encoded)
+            try:
+                base64.b64decode(signature)
+            except Exception:
+                logger.warning("Invalid signature format - not base64 encoded")
+                return False
+
+            # Validate required callback structure
+            return self._validate_callback_structure(callback_data)
+
+        except Exception as e:
+            logger.error(f"Basic signature validation failed: {e}")
+            return False
+
+    def _validate_callback_structure(self, callback_data: Dict[str, Any]) -> bool:
+        """Validate the structure of M-PESA callback data."""
+        try:
+            body = callback_data.get("Body", {})
+            stk_callback = body.get("stkCallback", {})
+
+            if not stk_callback:
+                logger.warning("Missing stkCallback in callback data")
+                return False
+
+            # Check for required STK callback fields
+            required_fields = [
+                "MerchantRequestID",
+                "CheckoutRequestID",
+                "ResultCode",
+                "ResultDesc",
+            ]
+            for field in required_fields:
+                if field not in stk_callback:
+                    logger.warning(f"Missing required STK callback field: {field}")
+                    return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Callback structure validation failed: {e}")
+            return False
+
+    def _cryptographic_signature_verification(
+        self, callback_data: Dict[str, Any], signature: str, public_key
+    ) -> bool:
+        """Perform cryptographic signature verification using M-PESA public key."""
+        try:
+            # Create the message to verify (callback data without signature)
+            message_data = {k: v for k, v in callback_data.items() if k != "signature"}
+            message = json.dumps(message_data, sort_keys=True, separators=(",", ":"))
+
+            # Decode the signature
+            try:
+                signature_bytes = base64.b64decode(signature)
+            except Exception as e:
+                logger.warning(f"Failed to decode signature: {e}")
+                return False
+
+            # Verify the signature using the public key
+            try:
+                public_key.verify(
+                    signature_bytes,
+                    message.encode("utf-8"),
+                    padding.PKCS1v15(),
+                    hashes.SHA256(),
+                )
+
+                logger.info("M-PESA callback signature cryptographically verified")
+                return True
+
+            except Exception as e:
+                logger.warning(f"Signature verification failed: {e}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Cryptographic signature verification failed: {e}")
+            return False
+
+    def parse_stk_callback(self, callback_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Parse STK Push callback data.
+
+        Returns a normalized dictionary with payment details.
+        """
+        try:
+            body = callback_data.get("Body", {})
+            stk_callback = body.get("stkCallback", {})
+
+            result = {
+                "merchant_request_id": stk_callback.get("MerchantRequestID", ""),
+                "checkout_request_id": stk_callback.get("CheckoutRequestID", ""),
+                "result_code": stk_callback.get("ResultCode", ""),
+                "result_desc": stk_callback.get("ResultDesc", ""),
+                "callback_metadata": {},
+            }
+
+            if "CallbackMetadata" in stk_callback:
+                metadata = stk_callback["CallbackMetadata"].get("Item", [])
+                for item in metadata:
+                    result["callback_metadata"][item["Name"]] = item.get("Value")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to parse STK callback: {e}")
+            return {}
+
+    def parse_c2b_callback(self, callback_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Parse C2B callback data.
+
+        Returns a normalized dictionary with transaction details.
+        """
+        try:
+            transaction = callback_data.get("Transaction", callback_data)
+
+            result = {
+                "transaction_type": transaction.get("TransactionType", ""),
+                "trans_id": transaction.get("TransID", ""),
+                "trans_time": transaction.get("TransTime", ""),
+                "trans_amount": transaction.get("TransAmount", ""),
+                "business_short_code": transaction.get("BusinessShortCode", ""),
+                "bill_ref_number": transaction.get("BillRefNumber", ""),
+                "invoice_number": transaction.get("InvoiceNumber", ""),
+                "org_account_balance": transaction.get("OrgAccountBalance", ""),
+                "third_party_trans_id": transaction.get("ThirdPartyTransID", ""),
+                "msisdn": transaction.get("MSISDN", ""),
+                "first_name": transaction.get("FirstName", ""),
+                "middle_name": transaction.get("MiddleName", ""),
+                "last_name": transaction.get("LastName", ""),
+            }
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to parse C2B callback: {e}")
+            return {}
 
 
 @PaymentGatewayFactory.register(GatewayType.MPESA_TILL)

@@ -138,15 +138,47 @@ async def login(
 
     user_payload["permissions"] = permissions
 
-    return {
-        "data": {
-            "access_token": token_data["access_token"],
-            "refresh_token": token_data["refresh_token"],
-            "token_type": token_data["token_type"],
-            "expires_in": 30 * 60,  # 30 minutes
-            "user": user_payload,
-        }
+    # For customers, include organization slug and subscription type for portal redirect
+    customer_portal_info = None
+    if user.role.value == "customer" and user.organization_id:
+        from sqlalchemy import select
+        from app.models.organization import Organization
+        from app.models.subscription import Subscription, SubscriptionType
+
+        # Get organization slug
+        org_result = await db.execute(
+            select(Organization).where(Organization.id == user.organization_id)
+        )
+        organization = org_result.scalar_one_or_none()
+
+        # Get customer's active subscription type
+        sub_result = await db.execute(
+            select(Subscription).where(
+                Subscription.user_id == user.id,
+                Subscription.status.in_(["active", "suspended"])
+            ).order_by(Subscription.created_at.desc()).limit(1)
+        )
+        subscription = sub_result.scalar_one_or_none()
+
+        if organization:
+            customer_portal_info = {
+                "organization_slug": organization.slug,
+                "subscription_type": subscription.subscription_type.value if subscription else "hotspot",
+                "portal_url": f"/portal/{'pppoe' if subscription and subscription.subscription_type == SubscriptionType.PPPOE else 'hotspot'}/{organization.slug}"
+            }
+
+    response_data = {
+        "access_token": token_data["access_token"],
+        "refresh_token": token_data["refresh_token"],
+        "token_type": token_data["token_type"],
+        "expires_in": 30 * 60,  # 30 minutes
+        "user": user_payload,
     }
+
+    if customer_portal_info:
+        response_data["customer_portal"] = customer_portal_info
+
+    return {"data": response_data}
 
 
 @router.post("/refresh")

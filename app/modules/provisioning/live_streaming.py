@@ -35,12 +35,29 @@ class LiveStreamingManager:
         if session_id in self.active_sessions:
             self.active_sessions[session_id]['status'] = 'completed' if success else 'failed'
             self.active_sessions[session_id]['ended_at'] = datetime.now(timezone.utc)
-            
+
             await self.broadcast_log(session_id, {
                 'timestamp': datetime.now(timezone.utc).strftime('%H:%M:%S'),
                 'message': f'Provisioning session {"completed successfully" if success else "failed"}',
                 'level': 'success' if success else 'error'
             })
+
+            # Broadcast provisioning complete event for frontend redirect
+            if success:
+                await self.broadcast_provisioning_complete(session_id)
+
+    async def broadcast_provisioning_complete(self, session_id: str):
+        """Broadcast provisioning complete event to trigger frontend redirect."""
+        try:
+            from app.api.v1.provisioning.stream import broadcast_provisioning_update
+            await broadcast_provisioning_update(session_id, 'provisioning_complete', {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'message': 'Provisioning completed successfully! Router is now ready.',
+                'success': True
+            })
+            logger.info(f"Broadcasted provisioning complete for session {session_id}")
+        except Exception as e:
+            logger.error(f"Failed to broadcast provisioning complete for session {session_id}: {e}")
     
     async def broadcast_log(self, session_id: str, log_entry: Dict[str, Any]):
         """Broadcast a log entry to connected clients."""

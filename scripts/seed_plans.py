@@ -39,54 +39,92 @@ class PlanSeeder:
             if count == 0:
                 return []
 
+        # Fetch all organizations to assign plans to them
+        from sqlalchemy import select
+        from app.models.organization import Organization
+
+        result = await self.db.execute(select(Organization))
+        organizations = list(result.scalars().all())
+
+        if not organizations:
+            self.logger.warning("No organizations found - plans will not be assigned to any organization")
+
         plans = []
-        
-        # Create standard ISP packages
-        standard_plans = await self._create_standard_plans()
+
+        # Create standard ISP packages for each organization
+        standard_plans = await self._create_standard_plans(organizations)
         plans.extend(standard_plans)
-        
+
         # Create additional plans if needed
         if count > len(standard_plans):
-            additional_plans = await self._create_additional_plans(count - len(standard_plans))
+            additional_plans = await self._create_additional_plans(count - len(standard_plans), organizations)
             plans.extend(additional_plans)
-        
+
         await self.db.commit()
-        
-        self.logger.info(f"Seeded {len(plans)} service plans")
+
+        self.logger.info(f"Seeded {len(plans)} service plans across {len(organizations)} organizations")
         return plans
 
-    async def _create_standard_plans(self) -> List[ServicePlan]:
-        """Create standard ISP service plans."""
+    async def _create_standard_plans(self, organizations: list = None) -> List[ServicePlan]:
+        """Create standard ISP service plans for each organization."""
         plans = []
-        
+
         # Hotspot Plans
         hotspot_plans = [
             {
-                "name": "Basic Hotspot 1GB",
-                "description": "Perfect for light browsing and social media",
+                "name": "Quick Access - 1 Hour",
+                "description": "Quick internet access for urgent needs",
                 "plan_type": PlanType.HOTSPOT,
                 "download_speed": 2,
                 "upload_speed": 1,
-                "data_limit": 1024,  # 1GB in MB
+                "data_limit": 100,  # 100MB
+                "time_limit": 1,  # 1 hour
+                "validity_days": 1,
+                "price": Decimal("20.00"),
+                "billing_cycle": BillingCycle.ONE_TIME,
+                "is_popular": False
+            },
+            {
+                "name": "Daily Pass - 500MB",
+                "description": "Perfect for a day of browsing",
+                "plan_type": PlanType.HOTSPOT,
+                "download_speed": 3,
+                "upload_speed": 1,
+                "data_limit": 512,  # 500MB
                 "time_limit": -1,
                 "validity_days": 1,
                 "price": Decimal("50.00"),
-                "billing_cycle": BillingCycle.ONE_TIME
+                "billing_cycle": BillingCycle.DAILY,
+                "is_popular": False
             },
             {
-                "name": "Standard Hotspot 5GB",
+                "name": "Standard - 2GB",
                 "description": "Great for regular internet usage",
                 "plan_type": PlanType.HOTSPOT,
                 "download_speed": 5,
                 "upload_speed": 2,
+                "data_limit": 2048,  # 2GB in MB
+                "time_limit": -1,
+                "validity_days": 7,
+                "price": Decimal("150.00"),
+                "billing_cycle": BillingCycle.WEEKLY,
+                "is_popular": True
+            },
+            {
+                "name": "Weekly - 5GB",
+                "description": "A week of unlimited browsing",
+                "plan_type": PlanType.HOTSPOT,
+                "download_speed": 8,
+                "upload_speed": 4,
                 "data_limit": 5120,  # 5GB in MB
                 "time_limit": -1,
                 "validity_days": 7,
-                "price": Decimal("200.00"),
-                "billing_cycle": BillingCycle.WEEKLY
+                "price": Decimal("300.00"),
+                "billing_cycle": BillingCycle.WEEKLY,
+                "is_popular": False
             },
             {
-                "name": "Premium Hotspot Unlimited",
+                "name": "Monthly Unlimited",
                 "description": "Unlimited browsing for heavy users",
                 "plan_type": PlanType.HOTSPOT,
                 "download_speed": 10,
@@ -95,7 +133,8 @@ class PlanSeeder:
                 "time_limit": -1,
                 "validity_days": 30,
                 "price": Decimal("1500.00"),
-                "billing_cycle": BillingCycle.MONTHLY
+                "billing_cycle": BillingCycle.MONTHLY,
+                "is_popular": False
             }
         ]
         
@@ -151,149 +190,160 @@ class PlanSeeder:
             }
         ]
         
-        # Create plans
+        # Create plans for each organization
         all_plan_data = hotspot_plans + pppoe_plans
-        
-        for plan_data in all_plan_data:
-            plan = ServicePlan(
-                name=plan_data["name"],
-                description=plan_data["description"],
-                plan_type=plan_data["plan_type"],
-                status=PlanStatus.ACTIVE,
-                price=plan_data["price"],
-                currency="KES",
-                billing_cycle=plan_data["billing_cycle"],
-                download_speed=plan_data["download_speed"],
-                upload_speed=plan_data["upload_speed"],
-                data_limit=plan_data["data_limit"],
-                time_limit=plan_data["time_limit"],
-                validity_days=plan_data["validity_days"],
-                sort_order=len(plans) + 1,
-                created_at=datetime.utcnow() - timedelta(days=random.randint(1, 90))
-            )
-            
-            self.db.add(plan)
-            await self.db.flush()
-            
-            # Create plan features
-            features = [
-                {
-                    "feature_name": "Download Speed",
-                    "feature_value": f"{plan_data['download_speed']} Mbps",
-                    "feature_type": "speed",
-                    "is_core_feature": True
-                },
-                {
-                    "feature_name": "Upload Speed", 
-                    "feature_value": f"{plan_data['upload_speed']} Mbps",
-                    "feature_type": "speed",
-                    "is_core_feature": True
-                },
-                {
-                    "feature_name": "Data Limit",
-                    "feature_value": "Unlimited" if plan_data["data_limit"] == -1 else f"{plan_data['data_limit']} MB",
-                    "feature_type": "limit",
-                    "is_core_feature": True
-                },
-                {
-                    "feature_name": "Validity",
-                    "feature_value": f"{plan_data['validity_days']} days",
-                    "feature_type": "validity",
-                    "is_core_feature": True
-                }
-            ]
-            
-            for idx, feature_data in enumerate(features):
-                feature = PlanFeature(
-                    plan_id=plan.id,
-                    feature_name=feature_data["feature_name"],
-                    feature_value=feature_data["feature_value"],
-                    is_included=feature_data["is_core_feature"],
-                    sort_order=idx
+
+        # If no organizations, create plans without org assignment
+        orgs_to_use = organizations if organizations else [None]
+
+        for org in orgs_to_use:
+            for idx, plan_data in enumerate(all_plan_data):
+                plan = ServicePlan(
+                    organization_id=org.id if org else None,
+                    name=plan_data["name"],
+                    description=plan_data["description"],
+                    plan_type=plan_data["plan_type"],
+                    status=PlanStatus.ACTIVE,
+                    price=plan_data["price"],
+                    currency="KES",
+                    billing_cycle=plan_data["billing_cycle"],
+                    download_speed=plan_data["download_speed"],
+                    upload_speed=plan_data["upload_speed"],
+                    data_limit=plan_data["data_limit"],
+                    time_limit=plan_data["time_limit"],
+                    validity_days=plan_data["validity_days"],
+                    sort_order=idx + 1,
+                    is_popular=plan_data.get("is_popular", False),
+                    created_at=datetime.utcnow() - timedelta(days=random.randint(1, 90))
                 )
-                
-                self.db.add(feature)
-            
-            # Create plan pricing tiers (monthly and annual)
-            pricing = PlanPricing(
-                plan_id=plan.id,
-                duration_months=1,  # Monthly
-                price=plan_data["price"],
-                discount_percentage=Decimal("0"),
-                is_active=True
-            )
-            
-            self.db.add(pricing)
-            
-            # Add annual pricing with discount
-            annual_pricing = PlanPricing(
-                plan_id=plan.id,
-                duration_months=12,  # Annual
-                price=plan_data["price"] * 10,  # 2 months free
-                discount_percentage=Decimal("16.67"),
-                is_active=True
-            )
-            
-            self.db.add(annual_pricing)
-            plans.append(plan)
-        
+
+                self.db.add(plan)
+                await self.db.flush()
+
+                # Create plan features
+                features = [
+                    {
+                        "feature_name": "Download Speed",
+                        "feature_value": f"{plan_data['download_speed']} Mbps",
+                        "feature_type": "speed",
+                        "is_core_feature": True
+                    },
+                    {
+                        "feature_name": "Upload Speed",
+                        "feature_value": f"{plan_data['upload_speed']} Mbps",
+                        "feature_type": "speed",
+                        "is_core_feature": True
+                    },
+                    {
+                        "feature_name": "Data Limit",
+                        "feature_value": "Unlimited" if plan_data["data_limit"] == -1 else f"{plan_data['data_limit']} MB",
+                        "feature_type": "limit",
+                        "is_core_feature": True
+                    },
+                    {
+                        "feature_name": "Validity",
+                        "feature_value": f"{plan_data['validity_days']} days",
+                        "feature_type": "validity",
+                        "is_core_feature": True
+                    }
+                ]
+
+                for feat_idx, feature_data in enumerate(features):
+                    feature = PlanFeature(
+                        plan_id=plan.id,
+                        feature_name=feature_data["feature_name"],
+                        feature_value=feature_data["feature_value"],
+                        is_included=feature_data["is_core_feature"],
+                        sort_order=feat_idx
+                    )
+
+                    self.db.add(feature)
+
+                # Create plan pricing tiers (monthly and annual)
+                pricing = PlanPricing(
+                    plan_id=plan.id,
+                    duration_months=1,  # Monthly
+                    price=plan_data["price"],
+                    discount_percentage=Decimal("0"),
+                    is_active=True
+                )
+
+                self.db.add(pricing)
+
+                # Add annual pricing with discount
+                annual_pricing = PlanPricing(
+                    plan_id=plan.id,
+                    duration_months=12,  # Annual
+                    price=plan_data["price"] * 10,  # 2 months free
+                    discount_percentage=Decimal("16.67"),
+                    is_active=True
+                )
+
+                self.db.add(annual_pricing)
+                plans.append(plan)
+
         return plans
 
-    async def _create_additional_plans(self, count: int) -> List[ServicePlan]:
-        """Create additional randomized plans."""
+    async def _create_additional_plans(self, count: int, organizations: list = None) -> List[ServicePlan]:
+        """Create additional randomized plans for each organization."""
         plans = []
-        
+
         plan_types = [PlanType.HOTSPOT, PlanType.PPPOE, PlanType.BOTH]
         speeds = [1, 2, 3, 5, 8, 10, 15, 20, 25, 30, 50, 100]
         data_limits = [512, 1024, 2048, 5120, 10240, -1]  # MB or unlimited
         validity_options = [1, 3, 7, 14, 30, 90]
-        
-        for i in range(count):
-            plan_type = random.choice(plan_types)
-            download_speed = random.choice(speeds)
-            upload_speed = max(1, download_speed // 2)
-            data_limit = random.choice(data_limits)
-            validity_days = random.choice(validity_options)
-            
-            # Calculate price based on speed and data
-            base_price = download_speed * 100
-            if data_limit == -1:  # Unlimited
-                base_price *= 1.5
-            
-            price = Decimal(str(base_price + random.randint(-50, 200)))
-            
-            plan = ServicePlan(
-                name=f"Custom {plan_type.value.title()} {download_speed}Mbps",
-                description=f"Custom {plan_type.value} plan with {download_speed}Mbps speed",
-                plan_type=plan_type,
-                status=random.choice([PlanStatus.ACTIVE, PlanStatus.INACTIVE]),
-                price=price,
-                currency="KES",
-                billing_cycle=BillingCycle.MONTHLY,
-                download_speed=download_speed,
-                upload_speed=upload_speed,
-                data_limit=data_limit,
-                time_limit=-1,  # Unlimited
-                validity_days=validity_days,
-                sort_order=100 + i,
-                created_at=datetime.utcnow() - timedelta(days=random.randint(1, 180))
-            )
-            
-            self.db.add(plan)
-            await self.db.flush()
-            
-            # Create pricing
-            pricing = PlanPricing(
-                plan_id=plan.id,
-                duration_months=1,
-                price=price,
-                discount_percentage=Decimal("0"),
-                is_active=True
-            )
-            
-            self.db.add(pricing)
-            plans.append(plan)
-        
+
+        # If no organizations, create plans without org assignment
+        orgs_to_use = organizations if organizations else [None]
+
+        for org in orgs_to_use:
+            for i in range(count):
+                plan_type = random.choice(plan_types)
+                download_speed = random.choice(speeds)
+                upload_speed = max(1, download_speed // 2)
+                data_limit = random.choice(data_limits)
+                validity_days = random.choice(validity_options)
+
+                # Calculate price based on speed and data
+                base_price = download_speed * 100
+                if data_limit == -1:  # Unlimited
+                    base_price *= 1.5
+
+                price = Decimal(str(base_price + random.randint(-50, 200)))
+
+                plan = ServicePlan(
+                    organization_id=org.id if org else None,
+                    name=f"Custom {plan_type.value.title()} {download_speed}Mbps",
+                    description=f"Custom {plan_type.value} plan with {download_speed}Mbps speed",
+                    plan_type=plan_type,
+                    status=random.choice([PlanStatus.ACTIVE, PlanStatus.INACTIVE]),
+                    price=price,
+                    currency="KES",
+                    billing_cycle=BillingCycle.MONTHLY,
+                    download_speed=download_speed,
+                    upload_speed=upload_speed,
+                    data_limit=data_limit,
+                    time_limit=-1,  # Unlimited
+                    validity_days=validity_days,
+                    sort_order=100 + i,
+                    created_at=datetime.utcnow() - timedelta(days=random.randint(1, 180))
+                )
+
+                self.db.add(plan)
+                await self.db.flush()
+
+                # Create pricing
+                pricing = PlanPricing(
+                    plan_id=plan.id,
+                    duration_months=1,
+                    price=price,
+                    discount_percentage=Decimal("0"),
+                    is_active=True
+                )
+
+                self.db.add(pricing)
+                plans.append(plan)
+
         return plans
 
     async def seed_package_templates(self, count: int = 15, clear_existing: bool = False) -> List[PackageTemplate]:

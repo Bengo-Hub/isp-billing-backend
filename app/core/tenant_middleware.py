@@ -109,6 +109,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
         "/api/v1/auth/register",
         "/api/v1/onboarding",
         "/api/v1/platform",  # Platform owner endpoints
+        "/api/v1/provisioning",  # Provisioning endpoints (router setup)
         "/health",
         "/docs",
         "/redoc",
@@ -127,6 +128,10 @@ class TenantMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         """Process the request and resolve tenant."""
+        # Skip tenant resolution for CORS preflight requests (OPTIONS)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         # Check if path is exempt from tenant resolution
         path = request.url.path
 

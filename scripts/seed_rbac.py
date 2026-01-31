@@ -67,6 +67,7 @@ async def seed_rbac(clear_existing: bool = False) -> List[Role]:
                 PermissionModule.SETTINGS: [PermissionAction.READ, PermissionAction.UPDATE],
                 PermissionModule.REPORTS: [PermissionAction.READ, PermissionAction.MANAGE],
                 PermissionModule.NOTIFICATIONS: [PermissionAction.READ, PermissionAction.MANAGE],
+                PermissionModule.SUPPORT: [PermissionAction.CREATE, PermissionAction.READ, PermissionAction.UPDATE, PermissionAction.DELETE, PermissionAction.MANAGE],
 
                 PermissionModule.BILLING: [PermissionAction.READ, PermissionAction.MANAGE],
                 PermissionModule.SUBSCRIPTIONS: [PermissionAction.CREATE, PermissionAction.READ, PermissionAction.UPDATE, PermissionAction.DELETE, PermissionAction.MANAGE],
@@ -133,10 +134,12 @@ async def seed_rbac(clear_existing: bool = False) -> List[Role]:
                 PermissionModule.SETTINGS,
                 PermissionModule.REPORTS,
                 PermissionModule.NOTIFICATIONS,
+                PermissionModule.SUPPORT,
                 PermissionModule.BILLING,
                 PermissionModule.SUBSCRIPTIONS,
+                PermissionModule.ANALYTICS,
+                PermissionModule.BRANDING,
                 PermissionModule.AUDIT_LOGS,
-                PermissionModule.BACKUP_RESTORE,
                 PermissionModule.TENANT_PAYMENT_CONFIG,
                 PermissionModule.TENANT_SMS_CONFIG,
                 PermissionModule.TENANT_PAYOUT_CONFIG,
@@ -148,12 +151,17 @@ async def seed_rbac(clear_existing: bool = False) -> List[Role]:
             # Technician gets operational permissions
             tech_modules = [
                 PermissionModule.DASHBOARD,
+                PermissionModule.USERS,
+                PermissionModule.CUSTOMERS,
+                PermissionModule.PACKAGES,
                 PermissionModule.ROUTERS,
                 PermissionModule.PROVISIONING,
+                PermissionModule.PAYMENTS,
+                PermissionModule.SMS,
+                PermissionModule.VOUCHERS,
+                PermissionModule.NOTIFICATIONS,
                 PermissionModule.SUPPORT,
-                PermissionModule.PACKAGES,
-                PermissionModule.CUSTOMERS,
-                PermissionModule.ANALYTICS,
+                PermissionModule.SUBSCRIPTIONS,
             ]
             tech_perms = [p for p in created_perms if p.module in tech_modules]
             tech_role.permissions = list({*tech_role.permissions, *tech_perms})
@@ -165,12 +173,11 @@ async def seed_rbac(clear_existing: bool = False) -> List[Role]:
                 PermissionModule.CUSTOMER_PAYMENTS,
                 PermissionModule.CUSTOMER_USAGE,
                 PermissionModule.CUSTOMER_PROFILE,
+                PermissionModule.NOTIFICATIONS,
             ]
             customer_perms = [p for p in created_perms if p.module in customer_modules]
             customer_role.permissions = list({*customer_role.permissions, *customer_perms})
 
-            sess.commit()
-            return [super_role, admin_role, tech_role, customer_role]
             sess.commit()
             return [super_role, admin_role, tech_role, customer_role]
 

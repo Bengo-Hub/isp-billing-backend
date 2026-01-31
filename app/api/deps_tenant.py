@@ -14,6 +14,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user, get_db
 from app.core.tenant_middleware import get_current_organization_id, get_current_tenant
@@ -329,7 +330,9 @@ async def get_organization_by_slug(
     Used for portal endpoints that receive org slug in path.
     """
     result = await db.execute(
-        select(Organization).where(Organization.slug == org_slug)
+        select(Organization)
+        .where(Organization.slug == org_slug)
+        .options(selectinload(Organization.settings))
     )
     organization = result.scalar_one_or_none()
 

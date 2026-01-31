@@ -250,7 +250,11 @@ def custom_openapi():
             "description": "Development server"
         },
         {
-            "url": "https://api.yourdomain.com",
+            "url": "https://192.168.100.4:8000",
+            "description": "Network Development server"
+        },
+        {
+            "url": "https://ispbillingapi.codevertexitsolutions.com",
             "description": "Production server"
         }
     ]

@@ -104,15 +104,15 @@ Authorization: Bearer <token>
 
 #### Get Bootstrap Command (Step 2)
 ```http
-GET /api/v1/provisioning/bootstrap/command?identity=MikroTik4&api_port=8728&interface=ether2
+GET /api/v1/provisioning/bootstrap/command?identity=MikroTik1&api_port=8728&interface=ether2
 Authorization: Bearer <token>
 ```
 
 **Response:**
 ```json
 {
-  "command": "/tool fetch mode=https url=\"https://yourdomain.com/api/v1/provisioning/bootstrap/script?identity=MikroTik4&api_port=8728&interface=ether2\" dst-path=codevertex.rsc; delay 2s; import codevertex.rsc;",
-  "script_url": "https://yourdomain.com/api/v1/provisioning/bootstrap/script?identity=MikroTik4&api_port=8728&interface=ether2",
+  "command": "/tool fetch mode=https url=\"https://yourdomain.com/api/v1/provisioning/bootstrap/script?identity=MikroTik1&api_port=8728&interface=ether2\" dst-path=codevertex.rsc; delay 2s; import codevertex.rsc;",
+  "script_url": "https://yourdomain.com/api/v1/provisioning/bootstrap/script?identity=MikroTik1&api_port=8728&interface=ether2",
   "notes": [
     "If device mode is not allowed, run: /system/device-mode update mode=advanced"
   ]
@@ -121,7 +121,7 @@ Authorization: Bearer <token>
 
 #### Get Bootstrap Script
 ```http
-GET /api/v1/provisioning/bootstrap/script?identity=MikroTik4&api_port=8728&interface=ether2
+GET /api/v1/provisioning/bootstrap/script?identity=MikroTik1&api_port=8728&interface=ether2
 Authorization: Bearer <token>
 ```
 

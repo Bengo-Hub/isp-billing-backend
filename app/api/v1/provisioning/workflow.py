@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User
 from app.api.deps import require_technician_or_admin, get_db
 from app.modules.provisioning import ProvisioningService
+from app.models.provisioning import ServiceType, ProvisioningStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -18,6 +19,7 @@ router = APIRouter()
 
 class ProvisioningRequest(BaseModel):
     router_id: int
+    service_type: str  # 'hotspot', 'pppoe_server', or 'both'
     configuration: Dict[str, Any]
 
 
@@ -47,11 +49,21 @@ async def start_provisioning_workflow(
     try:
         provisioning_service = ProvisioningService(db)
 
+        # Convert service_type string to enum
+        try:
+            service_type = ServiceType(request.service_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid service_type: {request.service_type}. Must be 'hotspot', 'pppoe_server', or 'both'"
+            )
+
         # Create a new provisioning session
         session = await provisioning_service.create_provisioning_session(
             router_id=request.router_id,
-            configuration=request.configuration,
-            user_id=current_user.id
+            user_id=current_user.id,
+            service_type=service_type,
+            configuration=request.configuration
         )
 
         # Start the provisioning process in the background
@@ -115,6 +127,66 @@ async def cancel_provisioning(
     except Exception as e:
         logger.error(f"Failed to cancel provisioning: {e}")
         raise HTTPException(status_code=500, detail="Failed to cancel provisioning")
+
+
+@router.post("/router/{router_id}/cancel-active")
+async def cancel_active_sessions_for_router(
+    router_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_technician_or_admin()),
+):
+    """Cancel all active/pending provisioning sessions for a router.
+
+    Useful for clearing stale sessions before reprovisioning.
+    """
+    from sqlalchemy import select
+    from app.models.provisioning import ProvisioningSession
+    from datetime import datetime
+
+    try:
+        # Find all active sessions for this router
+        result = await db.execute(
+            select(ProvisioningSession).where(
+                ProvisioningSession.router_id == router_id,
+                ProvisioningSession.status.in_([
+                    ProvisioningStatus.PENDING,
+                    ProvisioningStatus.IN_PROGRESS
+                ])
+            )
+        )
+        active_sessions = result.scalars().all()
+
+        if not active_sessions:
+            return {
+                "message": "No active sessions found for this router",
+                "router_id": router_id,
+                "cancelled_count": 0
+            }
+
+        # Cancel all active sessions
+        cancelled_count = 0
+        cancelled_session_ids = []
+        for session in active_sessions:
+            session.status = ProvisioningStatus.CANCELLED
+            session.error_message = "Force cancelled for reprovisioning"
+            session.completed_at = datetime.utcnow()
+            cancelled_count += 1
+            cancelled_session_ids.append(session.session_id)
+
+        await db.commit()
+
+        logger.info(f"Cancelled {cancelled_count} active sessions for router {router_id}: {cancelled_session_ids}")
+
+        return {
+            "message": f"Cancelled {cancelled_count} active session(s)",
+            "router_id": router_id,
+            "cancelled_count": cancelled_count,
+            "cancelled_session_ids": cancelled_session_ids
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to cancel active sessions for router {router_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to cancel active sessions: {str(e)}")
 
 
 @router.get("/sessions/{session_id}/logs")
@@ -270,6 +342,77 @@ class DeviceStatusResponse(BaseModel):
     error: Optional[str] = None
 
 
+class ScriptVerificationResponse(BaseModel):
+    """Response model for script verification."""
+    script_exists: bool
+    identity_matches: bool
+    identity_in_script: Optional[str] = None
+    expected_identity: str
+    verified: bool
+    error: Optional[str] = None
+
+
+@router.get("/verify-script/{router_id}", response_model=ScriptVerificationResponse)
+async def verify_bootstrap_script(
+    router_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_technician_or_admin()),
+):
+    """
+    Verify that the bootstrap script (codevertex.rsc) exists on the router
+    and contains the correct router identity.
+
+    This is used in Step 2 of provisioning to confirm the script was
+    successfully executed on the MikroTik device.
+
+    Args:
+        router_id: The router ID to verify
+
+    Returns:
+        ScriptVerificationResponse with verification results
+    """
+    from app.models.router import Router
+    from app.integrations.mikrotik import MikroTikClient
+    from sqlalchemy import select
+
+    try:
+        # Fetch the router from database
+        result = await db.execute(
+            select(Router).where(Router.id == router_id)
+        )
+        router = result.scalar_one_or_none()
+
+        if not router:
+            raise HTTPException(status_code=404, detail="Router not found")
+
+        # Create MikroTik client and verify script
+        client = MikroTikClient()
+        verification = await client.verify_bootstrap_script(
+            router=router,
+            expected_identity=router.name
+        )
+
+        verified = (
+            verification.get("script_exists", False) and
+            verification.get("identity_matches", False)
+        )
+
+        return ScriptVerificationResponse(
+            script_exists=verification.get("script_exists", False),
+            identity_matches=verification.get("identity_matches", False),
+            identity_in_script=verification.get("identity_in_script"),
+            expected_identity=router.name,
+            verified=verified,
+            error=verification.get("error")
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to verify script for router {router_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to verify script: {str(e)}")
+
+
 @router.get("/device-status/{router_id}", response_model=DeviceStatusResponse)
 async def check_device_status(
     router_id: int,
@@ -282,26 +425,27 @@ async def check_device_status(
     """
     from app.models.router import Router
     from app.core.encryption import get_credential_encryption
+    from app.integrations.mikrotik import get_mikrotik_client
     from sqlalchemy import select, update
-    import librouteros
-    
+    from datetime import datetime as dt
+
     try:
         # Fetch the router from database
         result = await db.execute(
             select(Router).where(Router.id == router_id)
         )
         router = result.scalar_one_or_none()
-        
+
         if not router:
             raise HTTPException(status_code=404, detail="Router not found")
-        
+
         # Check if router has stored API credentials
         if not router.api_credentials_encrypted:
             return DeviceStatusResponse(
                 online=False,
                 error="No stored API credentials found for this router"
             )
-        
+
         # Decrypt the API credentials using the existing encryption service
         try:
             encryption = get_credential_encryption()
@@ -314,64 +458,78 @@ async def check_device_status(
                 online=False,
                 error="Failed to decrypt stored credentials"
             )
-        
-        # Try to connect to the device via API
+
+        # Try to connect to the device via API using the existing MikroTikClient
         try:
-            api = librouteros.connect(
-                host=router.ip_address,
+            client = get_mikrotik_client()
+            connection = await client.connect(
+                ip_address=router.ip_address,
                 username=username,
                 password=password,
                 port=router.port,
-                timeout=3
             )
-            
-            # Test connection by getting system identity
-            identity = api.path("/system/identity")
-            identity_data = list(identity)
-            
-            # Get system resource info
-            resource = api.path("/system/resource")
-            resource_data = list(resource)
-            
-            api.close()
-            
+
+            # Test connection by getting system identity and resource info
+            identity_name = "Unknown"
+            uptime = "0s"
+            version = "Unknown"
+
+            try:
+                identity_result = await client.execute_command(connection, "/system/identity", "get")
+                if identity_result and len(identity_result) > 0:
+                    identity_name = identity_result[0].get("name", "Unknown")
+            except Exception:
+                pass
+
+            try:
+                resource_result = await client.execute_command(connection, "/system/resource", "get")
+                if resource_result and len(resource_result) > 0:
+                    uptime = resource_result[0].get("uptime", "0s")
+                    version = resource_result[0].get("version", "Unknown")
+            except Exception:
+                pass
+
+            # Disconnect cleanly
+            await client.disconnect(router.ip_address, router.port)
+
             # Update router status in database
-            from datetime import datetime as dt
             await db.execute(
                 update(Router)
                 .where(Router.id == router_id)
                 .values(status="online", last_seen=dt.utcnow())
             )
             await db.commit()
-            
+
             return DeviceStatusResponse(
                 online=True,
                 details={
-                    "identity": identity_data[0].get("name", "Unknown") if identity_data else "Unknown",
-                    "uptime": resource_data[0].get("uptime", "0s") if resource_data else "0s",
-                    "version": resource_data[0].get("version", "Unknown") if resource_data else "Unknown",
+                    "identity": identity_name,
+                    "uptime": uptime,
+                    "version": version,
                 }
             )
-            
-        except librouteros.exceptions.ConnectionClosed as e:
-            logger.warning(f"Device {router_id} connection closed: {e}")
-            return DeviceStatusResponse(
-                online=False,
-                error="Device not responding - connection closed"
-            )
-        except librouteros.exceptions.TrapError as e:
-            logger.warning(f"Device {router_id} authentication failed: {e}")
-            return DeviceStatusResponse(
-                online=False,
-                error="Authentication failed - invalid credentials"
-            )
+
         except Exception as e:
-            logger.warning(f"Device {router_id} connection failed: {e}")
-            return DeviceStatusResponse(
-                online=False,
-                error=f"Connection failed: {str(e)}"
-            )
-    
+            error_str = str(e).lower()
+            if "authentication" in error_str or "login" in error_str or "invalid" in error_str:
+                logger.warning(f"Device {router_id} authentication failed: {e}")
+                return DeviceStatusResponse(
+                    online=False,
+                    error="Authentication failed - invalid credentials"
+                )
+            elif "connection" in error_str or "timeout" in error_str or "refused" in error_str:
+                logger.warning(f"Device {router_id} connection failed: {e}")
+                return DeviceStatusResponse(
+                    online=False,
+                    error="Device not responding - connection failed"
+                )
+            else:
+                logger.warning(f"Device {router_id} connection failed: {e}")
+                return DeviceStatusResponse(
+                    online=False,
+                    error=f"Connection failed: {str(e)}"
+                )
+
     except HTTPException:
         raise
     except Exception as e:
