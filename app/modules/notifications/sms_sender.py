@@ -28,6 +28,8 @@ from app.models.sms_credit import (
     SMSProviderType,
     SMSTransactionStatus,
     SMSTransactionType,
+    SMSGatewayConfig,
+    SMSGatewayStatus,
 )
 from app.integrations.sms import (
     SMSProviderFactory,
@@ -36,6 +38,7 @@ from app.integrations.sms import (
     SMSDeliveryStatus,
     SMSProviderConfig,
 )
+from app.integrations.payment_gateways import PaymentGatewayFactory
 
 logger = get_logger(__name__)
 
@@ -149,43 +152,123 @@ class SMSSendingService:
         account: SMSCreditAccount,
     ) -> SMSProviderInterface:
         """Create an SMS provider from account configuration.
-        
+
+        This method prioritizes platform-level SMS gateway credentials
+        (configured by Platform Owner) over tenant-specific or environment
+        variable credentials. This ensures all ISPs use the Platform Owner's
+        SMS gateway (e.g., Africa's Talking) for sending messages.
+
         Args:
             account: SMS credit account
-            
+
         Returns:
             Configured SMS provider
         """
         provider_type = account.provider_type
-        provider_config = account.get_provider_config()
-        
-        # Build credentials from account config
-        credentials = {}
-        
-        if provider_type == SMSProviderType.TWILIO:
-            credentials = {
-                "account_sid": provider_config.get("account_sid") or settings.twilio_account_sid,
-                "auth_token": provider_config.get("auth_token") or settings.twilio_auth_token,
-                "from_number": provider_config.get("from_number") or settings.twilio_phone_number,
-                "messaging_service_sid": provider_config.get("messaging_service_sid"),
-                "status_callback_url": provider_config.get("status_callback_url"),
-            }
-        elif provider_type == SMSProviderType.AFRICASTALKING:
-            credentials = {
-                "username": provider_config.get("username") or settings.africastalking_username,
-                "api_key": provider_config.get("api_key") or settings.africastalking_api_key,
-                "sender_id": provider_config.get("sender_id"),
-                "is_sandbox": provider_config.get("is_sandbox", False),
-            }
+
+        # First, try to get platform-level SMS gateway credentials
+        # Platform gateways have organization_id = NULL
+        credentials = await self._get_platform_gateway_credentials(provider_type)
+
+        if credentials:
+            self.logger.info(
+                f"Using platform-level SMS gateway for provider {provider_type.value}"
+            )
         else:
-            # Try to use provider_config directly
-            credentials = provider_config
-        
+            # Fall back to account-level config or environment variables
+            provider_config = account.get_provider_config()
+            credentials = {}
+
+            if provider_type == SMSProviderType.TWILIO:
+                credentials = {
+                    "account_sid": provider_config.get("account_sid") or settings.twilio_account_sid,
+                    "auth_token": provider_config.get("auth_token") or settings.twilio_auth_token,
+                    "from_number": provider_config.get("from_number") or settings.twilio_phone_number,
+                    "messaging_service_sid": provider_config.get("messaging_service_sid"),
+                    "status_callback_url": provider_config.get("status_callback_url"),
+                }
+            elif provider_type == SMSProviderType.AFRICASTALKING:
+                credentials = {
+                    "username": provider_config.get("username") or settings.africastalking_username,
+                    "api_key": provider_config.get("api_key") or settings.africastalking_api_key,
+                    "sender_id": provider_config.get("sender_id"),
+                    "is_sandbox": provider_config.get("is_sandbox", False),
+                }
+            else:
+                # Try to use provider_config directly
+                credentials = provider_config
+
+            self.logger.info(
+                f"Using fallback credentials for provider {provider_type.value}"
+            )
+
         return await SMSProviderFactory.create(
             provider_type=provider_type,
             credentials=credentials,
             default_country_code=account.country_code,
         )
+
+    async def _get_platform_gateway_credentials(
+        self,
+        provider_type: SMSProviderType,
+    ) -> Optional[Dict[str, Any]]:
+        """Get credentials from platform-level SMS gateway configuration.
+
+        Platform gateways are configured by the Platform Owner and have
+        organization_id = NULL. All ISPs use these shared credentials.
+
+        Args:
+            provider_type: The SMS provider type to look for
+
+        Returns:
+            Decrypted credentials dict, or None if no platform gateway exists
+        """
+        # Query platform-level gateway (organization_id IS NULL)
+        result = await self.db.execute(
+            select(SMSGatewayConfig).where(
+                and_(
+                    SMSGatewayConfig.organization_id.is_(None),
+                    SMSGatewayConfig.provider_type == provider_type,
+                    SMSGatewayConfig.is_active == True,
+                    SMSGatewayConfig.status == SMSGatewayStatus.ACTIVE,
+                )
+            )
+        )
+        gateway = result.scalar_one_or_none()
+
+        if not gateway or not gateway.credentials:
+            # Try primary gateway if specific provider not found
+            result = await self.db.execute(
+                select(SMSGatewayConfig).where(
+                    and_(
+                        SMSGatewayConfig.organization_id.is_(None),
+                        SMSGatewayConfig.is_primary == True,
+                        SMSGatewayConfig.is_active == True,
+                        SMSGatewayConfig.status == SMSGatewayStatus.ACTIVE,
+                    )
+                )
+            )
+            gateway = result.scalar_one_or_none()
+
+        if not gateway or not gateway.credentials:
+            return None
+
+        # Decrypt credentials using the payment gateway encryption utility
+        try:
+            encryption_key = getattr(settings, 'encryption_key', None)
+            if encryption_key:
+                credentials = PaymentGatewayFactory._decrypt_credentials(
+                    gateway.credentials, encryption_key
+                )
+            else:
+                # Development mode - try plain JSON
+                import json
+                credentials = json.loads(gateway.credentials)
+
+            return credentials
+        except Exception as e:
+            self.logger.error(f"Failed to decrypt platform gateway credentials: {e}")
+            return None
     
     async def send_sms(
         self,

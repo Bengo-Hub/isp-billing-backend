@@ -67,3 +67,24 @@ def get_credential_encryption() -> CredentialEncryption:
         Singleton CredentialEncryption instance.
     """
     return CredentialEncryption()
+
+
+def encrypt_value(value: str) -> str:
+    """Encrypt a single value for storage.
+
+    Uses the centralized SecretsManager for encryption.
+    """
+    secrets = get_secrets_manager()
+    return secrets.encrypt(value)
+
+
+def decrypt_value(encrypted_value: str) -> str:
+    """Decrypt a single encrypted value.
+
+    Uses the centralized SecretsManager for decryption.
+    """
+    try:
+        secrets = get_secrets_manager()
+        return secrets.decrypt(encrypted_value)
+    except Exception as e:
+        raise ValueError(f"Failed to decrypt value: {str(e)}")

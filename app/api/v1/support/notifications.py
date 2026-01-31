@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_admin, require_technician_or_admin, PaginationParams
@@ -170,16 +171,53 @@ async def send_sms(
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Dict[str, str]:
-    """Send SMS notification."""
+    """Send SMS notification with ISP credit deduction."""
+    from decimal import Decimal
+    from app.models.sms_credit import SMSCreditAccount
+
+    # If user belongs to an organization (ISP), check and deduct their SMS credits
+    if current_user.organization_id:
+        # Get ISP's SMS credit account
+        result = await db.execute(
+            select(SMSCreditAccount).where(
+                SMSCreditAccount.organization_id == current_user.organization_id
+            )
+        )
+        credit_account = result.scalar_one_or_none()
+
+        if not credit_account:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No SMS credit account found. Please top up your SMS credits."
+            )
+
+        # Check balance (assume 1 SMS = 1 credit for simplicity)
+        sms_cost = Decimal("1.0")
+        if credit_account.current_balance < sms_cost:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Insufficient SMS credits. Current balance: {credit_account.current_balance}"
+            )
+
+        # Deduct credit
+        credit_account.current_balance -= sms_cost
+        credit_account.total_messages_sent += 1
+        credit_account.total_amount_spent += sms_cost
+
+    # Send SMS using platform gateway
     service = NotificationService(db)
     result = await service.send_sms_notification(
         to_phone=sms_data.to_phone,
         message=sms_data.message
     )
-    
+
     if result["status"] == "success":
+        # Commit the credit deduction
+        await db.commit()
         return {"message": "SMS sent successfully"}
     else:
+        # Rollback credit deduction on failure
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=result["message"]

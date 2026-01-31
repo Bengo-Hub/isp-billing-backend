@@ -1,5 +1,6 @@
 """SMS Credit management API endpoints."""
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from decimal import Decimal
 
@@ -140,5 +141,302 @@ async def validate_phone(
     service = SMSCreditService(db)
     result = await service.validate_phone_number(req.phone_number, country_code=req.country_code, validation_method=req.validation_method)
     return ValidatePhoneResponse(**result)
+
+
+# =============================================================================
+# Paystack SMS Top-Up Flow
+# =============================================================================
+
+from pydantic import BaseModel, Field
+
+
+class PaystackSMSTopUpRequest(BaseModel):
+    """Request to initiate SMS top-up via Paystack."""
+    amount: float = Field(..., gt=0, description="Amount to top up in KES")
+    email: str = Field(..., description="Customer email for Paystack")
+    callback_url: Optional[str] = Field(None, description="Override callback URL")
+
+
+class PaystackSMSTopUpResponse(BaseModel):
+    """Response from Paystack SMS top-up initiation."""
+    success: bool
+    message: str
+    checkout_url: Optional[str] = None
+    reference: Optional[str] = None
+    top_up_id: Optional[int] = None
+    sms_credits: Optional[int] = None
+
+
+@router.post("/accounts/{account_id}/paystack-top-up", response_model=PaystackSMSTopUpResponse)
+async def initiate_paystack_sms_topup(
+    account_id: int,
+    request: PaystackSMSTopUpRequest,
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> PaystackSMSTopUpResponse:
+    """
+    Initiate SMS credit top-up via Paystack.
+
+    This endpoint:
+    1. Gets the platform SMS pricing settings
+    2. Calculates SMS credits based on amount
+    3. Creates a pending SMS top-up record
+    4. Initializes a Paystack payment
+    5. Returns the Paystack checkout URL
+    """
+    import uuid
+    from sqlalchemy import select
+    from app.models.sms_credit import PlatformSMSSettings, SMSTopUp, SMSTransactionStatus
+    from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
+    from app.integrations.payment_gateways import PaymentGatewayFactory
+
+    # 1. Get platform SMS pricing settings
+    result = await db.execute(
+        select(PlatformSMSSettings).where(PlatformSMSSettings.is_active == True)
+    )
+    pricing = result.scalar_one_or_none()
+
+    if not pricing:
+        return PaystackSMSTopUpResponse(
+            success=False,
+            message="SMS pricing not configured. Please contact platform administrator.",
+        )
+
+    # Check minimum top-up amount
+    if request.amount < float(pricing.minimum_top_up_amount):
+        return PaystackSMSTopUpResponse(
+            success=False,
+            message=f"Minimum top-up amount is {pricing.currency} {pricing.minimum_top_up_amount}",
+        )
+
+    # 2. Calculate SMS credits
+    amount_decimal = Decimal(str(request.amount))
+    sms_credits = int(amount_decimal / pricing.cost_per_sms) * pricing.sms_per_unit
+
+    if sms_credits <= 0:
+        return PaystackSMSTopUpResponse(
+            success=False,
+            message="Amount too low to purchase any SMS credits",
+        )
+
+    # 3. Get active Paystack gateway (platform-level)
+    result = await db.execute(
+        select(PaymentGatewayConfig).where(
+            PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
+            PaymentGatewayConfig.is_active == True,
+            PaymentGatewayConfig.organization_id.is_(None),  # Platform-level gateway
+        ).limit(1)
+    )
+    gateway_config = result.scalar_one_or_none()
+
+    if not gateway_config:
+        return PaystackSMSTopUpResponse(
+            success=False,
+            message="Paystack payment gateway not configured",
+        )
+
+    # 4. Generate unique reference
+    reference = f"SMS-{account_id}-{uuid.uuid4().hex[:12].upper()}"
+
+    # 5. Get SMS account balance for recording
+    result = await db.execute(
+        select(SMSCreditAccount).where(SMSCreditAccount.id == account_id)
+    )
+    account = result.scalar_one_or_none()
+
+    if not account:
+        return PaystackSMSTopUpResponse(
+            success=False,
+            message="SMS account not found",
+        )
+
+    # 6. Create pending top-up record
+    top_up = SMSTopUp(
+        top_up_reference=reference,
+        account_id=account_id,
+        amount=amount_decimal,
+        currency=pricing.currency,
+        sms_credits=sms_credits,
+        cost_per_sms=pricing.cost_per_sms,
+        payment_method="paystack",
+        payment_reference=reference,
+        status=SMSTransactionStatus.PENDING,
+        requested_by=current_user.id,
+        balance_before=account.current_balance,
+    )
+    db.add(top_up)
+    await db.commit()
+    await db.refresh(top_up)
+
+    # 7. Initialize Paystack payment
+    try:
+        gateway = PaymentGatewayFactory.create(gateway_config)
+
+        # Determine callback URL
+        callback_url = request.callback_url
+        if not callback_url:
+            # Use platform default callback
+            callback_url = gateway_config.callback_url or ""
+
+        payment_result = await gateway.initiate_payment(
+            amount=amount_decimal,
+            phone_number="",  # Not needed for Paystack
+            reference=reference,
+            description=f"SMS Credit Top-up - {sms_credits} SMS",
+            callback_url=callback_url,
+            metadata={
+                "email": request.email,
+                "top_up_id": top_up.id,
+                "account_id": account_id,
+                "sms_credits": sms_credits,
+                "type": "sms_top_up",
+            },
+        )
+
+        if payment_result.success:
+            return PaystackSMSTopUpResponse(
+                success=True,
+                message="Payment initialized. Redirecting to Paystack...",
+                checkout_url=payment_result.checkout_url,
+                reference=reference,
+                top_up_id=top_up.id,
+                sms_credits=sms_credits,
+            )
+        else:
+            # Rollback top-up record
+            await db.delete(top_up)
+            await db.commit()
+            return PaystackSMSTopUpResponse(
+                success=False,
+                message=payment_result.message or "Failed to initialize payment",
+            )
+
+    except Exception as e:
+        # Rollback top-up record
+        await db.delete(top_up)
+        await db.commit()
+        return PaystackSMSTopUpResponse(
+            success=False,
+            message=f"Payment initialization failed: {str(e)}",
+        )
+
+
+class VerifyPaystackPaymentRequest(BaseModel):
+    """Request to verify a Paystack payment."""
+    reference: str = Field(..., description="Payment reference from Paystack")
+
+
+class VerifyPaystackPaymentResponse(BaseModel):
+    """Response from payment verification."""
+    success: bool
+    message: str
+    sms_credits: Optional[int] = None
+    new_balance: Optional[float] = None
+
+
+@router.post("/verify-paystack-payment", response_model=VerifyPaystackPaymentResponse)
+async def verify_paystack_sms_payment(
+    request: VerifyPaystackPaymentRequest,
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> VerifyPaystackPaymentResponse:
+    """
+    Verify a Paystack SMS top-up payment and process the credits.
+
+    This endpoint is called after Paystack redirects back to verify
+    the payment was successful and apply the SMS credits.
+    """
+    from sqlalchemy import select
+    from app.models.sms_credit import SMSTopUp, SMSTransactionStatus, SMSCreditAccount
+    from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
+    from app.integrations.payment_gateways import PaymentGatewayFactory
+
+    # 1. Find the top-up record by reference
+    result = await db.execute(
+        select(SMSTopUp).where(SMSTopUp.payment_reference == request.reference)
+    )
+    top_up = result.scalar_one_or_none()
+
+    if not top_up:
+        return VerifyPaystackPaymentResponse(
+            success=False,
+            message="Top-up record not found for this reference",
+        )
+
+    # 2. Check if already processed
+    if top_up.status == SMSTransactionStatus.COMPLETED:
+        # Get current balance
+        account_result = await db.execute(
+            select(SMSCreditAccount).where(SMSCreditAccount.id == top_up.account_id)
+        )
+        account = account_result.scalar_one_or_none()
+
+        return VerifyPaystackPaymentResponse(
+            success=True,
+            message="Payment already processed",
+            sms_credits=top_up.sms_credits,
+            new_balance=float(account.current_balance) if account else None,
+        )
+
+    # 3. Get Paystack gateway to verify payment
+    result = await db.execute(
+        select(PaymentGatewayConfig).where(
+            PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
+            PaymentGatewayConfig.is_active == True,
+            PaymentGatewayConfig.organization_id.is_(None),
+        ).limit(1)
+    )
+    gateway_config = result.scalar_one_or_none()
+
+    if not gateway_config:
+        return VerifyPaystackPaymentResponse(
+            success=False,
+            message="Paystack gateway not configured",
+        )
+
+    # 4. Verify payment with Paystack
+    try:
+        gateway = PaymentGatewayFactory.create(gateway_config)
+        verification = await gateway.verify_payment(request.reference)
+
+        if not verification.success:
+            top_up.status = SMSTransactionStatus.FAILED
+            await db.commit()
+            return VerifyPaystackPaymentResponse(
+                success=False,
+                message=verification.message or "Payment verification failed",
+            )
+
+        # 5. Update top-up record and apply credits
+        top_up.status = SMSTransactionStatus.COMPLETED
+        top_up.external_transaction_id = verification.gateway_reference
+        top_up.processed_at = datetime.utcnow()
+        top_up.approved_by = current_user.id
+
+        # 6. Update account balance
+        account_result = await db.execute(
+            select(SMSCreditAccount).where(SMSCreditAccount.id == top_up.account_id)
+        )
+        account = account_result.scalar_one_or_none()
+
+        if account:
+            top_up.balance_before = account.current_balance
+            account.current_balance += top_up.sms_credits
+            top_up.balance_after = account.current_balance
+
+        await db.commit()
+
+        return VerifyPaystackPaymentResponse(
+            success=True,
+            message="Payment verified and SMS credits added",
+            sms_credits=top_up.sms_credits,
+            new_balance=float(account.current_balance) if account else None,
+        )
+
+    except Exception as e:
+        return VerifyPaystackPaymentResponse(
+            success=False,
+            message=f"Payment verification error: {str(e)}",
+        )
 
 
