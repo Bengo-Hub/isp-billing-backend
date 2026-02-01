@@ -17,11 +17,11 @@ from app.core.database import AsyncSessionLocal
 from app.core.logging import get_logger
 
 # Import individual seed functions
-from seed_organizations import seed_platform_tiers, seed_organizations
+# Note: Organizations are seeded via scripts/add_default_org.py
 from seed_rbac import seed_rbac
 from seed_users import seed_users
 from seed_plans import seed_plans, seed_package_templates, seed_package_categories
-from seed_routers import seed_routers
+# from seed_routers import seed_routers  # Disabled - routers created during provisioning
 from seed_licences import seed_licences
 from seed_subscriptions import seed_subscriptions
 
@@ -39,23 +39,22 @@ class MasterSeeder:
             "users": 50,
             "plans": 10,
             "package_templates": 15,
-            "routers": 10,
+            # "routers": 10,  # Disabled - routers created during provisioning
             "licences": 5,
             "subscriptions": 50
         }
 
         # Seed order (important for foreign key dependencies)
-        # Organizations must come before users, routers, plans, etc.
+        # Organizations must be created FIRST via scripts/add_default_org.py
+        # Routers are NOT seeded - they are created during provisioning
         self.seed_order = [
-            "platform_tiers",      # Platform subscription tiers first
-            "organizations",       # ISP providers (tenants)
             "rbac",                # Roles & permissions
             "users",               # Platform owner, ISP admins, technicians, customers
             "licences",
             "package_categories",
             "package_templates",
             "plans",
-            "routers",
+            # "routers",           # Disabled - routers created during provisioning
             "subscriptions"
         ]
 
@@ -110,15 +109,7 @@ class MasterSeeder:
                 self.logger.info(f"[SEED] Seeding {model_name}...")
 
                 try:
-                    if model_name == "platform_tiers":
-                        result = await seed_platform_tiers(clear_existing=clear_existing)
-                        results["platform_tiers"] = {"count": len(result), "status": "success"}
-
-                    elif model_name == "organizations":
-                        result = await seed_organizations(clear_existing=clear_existing)
-                        results["organizations"] = {"count": len(result), "status": "success"}
-
-                    elif model_name == "rbac":
+                    if model_name == "rbac":
                         result = await seed_rbac(clear_existing=clear_existing)
                         results["rbac"] = {"count": len(result), "status": "success"}
 
@@ -150,16 +141,18 @@ class MasterSeeder:
                     elif model_name == "plans":
                         result = await seed_plans(
                             count=seed_counts["plans"],
-                            clear_existing=clear_existing
+                            clear_existing=clear_existing,
+                            demo_mode=True  # Create 4 demo packages (3 hotspot, 1 PPPoE)
                         )
                         results["plans"] = {"count": len(result), "status": "success"}
 
-                    elif model_name == "routers":
-                        result = await seed_routers(
-                            count=seed_counts["routers"],
-                            clear_existing=clear_existing
-                        )
-                        results["routers"] = {"count": len(result), "status": "success"}
+                    # elif model_name == "routers":
+                    #     # Disabled - routers are created during provisioning
+                    #     result = await seed_routers(
+                    #         count=seed_counts["routers"],
+                    #         clear_existing=clear_existing
+                    #     )
+                    #     results["routers"] = {"count": len(result), "status": "success"}
 
                     elif model_name == "subscriptions":
                         result = await seed_subscriptions(
@@ -247,8 +240,8 @@ class MasterSeeder:
             # Seed configuration settings
             await self._seed_configuration_settings(db)
 
-            # Seed SMS messages (for Messages page)
-            await self._seed_sms_messages(db)
+            # NOTE: SMS messages, tickets, IP bindings, payments, expenses, vouchers,
+            # and campaigns are NOT seeded - only demo users should be created via seed_demo_users.py
 
     async def _seed_notification_templates(self, db: AsyncSession):
         """Seed notification templates."""
@@ -521,110 +514,6 @@ class MasterSeeder:
         await db.commit()
         self.logger.info("[OK] Seeded configuration settings")
 
-    async def _seed_sms_messages(self, db: AsyncSession):
-        """Seed SMS messages/transactions for the Messages page."""
-        import random
-        import uuid
-        from decimal import Decimal
-        from datetime import timedelta
-        from app.models.sms_credit import (
-            SMSTransaction, SMSTransactionType, SMSTransactionStatus,
-            SMSCreditAccount, SMSProviderType
-        )
-        from app.models.user import User
-
-        # Get some users to associate with messages
-        result = await db.execute(
-            select(User).limit(20)
-        )
-        users = result.scalars().all()
-        if not users:
-            self.logger.warning("[WARN] No users found for SMS messages, skipping")
-            return
-
-        # First, create an SMS credit account if it doesn't exist
-        account_result = await db.execute(
-            select(SMSCreditAccount).limit(1)
-        )
-        account = account_result.scalar_one_or_none()
-
-        if not account:
-            account = SMSCreditAccount(
-                account_name="Primary SMS Account",
-                account_code="SMS001",
-                provider_type=SMSProviderType.AFRICASTALKING,
-                phone_number="+254700000000",
-                country_code="+254",
-                current_balance=Decimal("5000.00"),
-                currency="KES",
-                is_active=True,
-                is_default=True,
-                created_by=users[0].id,
-                created_at=datetime.utcnow()
-            )
-            db.add(account)
-            await db.flush()
-
-        # Sample plan names
-        plan_names = [
-            "GoFiNet 2HR SURF UNLIMITED",
-            "GoFiNet DAILY UNLIMITED",
-            "GoFiNet WEEKLY PREMIUM",
-            "GoFiNet MONTHLY BASIC",
-            "GoFiNet MONTHLY PREMIUM",
-        ]
-
-        # Sample phone numbers (Kenyan format)
-        phone_prefixes = ["0719", "0720", "0722", "0723", "0724", "0725", "0726", "0728", "0729", "0796", "0758", "0713"]
-
-        messages = []
-        now = datetime.utcnow()
-
-        for i in range(15):
-            user = random.choice(users)
-            username = user.username or user.email or f"C{random.randint(100, 999)}"
-            phone = random.choice(phone_prefixes) + str(random.randint(100000, 999999))
-            plan = random.choice(plan_names)
-            password = str(random.randint(1000, 9999))
-
-            # Calculate expiry date (2-24 hours from sent time)
-            sent_time = now - timedelta(hours=random.randint(1, 72))
-            expiry_time = sent_time + timedelta(hours=random.randint(2, 24))
-
-            message_content = (
-                f"Dear {username}, you have successfully subscribed to {plan}. "
-                f"Your subscription will expire on {expiry_time.strftime('%d.%m.%Y %H:%M:%S')}. "
-                f"Your username is {username} and password is {password}."
-            )
-
-            balance_before = Decimal("5000.00") - Decimal(str(i * 0.80))
-            balance_after = balance_before - Decimal("0.80")
-
-            transaction = SMSTransaction(
-                transaction_id=str(uuid.uuid4()),
-                account_id=account.id,
-                transaction_type=SMSTransactionType.USAGE,
-                status=SMSTransactionStatus.COMPLETED,
-                amount=Decimal("0.80"),
-                currency="KES",
-                recipient_phone=phone,
-                message_content=message_content,
-                message_length=len(message_content),
-                sms_count=1,
-                delivery_status="delivered",
-                delivery_time=sent_time + timedelta(seconds=random.randint(2, 30)),
-                user_id=user.id,
-                balance_before=balance_before,
-                balance_after=balance_after,
-                created_at=sent_time,
-                processed_at=sent_time
-            )
-            messages.append(transaction)
-            db.add(transaction)
-
-        await db.commit()
-        self.logger.info(f"[OK] Seeded {len(messages)} SMS messages for Messages page")
-
     async def clear_all_data(self):
         """Clear all data from the database."""
         self.logger.warning("[TRASH]  CLEARING ALL DATA FROM DATABASE")
@@ -633,12 +522,21 @@ class MasterSeeder:
             # Import all seed functions and call their clear methods
             # Clear in reverse dependency order
             await seed_subscriptions(count=0, clear_existing=True)
-            await seed_routers(count=0, clear_existing=True)
-            await seed_plans(count=0, clear_existing=True)
+            # await seed_routers(count=0, clear_existing=True)  # Disabled - routers created during provisioning
+            await seed_plans(count=0, clear_existing=True, demo_mode=False)
             await seed_package_templates(count=0, clear_existing=True)
             await seed_package_categories(clear_existing=True)
             await seed_licences(count=0, clear_existing=True)
             await seed_users(count=0, clear_existing=True)
+
+            # Clear routers (must be cleared before organizations since they have org FK)
+            async with AsyncSessionLocal() as db:
+                from sqlalchemy import delete
+                from app.models.router import Router
+
+                await db.execute(delete(Router))
+                await db.commit()
+                self.logger.info("[OK] Cleared all routers from database")
 
             # Clear organization data
             async with AsyncSessionLocal() as db:
@@ -647,10 +545,12 @@ class MasterSeeder:
                 from app.models.platform_billing import (
                     EarningsRecord, PlatformPayment, PlatformInvoice, PlatformSubscriptionTier
                 )
+                from app.models.payment_gateway import PayoutConfig
 
                 await db.execute(delete(EarningsRecord))
                 await db.execute(delete(PlatformPayment))
                 await db.execute(delete(PlatformInvoice))
+                await db.execute(delete(PayoutConfig))  # Delete payout configs before organizations
                 await db.execute(delete(OrganizationSettings))
                 await db.execute(delete(Organization))
                 await db.execute(delete(PlatformSubscriptionTier))
@@ -706,25 +606,24 @@ class MasterSeeder:
         print("  2. Access API docs: http://localhost:8000/docs")
         print("  3. Login with credentials:")
         print("     * Platform Owner: platformadmin / admin123")
-        print("     * ISP Admin (Demo ISP): demoispadmin / admin123")
-        print("     * ISP Technician: demoistech1 / tech123")
+        print("     * ISP Admin (Codevertex): codevertexadmin / admin123")
+        print("     * ISP Technician: codevertextech1 / tech123")
         print("     * Customer: [customer username] / customer123")
         print("  4. Explore the seeded data through the API endpoints")
         
         print("\n[DATA] SEEDED DATA INCLUDES:")
-        print("  * Platform subscription tiers (Hotspot & PPPoE)")
-        print("  * Demo organizations (ISP providers)")
+        print("  * Organization (created via scripts/add_default_org.py)")
+        print("  * RBAC roles and permissions")
         print("  * Platform owner (super admin)")
-        print("  * ISP admins and technicians per organization")
-        print("  * Customer users across organizations")
+        print("  * ISP admins and technicians")
+        print("  * Customer users")
         print("  * Realistic ISP service plans and pricing")
-        print("  * MikroTik routers with devices and logs")
         print("  * Centipid licences with payment history")
         print("  * Customer subscriptions with billing data")
         print("  * Package templates and categories")
         print("  * Notification templates (including SMS templates)")
-        print("  * SMS messages/transactions for Messages page")
         print("  * System configuration settings")
+        print("\n  NOTE: MikroTik routers are NOT seeded - create them via provisioning")
         
         print("=" * 80)
 
@@ -736,15 +635,15 @@ async def main():
     parser.add_argument("--clear", action="store_true", help="Clear existing data before seeding")
     parser.add_argument("--users", type=int, default=50, help="Number of users to seed (default: 50)")
     parser.add_argument("--plans", type=int, default=20, help="Number of plans to seed (default: 20)")
-    parser.add_argument("--routers", type=int, default=10, help="Number of routers to seed (default: 10)")
+    # parser.add_argument("--routers", type=int, default=10, help="Number of routers to seed (default: 10)")  # Disabled
     parser.add_argument("--licences", type=int, default=5, help="Number of licences to seed (default: 5)")
     parser.add_argument("--subscriptions", type=int, default=100, help="Number of subscriptions to seed (default: 100)")
     parser.add_argument("--package-templates", type=int, default=15, help="Number of package templates to seed (default: 15)")
-    
+
     parser.add_argument("--skip", nargs="+", help="Models to skip",
-                       choices=["platform_tiers", "organizations", "users", "plans", "routers", "licences", "subscriptions", "package_templates"])
+                       choices=["rbac", "users", "plans", "licences", "subscriptions", "package_categories", "package_templates"])
     parser.add_argument("--only", nargs="+", help="Only seed these models",
-                       choices=["platform_tiers", "organizations", "users", "plans", "routers", "licences", "subscriptions", "package_templates"])
+                       choices=["rbac", "users", "plans", "licences", "subscriptions", "package_categories", "package_templates"])
     
     parser.add_argument("--clear-only", action="store_true", help="Only clear data, don't seed")
     parser.add_argument("--quiet", action="store_true", help="Reduce output verbosity")
@@ -768,7 +667,7 @@ async def main():
         counts = {
             "users": args.users,
             "plans": args.plans,
-            "routers": args.routers,
+            # "routers": args.routers,  # Disabled - routers created during provisioning
             "licences": args.licences,
             "subscriptions": args.subscriptions,
             "package_templates": getattr(args, 'package_templates', 15)
@@ -808,14 +707,17 @@ async def seed_demo_data(clear_existing: bool = True) -> Dict[str, Any]:
 
 
 async def seed_minimal_data(clear_existing: bool = True) -> Dict[str, Any]:
-    """Seed minimal data for development."""
+    """Seed minimal data for development.
+
+    Note: Routers are NOT seeded - create them via provisioning.
+    """
     seeder = MasterSeeder()
     return await seeder.seed_all(
         clear_existing=clear_existing,
         counts={
             "users": 10,
             "plans": 5,
-            "routers": 3,
+            # "routers": 3,  # Disabled - routers created during provisioning
             "licences": 2,
             "subscriptions": 20,
             "package_templates": 5
@@ -824,14 +726,17 @@ async def seed_minimal_data(clear_existing: bool = True) -> Dict[str, Any]:
 
 
 async def seed_large_dataset(clear_existing: bool = False) -> Dict[str, Any]:
-    """Seed large dataset for testing."""
+    """Seed large dataset for testing.
+
+    Note: Routers are NOT seeded - create them via provisioning.
+    """
     seeder = MasterSeeder()
     return await seeder.seed_all(
         clear_existing=clear_existing,
         counts={
             "users": 500,
             "plans": 50,
-            "routers": 25,
+            # "routers": 25,  # Disabled - routers created during provisioning
             "licences": 10,
             "subscriptions": 1000,
             "package_templates": 30

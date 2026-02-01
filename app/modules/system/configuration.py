@@ -126,32 +126,45 @@ class ConfigurationService:
             self.logger.error(f"Failed to decrypt value: {e}")
             raise ConfigurationError(f"Decryption failed: {e}")
     
-    async def get_config(self, key: str, default: Any = None) -> Any:
-        """Get configuration value by key."""
+    async def get_config(self, key: str, default: Any = None, organization_id: Optional[int] = None) -> Any:
+        """Get configuration value by key.
+
+        Args:
+            key: Configuration key
+            default: Default value if config not found
+            organization_id: Organization ID for tenant-scoped configs (None for platform-level)
+        """
         try:
+            # Build query conditions
+            conditions = [
+                Configuration.key == key,
+                Configuration.is_active == True
+            ]
+
+            # Add organization filter
+            if organization_id is not None:
+                conditions.append(Configuration.organization_id == organization_id)
+            else:
+                conditions.append(Configuration.organization_id.is_(None))
+
             result = await self.db.execute(
-                select(Configuration).where(
-                    and_(
-                        Configuration.key == key,
-                        Configuration.is_active == True
-                    )
-                )
+                select(Configuration).where(and_(*conditions))
             )
             config = result.scalar_one_or_none()
-            
+
             if not config:
                 self.logger.debug(f"Configuration key '{key}' not found, returning default")
                 return default
-            
+
             # Get the appropriate value based on encryption status
             if config.is_encrypted and config.encrypted_value:
                 raw_value = self._decrypt_value(config.encrypted_value)
             else:
                 raw_value = config.value
-            
+
             # Convert to appropriate type
             return self._convert_value(raw_value, config.config_type)
-            
+
         except SQLAlchemyError as e:
             self.logger.error(f"Database error getting config '{key}': {e}")
             raise ConfigurationError(f"Failed to get configuration: {e}")
@@ -182,33 +195,52 @@ class ConfigurationService:
             raise ConfigurationError(f"Invalid value format: {e}")
     
     async def set_config(
-        self, 
-        key: str, 
-        value: Any, 
+        self,
+        key: str,
+        value: Any,
         config_type: ConfigType = ConfigType.STRING,
         description: Optional[str] = None,
         is_encrypted: bool = False,
         is_sensitive: bool = False,
-        category: Optional[str] = None
+        category: Optional[str] = None,
+        organization_id: Optional[int] = None
     ) -> Configuration:
-        """Set configuration value."""
+        """Set configuration value.
+
+        Args:
+            key: Configuration key
+            value: Configuration value
+            config_type: Type of configuration value
+            description: Description of the configuration
+            is_encrypted: Whether to encrypt the value
+            is_sensitive: Whether the value is sensitive
+            category: Configuration category
+            organization_id: Organization ID for tenant-scoped configs (None for platform-level)
+        """
         try:
             # Validate input
             if not key or not isinstance(key, str):
                 raise ValidationError("Configuration key must be a non-empty string")
-            
+
             # Convert value to string for storage
             if config_type == ConfigType.JSON:
                 value_str = json.dumps(value)
             else:
                 value_str = str(value)
-            
+
+            # Build query conditions to find existing config
+            conditions = [Configuration.key == key]
+            if organization_id is not None:
+                conditions.append(Configuration.organization_id == organization_id)
+            else:
+                conditions.append(Configuration.organization_id.is_(None))
+
             # Check if config already exists
             result = await self.db.execute(
-                select(Configuration).where(Configuration.key == key)
+                select(Configuration).where(and_(*conditions))
             )
             config = result.scalar_one_or_none()
-            
+
             if config:
                 # Update existing config
                 config.value = value_str if not is_encrypted else None
@@ -230,16 +262,17 @@ class ConfigurationService:
                     is_encrypted=is_encrypted,
                     is_sensitive=is_sensitive,
                     category=category,
+                    organization_id=organization_id,
                     is_active=True
                 )
                 self.db.add(config)
-            
+
             await self.db.commit()
             await self.db.refresh(config)
-            
-            self.logger.info(f"Configuration '{key}' set successfully")
+
+            self.logger.info(f"Configuration '{key}' set successfully for org_id={organization_id}")
             return config
-            
+
         except ValidationError:
             await self.db.rollback()
             raise
@@ -252,17 +285,30 @@ class ConfigurationService:
             self.logger.error(f"Unexpected error setting config '{key}': {e}")
             raise ConfigurationError(f"Unexpected error: {e}")
     
-    async def get_all_configs(self, category: Optional[str] = None) -> List[Configuration]:
-        """Get all configurations, optionally filtered by category."""
+    async def get_all_configs(self, category: Optional[str] = None, organization_id: Optional[int] = None) -> List[Configuration]:
+        """Get all configurations, optionally filtered by category and organization.
+
+        Args:
+            category: Filter by category
+            organization_id: Organization ID for tenant-scoped configs (None for platform-level)
+        """
         try:
-            query = select(Configuration).where(Configuration.is_active == True)
-            
+            conditions = [Configuration.is_active == True]
+
             if category:
-                query = query.where(Configuration.category == category)
-            
+                conditions.append(Configuration.category == category)
+
+            # Add organization filter
+            if organization_id is not None:
+                conditions.append(Configuration.organization_id == organization_id)
+            else:
+                conditions.append(Configuration.organization_id.is_(None))
+
+            query = select(Configuration).where(and_(*conditions))
+
             result = await self.db.execute(query)
             configs = result.scalars().all()
-            
+
             # Decrypt sensitive values for display
             for config in configs:
                 if config.is_encrypted and config.encrypted_value:
@@ -271,31 +317,43 @@ class ConfigurationService:
                     except Exception as e:
                         self.logger.warning(f"Failed to decrypt config '{config.key}': {e}")
                         config.value = "[ENCRYPTED]"
-            
+
             return configs
-            
+
         except SQLAlchemyError as e:
             self.logger.error(f"Database error getting all configs: {e}")
             raise ConfigurationError(f"Failed to get configurations: {e}")
     
-    async def delete_config(self, key: str) -> bool:
-        """Delete configuration by key."""
+    async def delete_config(self, key: str, organization_id: Optional[int] = None) -> bool:
+        """Delete configuration by key.
+
+        Args:
+            key: Configuration key
+            organization_id: Organization ID for tenant-scoped configs (None for platform-level)
+        """
         try:
+            # Build query conditions
+            conditions = [Configuration.key == key]
+            if organization_id is not None:
+                conditions.append(Configuration.organization_id == organization_id)
+            else:
+                conditions.append(Configuration.organization_id.is_(None))
+
             result = await self.db.execute(
-                select(Configuration).where(Configuration.key == key)
+                select(Configuration).where(and_(*conditions))
             )
             config = result.scalar_one_or_none()
-            
+
             if not config:
                 self.logger.warning(f"Configuration key '{key}' not found for deletion")
                 return False
-            
+
             await self.db.delete(config)
             await self.db.commit()
-            
-            self.logger.info(f"Configuration '{key}' deleted successfully")
+
+            self.logger.info(f"Configuration '{key}' deleted successfully for org_id={organization_id}")
             return True
-            
+
         except SQLAlchemyError as e:
             await self.db.rollback()
             self.logger.error(f"Database error deleting config '{key}': {e}")

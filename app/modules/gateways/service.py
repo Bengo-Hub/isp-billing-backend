@@ -365,10 +365,10 @@ class GatewayManagementService:
     async def _load_gateway_config(self, gateway_type: str, provider: str) -> Dict[str, Any]:
         """Load gateway configuration from database."""
         config_key = f"{gateway_type}_{provider}"
-        
+
         # Load from configuration service
-        config = await self.config_service.get_configuration(config_key)
-        
+        config = await self.config_service.get_config(config_key, organization_id=None)
+
         if not config:
             # Fall back to environment variables
             if gateway_type == GatewayType.SMS and provider == "africastalking":
@@ -619,9 +619,9 @@ class GatewayManagementService:
         """Get last test result for a gateway."""
         try:
             log_key = f"gateway_test_{gateway_type}_{provider}"
-            config = await self.config_service.get_configuration(log_key)
-            
-            return config.get_value() if config else None
+            config = await self.config_service.get_config(log_key, organization_id=None)
+
+            return config if config else None
             
         except Exception as e:
             self.logger.error(f"Failed to get last test result: {e}")

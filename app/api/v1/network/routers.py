@@ -221,6 +221,11 @@ async def delete_router(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Router not found"
             )
+    except RouterOperationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 

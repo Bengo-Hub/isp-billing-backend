@@ -287,6 +287,9 @@ class PaymentStats(BaseModel):
     mpesa_payments: int
     cash_payments: int
     bank_transfer_payments: int
+    daily_earnings: float
+    weekly_earnings: float
+    monthly_earnings: float
 
 
 class InvoiceGenerationRequest(BaseModel):

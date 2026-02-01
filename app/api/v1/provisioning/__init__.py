@@ -15,6 +15,7 @@ from . import workflow
 from . import stream
 from . import device_scan
 from . import token
+from . import templates
 
 # Include all provisioning sub-routers
 router.include_router(bootstrap.router, prefix="/bootstrap", tags=["bootstrap"])
@@ -23,4 +24,5 @@ router.include_router(workflow.router, prefix="", tags=["workflow"])
 router.include_router(stream.router, prefix="", tags=["stream"])
 router.include_router(device_scan.router, prefix="/device", tags=["device-scan"])
 router.include_router(token.router, prefix="/token", tags=["token"])
+router.include_router(templates.router, prefix="", tags=["templates"])
 

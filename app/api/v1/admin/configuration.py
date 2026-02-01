@@ -24,11 +24,20 @@ async def get_configurations(
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db)
 ) -> ConfigurationList:
-    """Get all configurations, optionally filtered by category."""
+    """Get all configurations, optionally filtered by category.
+
+    PLATFORM_OWNER users get platform-level configs (organization_id=None).
+    ISP_ADMIN users get their organization's configs.
+    """
     try:
         config_service = ConfigurationService(db)
-        configs = await config_service.get_all_configs(category=category)
-        
+        # Extract organization_id from current user
+        organization_id = current_user.organization_id
+        configs = await config_service.get_all_configs(
+            category=category,
+            organization_id=organization_id
+        )
+
         return ConfigurationList(
             configurations=configs,
             total=len(configs)
@@ -46,17 +55,26 @@ async def get_configuration(
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db)
 ) -> ConfigurationResponse:
-    """Get configuration by key."""
+    """Get configuration by key.
+
+    PLATFORM_OWNER users get platform-level configs (organization_id=None).
+    ISP_ADMIN users get their organization's configs.
+    """
     try:
         config_service = ConfigurationService(db)
-        value = await config_service.get_config(key)
-        
+        # Extract organization_id from current user
+        organization_id = current_user.organization_id
+        value = await config_service.get_config(
+            key=key,
+            organization_id=organization_id
+        )
+
         if value is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Configuration not found"
             )
-        
+
         return ConfigurationResponse(key=key, value=value)
     except HTTPException:
         raise
@@ -73,9 +91,15 @@ async def create_configuration(
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db)
 ) -> ConfigurationResponse:
-    """Create or update configuration."""
+    """Create or update configuration.
+
+    PLATFORM_OWNER users create platform-level configs (organization_id=None).
+    ISP_ADMIN users create configs for their organization.
+    """
     try:
         config_service = ConfigurationService(db)
+        # Extract organization_id from current user
+        organization_id = current_user.organization_id
         config = await config_service.set_config(
             key=config_data.key,
             value=config_data.value,
@@ -83,18 +107,12 @@ async def create_configuration(
             description=config_data.description,
             is_encrypted=config_data.is_encrypted,
             is_sensitive=config_data.is_sensitive,
-            category=config_data.category
+            category=config_data.category,
+            organization_id=organization_id
         )
-        
-        return ConfigurationResponse(
-            key=config.key,
-            value=config.value,
-            config_type=config.config_type,
-            description=config.description,
-            is_encrypted=config.is_encrypted,
-            is_sensitive=config.is_sensitive,
-            category=config.category
-        )
+
+        # Return the complete configuration object with all fields
+        return ConfigurationResponse.model_validate(config)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -109,18 +127,27 @@ async def update_configuration(
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db)
 ) -> ConfigurationResponse:
-    """Update configuration."""
+    """Update configuration.
+
+    PLATFORM_OWNER users update platform-level configs (organization_id=None).
+    ISP_ADMIN users update configs for their organization.
+    """
     try:
         config_service = ConfigurationService(db)
-        
+        # Extract organization_id from current user
+        organization_id = current_user.organization_id
+
         # Get existing config to preserve some fields
-        existing_value = await config_service.get_config(key)
+        existing_value = await config_service.get_config(
+            key=key,
+            organization_id=organization_id
+        )
         if existing_value is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Configuration not found"
             )
-        
+
         config = await config_service.set_config(
             key=key,
             value=config_data.value if config_data.value is not None else existing_value,
@@ -128,18 +155,12 @@ async def update_configuration(
             description=config_data.description,
             is_encrypted=config_data.is_encrypted,
             is_sensitive=config_data.is_sensitive,
-            category=config_data.category
+            category=config_data.category,
+            organization_id=organization_id
         )
-        
-        return ConfigurationResponse(
-            key=config.key,
-            value=config.value,
-            config_type=config.config_type,
-            description=config.description,
-            is_encrypted=config.is_encrypted,
-            is_sensitive=config.is_sensitive,
-            category=config.category
-        )
+
+        # Return the complete configuration object with all fields
+        return ConfigurationResponse.model_validate(config)
     except HTTPException:
         raise
     except Exception as e:
@@ -155,11 +176,20 @@ async def delete_configuration(
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db)
 ) -> None:
-    """Delete configuration."""
+    """Delete configuration.
+
+    PLATFORM_OWNER users delete platform-level configs (organization_id=None).
+    ISP_ADMIN users delete configs from their organization.
+    """
     try:
         config_service = ConfigurationService(db)
-        success = await config_service.delete_config(key)
-        
+        # Extract organization_id from current user
+        organization_id = current_user.organization_id
+        success = await config_service.delete_config(
+            key=key,
+            organization_id=organization_id
+        )
+
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

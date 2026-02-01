@@ -865,12 +865,18 @@ class BillingService:
             self.logger.error(f"Error activating subscription {subscription_id}: {e}")
 
     async def _get_active_paystack_gateway(self) -> Optional[PaymentGatewayConfig]:
-        """Get an active Paystack gateway configuration."""
+        """
+        Get the active platform-level Paystack gateway configuration.
+
+        Uses the platform admin's Paystack gateway (organization_id IS NULL)
+        to ensure consistent payment processing across all organizations.
+        """
         result = await self.db.execute(
             select(PaymentGatewayConfig).where(
                 and_(
                     PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
                     PaymentGatewayConfig.is_active == True,
+                    PaymentGatewayConfig.organization_id.is_(None),  # Platform-level gateway
                 )
             ).limit(1)
         )
@@ -1117,55 +1123,110 @@ class BillingService:
     async def get_payment_statistics(self) -> Dict[str, Any]:
         """Get payment statistics."""
         try:
+            now = datetime.utcnow()
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            week_start = today_start - timedelta(days=7)
+            month_start = today_start - timedelta(days=30)
+
             # Get total payments count
             total_payments_result = await self.db.execute(
                 select(func.count(Payment.id))
             )
             total_payments = total_payments_result.scalar() or 0
-            
+
             # Get successful payments count
             successful_payments_result = await self.db.execute(
                 select(func.count(Payment.id)).where(Payment.status == PaymentStatus.COMPLETED)
             )
             successful_payments = successful_payments_result.scalar() or 0
-            
+
             # Get failed payments count
             failed_payments_result = await self.db.execute(
                 select(func.count(Payment.id)).where(Payment.status == PaymentStatus.FAILED)
             )
             failed_payments = failed_payments_result.scalar() or 0
-            
+
             # Get pending payments count
             pending_payments_result = await self.db.execute(
                 select(func.count(Payment.id)).where(Payment.status == PaymentStatus.PENDING)
             )
             pending_payments = pending_payments_result.scalar() or 0
-            
+
             # Get total amount collected
             total_amount_result = await self.db.execute(
                 select(func.sum(Payment.amount)).where(Payment.status == PaymentStatus.COMPLETED)
             )
             total_amount = total_amount_result.scalar() or 0
-            
-            # Get average payment amount
-            avg_amount_result = await self.db.execute(
-                select(func.avg(Payment.amount)).where(Payment.status == PaymentStatus.COMPLETED)
+
+            # Get payment counts by method
+            mpesa_payments_result = await self.db.execute(
+                select(func.count(Payment.id)).where(
+                    and_(Payment.payment_method == PaymentMethod.MPESA, Payment.status == PaymentStatus.COMPLETED)
+                )
             )
-            avg_amount = avg_amount_result.scalar() or 0
-            
-            # Calculate success rate
-            success_rate = (successful_payments / total_payments * 100) if total_payments > 0 else 0
-            
+            mpesa_payments = mpesa_payments_result.scalar() or 0
+
+            cash_payments_result = await self.db.execute(
+                select(func.count(Payment.id)).where(
+                    and_(Payment.payment_method == PaymentMethod.CASH, Payment.status == PaymentStatus.COMPLETED)
+                )
+            )
+            cash_payments = cash_payments_result.scalar() or 0
+
+            bank_transfer_payments_result = await self.db.execute(
+                select(func.count(Payment.id)).where(
+                    and_(Payment.payment_method == PaymentMethod.BANK_TRANSFER, Payment.status == PaymentStatus.COMPLETED)
+                )
+            )
+            bank_transfer_payments = bank_transfer_payments_result.scalar() or 0
+
+            # Calculate daily earnings (today)
+            daily_earnings_result = await self.db.execute(
+                select(func.sum(Payment.amount)).where(
+                    and_(
+                        Payment.status == PaymentStatus.COMPLETED,
+                        Payment.created_at >= today_start
+                    )
+                )
+            )
+            daily_earnings = daily_earnings_result.scalar() or 0
+
+            # Calculate weekly earnings (last 7 days)
+            weekly_earnings_result = await self.db.execute(
+                select(func.sum(Payment.amount)).where(
+                    and_(
+                        Payment.status == PaymentStatus.COMPLETED,
+                        Payment.created_at >= week_start
+                    )
+                )
+            )
+            weekly_earnings = weekly_earnings_result.scalar() or 0
+
+            # Calculate monthly earnings (last 30 days)
+            monthly_earnings_result = await self.db.execute(
+                select(func.sum(Payment.amount)).where(
+                    and_(
+                        Payment.status == PaymentStatus.COMPLETED,
+                        Payment.created_at >= month_start
+                    )
+                )
+            )
+            monthly_earnings = monthly_earnings_result.scalar() or 0
+
             return {
                 "total_payments": total_payments,
                 "successful_payments": successful_payments,
                 "failed_payments": failed_payments,
                 "pending_payments": pending_payments,
                 "total_amount": float(total_amount),
-                "average_amount": float(avg_amount),
-                "success_rate": round(success_rate, 2)
+                "mpesa_payments": mpesa_payments,
+                "cash_payments": cash_payments,
+                "bank_transfer_payments": bank_transfer_payments,
+                "daily_earnings": float(daily_earnings),
+                "weekly_earnings": float(weekly_earnings),
+                "monthly_earnings": float(monthly_earnings),
             }
-            
+
         except SQLAlchemyError as e:
             self.logger.error(f"Database error getting payment statistics: {e}")
             raise BillingError(f"Failed to get payment statistics: {e}")

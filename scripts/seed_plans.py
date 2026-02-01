@@ -32,7 +32,22 @@ class PlanSeeder:
         self.db = db
         self.logger = get_logger(__name__)
 
-    async def seed_plans(self, count: int = 20, clear_existing: bool = False) -> List[ServicePlan]:
+    def _format_time_limit(self, seconds: int) -> str:
+        """Format time limit in seconds to human-readable format."""
+        if seconds == -1:
+            return "Unlimited"
+
+        hours = seconds // 3600
+        if hours >= 24:
+            days = hours // 24
+            return f"{days} day{'s' if days != 1 else ''}"
+        elif hours > 0:
+            return f"{hours} hour{'s' if hours != 1 else ''}"
+        else:
+            minutes = seconds // 60
+            return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+    async def seed_plans(self, count: int = 20, clear_existing: bool = False, demo_mode: bool = False) -> List[ServicePlan]:
         """Seed service plans with realistic ISP packages."""
         if clear_existing:
             await self._clear_plans()
@@ -51,18 +66,191 @@ class PlanSeeder:
 
         plans = []
 
-        # Create standard ISP packages for each organization
-        standard_plans = await self._create_standard_plans(organizations)
-        plans.extend(standard_plans)
+        # Demo mode: Create only 4 packages for first organization
+        if demo_mode:
+            demo_plans = await self._create_demo_plans(organizations)
+            plans.extend(demo_plans)
+        else:
+            # Create standard ISP packages for each organization
+            standard_plans = await self._create_standard_plans(organizations)
+            plans.extend(standard_plans)
 
-        # Create additional plans if needed
-        if count > len(standard_plans):
-            additional_plans = await self._create_additional_plans(count - len(standard_plans), organizations)
-            plans.extend(additional_plans)
+            # Create additional plans if needed
+            if count > len(standard_plans):
+                additional_plans = await self._create_additional_plans(count - len(standard_plans), organizations)
+                plans.extend(additional_plans)
 
         await self.db.commit()
 
         self.logger.info(f"Seeded {len(plans)} service plans across {len(organizations)} organizations")
+        return plans
+
+    async def _create_demo_plans(self, organizations: list = None) -> List[ServicePlan]:
+        """Create 4 demo packages for default organization: 3 hotspot (KES 10, 20, 50) + 1 PPPoE (KES 1500)."""
+        plans = []
+
+        # Use first organization only for demo
+        org = organizations[0] if organizations else None
+
+        if not org:
+            self.logger.warning("No organization found for demo plans")
+            return plans
+
+        # Demo packages data - Mix for comprehensive testing:
+        # 1. BOTH data AND time limited (tests dual enforcement)
+        # 2. Data-limited only (500MB cap)
+        # 3. Time-limited only (1 hour)
+        # 4. Time-limited only (1 day) - popular
+        # 5. PPPoE unlimited package
+        demo_plans_data = [
+            {
+                "name": "Quick Combo - KES 10",
+                "description": "200MB or 30 minutes, whichever comes first",
+                "plan_type": PlanType.HOTSPOT,
+                "download_speed": 2,
+                "upload_speed": 1,
+                "data_limit": 200,  # 200MB data cap
+                "time_limit": 1800,  # 30 minutes in seconds
+                "validity_days": 1,
+                "price": Decimal("10.00"),
+                "billing_cycle": BillingCycle.ONE_TIME,
+                "is_popular": False
+            },
+            {
+                "name": "Data Bundle - KES 15",
+                "description": "500MB data bundle - valid for 7 days",
+                "plan_type": PlanType.HOTSPOT,
+                "download_speed": 2,
+                "upload_speed": 1,
+                "data_limit": 500,  # 500MB data cap
+                "time_limit": -1,  # Unlimited time
+                "validity_days": 7,
+                "price": Decimal("15.00"),
+                "billing_cycle": BillingCycle.ONE_TIME,
+                "is_popular": False
+            },
+            {
+                "name": "1 Hour Burst - KES 20",
+                "description": "Unlimited data for 1 hour - ideal for urgent tasks",
+                "plan_type": PlanType.HOTSPOT,
+                "download_speed": 3,
+                "upload_speed": 1,
+                "data_limit": -1,  # Unlimited data
+                "time_limit": 3600,  # 1 hour in seconds
+                "validity_days": 1,
+                "price": Decimal("20.00"),
+                "billing_cycle": BillingCycle.ONE_TIME,
+                "is_popular": False
+            },
+            {
+                "name": "Daily Unlimited - KES 50",
+                "description": "Unlimited data for 24 hours - full day coverage",
+                "plan_type": PlanType.HOTSPOT,
+                "download_speed": 5,
+                "upload_speed": 2,
+                "data_limit": -1,  # Unlimited data
+                "time_limit": 86400,  # 24 hours in seconds
+                "validity_days": 1,
+                "price": Decimal("50.00"),
+                "billing_cycle": BillingCycle.DAILY,
+                "is_popular": True
+            },
+            {
+                "name": "PPPoE Home - KES 1500",
+                "description": "Unlimited 5Mbps home internet for 30 days",
+                "plan_type": PlanType.PPPOE,
+                "download_speed": 5,
+                "upload_speed": 2,
+                "data_limit": -1,  # Unlimited
+                "time_limit": -1,
+                "validity_days": 30,
+                "price": Decimal("1500.00"),
+                "billing_cycle": BillingCycle.MONTHLY,
+                "is_popular": False
+            }
+        ]
+
+        for idx, plan_data in enumerate(demo_plans_data):
+            plan = ServicePlan(
+                organization_id=org.id,
+                name=plan_data["name"],
+                description=plan_data["description"],
+                plan_type=plan_data["plan_type"],
+                status=PlanStatus.ACTIVE,
+                price=plan_data["price"],
+                currency="KES",
+                billing_cycle=plan_data["billing_cycle"],
+                download_speed=plan_data["download_speed"],
+                upload_speed=plan_data["upload_speed"],
+                data_limit=plan_data["data_limit"],
+                time_limit=plan_data["time_limit"],
+                validity_days=plan_data["validity_days"],
+                sort_order=idx + 1,
+                is_popular=plan_data.get("is_popular", False),
+                created_at=datetime.utcnow()
+            )
+
+            self.db.add(plan)
+            await self.db.flush()
+
+            # Create plan features
+            features = [
+                {
+                    "feature_name": "Download Speed",
+                    "feature_value": f"{plan_data['download_speed']} Mbps",
+                    "feature_type": "speed",
+                    "is_core_feature": True
+                },
+                {
+                    "feature_name": "Upload Speed",
+                    "feature_value": f"{plan_data['upload_speed']} Mbps",
+                    "feature_type": "speed",
+                    "is_core_feature": True
+                },
+                {
+                    "feature_name": "Data Limit",
+                    "feature_value": "Unlimited" if plan_data["data_limit"] == -1 else f"{plan_data['data_limit']} MB",
+                    "feature_type": "limit",
+                    "is_core_feature": True
+                },
+                {
+                    "feature_name": "Time Limit",
+                    "feature_value": self._format_time_limit(plan_data["time_limit"]),
+                    "feature_type": "limit",
+                    "is_core_feature": True
+                },
+                {
+                    "feature_name": "Validity",
+                    "feature_value": f"{plan_data['validity_days']} days",
+                    "feature_type": "validity",
+                    "is_core_feature": True
+                }
+            ]
+
+            for feat_idx, feature_data in enumerate(features):
+                feature = PlanFeature(
+                    plan_id=plan.id,
+                    feature_name=feature_data["feature_name"],
+                    feature_value=feature_data["feature_value"],
+                    is_included=feature_data["is_core_feature"],
+                    sort_order=feat_idx
+                )
+
+                self.db.add(feature)
+
+            # Create plan pricing
+            pricing = PlanPricing(
+                plan_id=plan.id,
+                duration_months=1,
+                price=plan_data["price"],
+                discount_percentage=Decimal("0"),
+                is_active=True
+            )
+
+            self.db.add(pricing)
+            plans.append(plan)
+
+        self.logger.info(f"Created {len(plans)} demo plans for organization {org.name} (slug: {org.slug})")
         return plans
 
     async def _create_standard_plans(self, organizations: list = None) -> List[ServicePlan]:
@@ -795,11 +983,11 @@ class PlanSeeder:
         self.logger.info("Cleared existing package category configs")
 
 
-async def seed_plans(count: int = 20, clear_existing: bool = False) -> List[ServicePlan]:
+async def seed_plans(count: int = 20, clear_existing: bool = False, demo_mode: bool = False) -> List[ServicePlan]:
     """Seed service plans."""
     async with AsyncSessionLocal() as db:
         seeder = PlanSeeder(db)
-        return await seeder.seed_plans(count, clear_existing)
+        return await seeder.seed_plans(count, clear_existing, demo_mode)
 
 
 async def seed_package_templates(count: int = 15, clear_existing: bool = False) -> List[PackageTemplate]:
@@ -817,4 +1005,4 @@ async def seed_package_categories(clear_existing: bool = False) -> List[PackageC
 
 
 if __name__ == "__main__":
-    asyncio.run(seed_plans(count=20, clear_existing=True))
+    asyncio.run(seed_plans(count=5, clear_existing=True, demo_mode=True))

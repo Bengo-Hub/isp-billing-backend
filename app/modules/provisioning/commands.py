@@ -177,6 +177,32 @@ def generate_configuration_commands(
             }
         )
 
+    # Configure NTP for time synchronization
+    # This ensures router time is accurate for logs, certificates, and scheduling
+    ntp_servers = config.get("ntp_servers", ["time.cloudflare.com", "time.google.com"])
+    if isinstance(ntp_servers, list) and len(ntp_servers) > 0:
+        # Enable NTP client
+        commands.append(
+            {
+                "type": "api_call",
+                "command": f"/system/ntp/client/set enabled=yes servers={','.join(ntp_servers)}",
+                "description": "Configuring NTP time synchronization",
+                "critical": False,
+            }
+        )
+
+    # Set timezone (default to Africa/Nairobi for Kenya - EAT UTC+3)
+    # MikroTik RouterOS v7+ uses IANA timezone database names
+    timezone = config.get("timezone", "Africa/Nairobi")
+    commands.append(
+        {
+            "type": "api_call",
+            "command": f"/system/clock/set time-zone-name={timezone}",
+            "description": f"Setting timezone to {timezone}",
+            "critical": False,
+        }
+    )
+
     # Bridge configuration - required for all service types
     commands.append(
         {
@@ -298,7 +324,16 @@ def generate_configuration_commands(
 def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Generate MikroTik hotspot configuration commands.
 
-    Creates hotspot on the bridge interface with optional anti-sharing protection.
+    Creates hotspot on the bridge interface with external captive portal redirect.
+    The hotspot redirects unauthenticated users to the ISP billing frontend
+    captive portal (/portal/{org}/buy-packages) instead of MikroTik's built-in login.
+
+    IMPORTANT: This configures an EXTERNAL captive portal workflow:
+    1. User connects to hotspot WiFi/ethernet
+    2. User opens any HTTP page -> redirected to external captive portal
+    3. User purchases package on captive portal
+    4. Backend authorizes user via MikroTik API (adds hotspot user)
+    5. User gets internet access
     """
     commands: List[Dict[str, Any]] = []
     hotspot_name = config.get("hotspot_name", "codevertex-hotspot")
@@ -312,16 +347,61 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     net_config = calculate_network_config(subnet_address, cidr)
     gateway = config.get("gateway", net_config["gateway"])
 
-    # Create hotspot profile first
+    # Hotspot profile settings
     profile_name = config.get("hotspot_profile", "codevertex-hsprof")
-    redirect_url = config.get("redirect_url", "")
-    dns_name = config.get("hotspot_dns_name", "codevertex.local")
+    dns_name = config.get("hotspot_dns_name", "hotspot.local")
 
-    # Build hotspot profile command with optional redirect URL
-    profile_cmd = f"/ip/hotspot/profile/add name={profile_name} hotspot-address={gateway} dns-name={dns_name} login-by=http-chap"
-    if redirect_url:
-        profile_cmd += f" login-by=http-chap,http-pap html-directory-override=hotspot http-cookie-lifetime=3d"
-        # Note: redirect-url is set separately after profile creation
+    # External captive portal URL - this is where users are redirected
+    # Format: http(s)://billing-server/portal/{org}/buy-packages
+    # The captive portal URL should be configured in organization settings
+    captive_portal_url = config.get("captive_portal_url", "")
+    org_slug = config.get("organization_slug", "default")
+
+    # If no explicit captive portal URL, construct from billing server
+    if not captive_portal_url:
+        billing_server = config.get("billing_server_url", "")
+        if billing_server:
+            # Remove trailing slash and construct portal URL
+            # Format: /buy/{orgSlug} (matches frontend routing)
+            billing_server = billing_server.rstrip("/")
+            captive_portal_url = f"{billing_server}/buy/{org_slug}"
+
+    # CRITICAL: Enable FTP service for template upload
+    # MikroTik routers have FTP disabled by default
+    # We need FTP to upload custom hotspot templates (login.html, alogin.html)
+    commands.append(
+        {
+            "type": "api_call",
+            "command": "/ip/service/set ftp disabled=no",
+            "description": "Enabling FTP service for template upload",
+            "critical": False,
+        }
+    )
+
+    # Create hotspot profile for external captive portal
+    # MikroTik hotspot will redirect HTTP requests to the login page
+    # For external captive portal: use walled garden + customize login.html
+    # login-by=http-chap allows API-based user authorization after purchase
+    # html-directory=hotspot tells MikroTik to use custom templates from /hotspot/ directory
+    # use-radius=no: Don't use RADIUS server, authenticate locally/via API
+    # http-pap,http-chap: Support both PAP and CHAP authentication methods
+    # http-cookie-lifetime: Keep users logged in for 1 day
+    # split-user-domain=no: Don't split username@domain
+    # Note: HTTP proxy/interception is enabled automatically by MikroTik hotspot
+    profile_cmd = (
+        f"/ip/hotspot/profile/add name={profile_name} "
+        f"hotspot-address={gateway} dns-name={dns_name} "
+        f"html-directory=hotspot "
+        f"use-radius=no "
+        f"login-by=http-chap,http-pap "
+        f"http-cookie-lifetime=1d "
+        f"split-user-domain=no"
+    )
+
+    # NOTE: MikroTik doesn't have a 'login-url' parameter
+    # To redirect to external captive portal, customize the login.html template
+    # For now, we use walled garden to allow access to the captive portal
+    # The frontend can detect captive portal and show the buy packages page
 
     commands.append(
         {
@@ -332,28 +412,137 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
         }
     )
 
-    # Set redirect URL if provided (done separately to handle existing profiles)
-    if redirect_url:
-        commands.append(
-            {
-                "type": "api_call",
-                "command": f"/ip/hotspot/profile/set {profile_name} login-by=http-chap html-directory-override=hotspot",
-                "description": f"Configure hotspot profile login settings",
-                "critical": False,
-            }
-        )
-
     # Create hotspot on bridge interface
+    # addresses-per-mac=1: Limit one IP per MAC address to prevent IP sharing
+    # idle-timeout=5m: Disconnect after 5 minutes of inactivity (anti-sharing)
+    # keepalive-timeout=none: Don't use keepalive (reduces overhead)
+    # address-list=none: No specific address list
     commands.append(
         {
             "type": "api_call",
-            "command": f"/ip/hotspot/add name={hotspot_name} interface={bridge_name} address-pool={pool_name} profile={profile_name} disabled=no",
+            "command": f"/ip/hotspot/add name={hotspot_name} interface={bridge_name} address-pool={pool_name} profile={profile_name} addresses-per-mac=1 idle-timeout=5m keepalive-timeout=none disabled=no",
             "description": f"Creating hotspot {hotspot_name} on {bridge_name}",
             "critical": True,
         }
     )
+
+    # CRITICAL: Configure walled garden for external captive portal
+    # Walled garden allows unauthenticated access to specific hosts/IPs
+    # This is required so users can reach the captive portal before authentication
+
+    # Default walled garden hosts for the captive portal
+    walled_garden_hosts = list(config.get("walled_garden_hosts", []))
+
+    # Auto-add billing server to walled garden if configured
+    billing_server = config.get("billing_server_url", "")
+    if billing_server:
+        # Extract host from URL (e.g., "192.168.100.4" from "http://192.168.100.4:3000")
+        import re
+        match = re.search(r'https?://([^:/]+)', billing_server)
+        if match:
+            billing_host = match.group(1)
+            if billing_host not in walled_garden_hosts:
+                walled_garden_hosts.append(billing_host)
+
+    # Add API server to walled garden (for package purchases)
+    api_server = config.get("api_server_url", "")
+    if api_server:
+        match = re.search(r'https?://([^:/]+)', api_server)
+        if match:
+            api_host = match.group(1)
+            if api_host not in walled_garden_hosts:
+                walled_garden_hosts.append(api_host)
+
+    # Add common payment gateways to walled garden (for online payments)
+    payment_hosts = [
+        "*.paystack.com",
+        "*.paystack.co",
+        "*.flutterwave.com",
+        "*.mpesa.in",
+        "*.safaricom.co.ke",
+    ]
+    walled_garden_hosts.extend(payment_hosts)
+
+    # CRITICAL: Configure DNS static entries for captive portal detection
+    # Modern devices (Android/iOS/Windows) use HTTPS for connectivity checks,
+    # which MikroTik hotspot can't intercept. By adding DNS static entries
+    # that point these domains to the hotspot address, we force HTTP requests
+    # that the hotspot can intercept, triggering "Tap to Connect" notification.
+    #
+    # Android connectivity check URLs:
+    # - connectivitycheck.gstatic.com/generate_204
+    # - www.google.com/generate_204
+    # - clients3.google.com/generate_204
+    #
+    # iOS connectivity check URLs:
+    # - captive.apple.com/hotspot-detect.html
+    # - *.apple.com
+    #
+    # Windows connectivity check URLs:
+    # - www.msftconnecttest.com/connecttest.txt
+    #
+    # These DNS entries make devices think the captive portal is active,
+    # showing the "Tap to Connect" notification.
+
+    captive_portal_detection_domains = [
+        # Android
+        "connectivitycheck.gstatic.com",
+        "www.google.com",
+        "clients3.google.com",
+        "android.clients.google.com",
+        "clients4.google.com",
+        # iOS
+        "captive.apple.com",
+        # Windows
+        "www.msftconnecttest.com",
+        "ipv6.msftconnecttest.com",
+    ]
+
+    # Add DNS static entries pointing to hotspot address
+    # This forces connectivity checks to go through the hotspot
+    for domain in captive_portal_detection_domains:
+        commands.append(
+            {
+                "type": "api_call",
+                "command": f'/ip/dns/static/add name="{domain}" address={gateway} comment=codevertex-captive-portal-detection',
+                "description": f"DNS static entry for captive portal detection: {domain}",
+                "critical": False,
+            }
+        )
+
+    # Add each walled garden entry
+    for host in walled_garden_hosts:
+        # Use dst-host for domain patterns, support wildcards
+        commands.append(
+            {
+                "type": "api_call",
+                "command": f'/ip/hotspot/walled-garden/add dst-host="{host}" action=allow comment=codevertex-portal',
+                "description": f"Allow unauthenticated access to {host}",
+                "critical": False,
+            }
+        )
+
+    # Also add IP-based walled garden entries for local network access
+    # This ensures the captive portal server is reachable by IP
+    walled_garden_ips = config.get("walled_garden_ips", [])
+    if billing_server:
+        match = re.search(r'https?://([0-9.]+)', billing_server)
+        if match:
+            billing_ip = match.group(1)
+            if billing_ip not in walled_garden_ips:
+                walled_garden_ips.append(billing_ip)
+
+    for ip in walled_garden_ips:
+        commands.append(
+            {
+                "type": "api_call",
+                "command": f"/ip/hotspot/walled-garden/ip/add dst-address={ip} action=accept comment=codevertex-portal",
+                "description": f"Allow unauthenticated access to IP {ip}",
+                "critical": False,
+            }
+        )
+
     # Check all naming variations for anti-sharing flag
-    # Frontend may send: enableAntiSharing, enable_anti_sharing, or enable_hotspot_anti_sharing
     enable_anti_sharing = (
         config.get("enable_anti_sharing") or
         config.get("enableAntiSharing") or
@@ -361,21 +550,22 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
         False
     )
     if enable_anti_sharing:
-        # Configure hotspot profile with session controls
+        # Configure hotspot server idle-timeout
+        # Note: session-timeout and shared-users should be set on user profiles or individual users,
+        # NOT on the hotspot profile itself. Only idle-timeout can be set on the hotspot server.
         commands.append(
             {
                 "type": "api_call",
-                "command": "/ip/hotspot/profile/set default login-by=http-chap session-timeout=1d idle-timeout=5m shared-users=1",
-                "description": "Configure hotspot profile for anti-sharing",
+                "command": f"/ip/hotspot/set {hotspot_name} idle-timeout=5m",
+                "description": "Configure hotspot idle timeout for anti-sharing",
                 "critical": False,
             }
         )
         # TTL modification rules to detect and prevent connection sharing
-        # When TTL is 65, it means the packet has been routed through another device (shared)
         commands.append(
             {
                 "type": "api_call",
-                "command": "/ip/firewall/mangle/add chain=forward action=change-ttl new-ttl=set:64 passthrough=yes ttl=equal:65 protocol=tcp dst-port=80,443,53",
+                "command": "/ip/firewall/mangle/add chain=forward action=change-ttl new-ttl=set:64 passthrough=yes ttl=equal:65 protocol=tcp dst-port=80,443,53 comment=codevertex-anti-sharing",
                 "description": "Anti-sharing TTL rule for TCP (HTTP/HTTPS/DNS)",
                 "critical": False,
             }
@@ -383,12 +573,12 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
         commands.append(
             {
                 "type": "api_call",
-                "command": "/ip/firewall/mangle/add chain=forward action=change-ttl new-ttl=set:64 passthrough=yes ttl=equal:65 protocol=udp dst-port=53,67,68",
+                "command": "/ip/firewall/mangle/add chain=forward action=change-ttl new-ttl=set:64 passthrough=yes ttl=equal:65 protocol=udp dst-port=53,67,68 comment=codevertex-anti-sharing",
                 "description": "Anti-sharing TTL rule for UDP (DNS/DHCP)",
                 "critical": False,
             }
         )
-        # Optional: Drop packets with suspicious TTL values (aggressive mode)
+        # Drop packets with suspicious TTL values
         commands.append(
             {
                 "type": "api_call",
@@ -397,16 +587,7 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "critical": False,
             }
         )
-    if "walled_garden_hosts" in config:
-        for host in config["walled_garden_hosts"]:
-            commands.append(
-                {
-                    "type": "api_call",
-                    "command": f"/ip/hotspot/walled-garden/add dst-host={host}",
-                    "description": f"Add walled garden host {host}",
-                    "critical": False,
-                }
-            )
+
     return commands
 
 

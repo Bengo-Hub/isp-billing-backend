@@ -43,14 +43,14 @@ async def add_default_organization():
 
         # Create default organization
         org = Organization(
-            name="Default Portal",
-            slug="default",
+            name="Codevertex IT Soltuions",
+            slug="codevertex",
             organization_type=OrganizationType.HOTSPOT,
             status=OrganizationStatus.ACTIVE,
-            email="portal@default.local",
-            phone="+254700000001",
-            address="Default Address",
-            city="Nairobi",
+            email="info@codevertexitsolutions.com",
+            phone="+254743793901",
+            address="Onginga Street, Pioneer, Kisumu",
+            city="Kisumu",
             primary_color="#ec4899",
             secondary_color="#8b5cf6",
             portal_title="WiFi Portal",
@@ -87,7 +87,7 @@ async def add_default_organization():
         print(f"✓ Created default organization (id={org.id})")
         print(f"  - Name: {org.name}")
         print(f"  - Slug: {org.slug}")
-        print(f"  - Portal URL: /portal/default/buy-packages")
+        print(f"  - Portal URL: /portal/buy/{org.slug}")
 
         return org
 
@@ -95,4 +95,4 @@ async def add_default_organization():
 if __name__ == "__main__":
     print("Adding default organization...")
     asyncio.run(add_default_organization())
-    print("\nDone! You can now access: /portal/default/buy-packages")
+    print("\nDone! You can now access: /portal/buy/{org_slug}")
