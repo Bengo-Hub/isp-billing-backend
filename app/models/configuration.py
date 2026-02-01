@@ -1,6 +1,7 @@
 """Configuration model for storing application settings."""
 
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, Enum
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, Enum, ForeignKey
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base
 import enum
@@ -17,11 +18,12 @@ class ConfigType(str, enum.Enum):
 
 class Configuration(Base):
     """Configuration settings stored in database."""
-    
+
     __tablename__ = "configurations"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    key = Column(String(255), unique=True, index=True, nullable=False)
+    organization_id = Column(Integer, ForeignKey('organizations.id', ondelete='CASCADE'), nullable=True, index=True)
+    key = Column(String(255), index=True, nullable=False)
     value = Column(Text, nullable=True) # Plain text value
     encrypted_value = Column(Text, nullable=True) # Encrypted value if is_encrypted is True
     config_type = Column(Enum(ConfigType), default=ConfigType.STRING, nullable=False)

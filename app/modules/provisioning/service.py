@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.logging import get_logger
+from app.core.config import settings
 from app.core.exceptions import (
     ProvisioningError,
     RouterConnectionError,
@@ -45,7 +46,7 @@ from app.models.provisioning import (
 )
 from app.models.router import Router, RouterStatus
 from app.models.user import User
-from app.integrations.mikrotik import get_mikrotik_client
+from app.integrations.mikrotik import get_mikrotik_client, get_mikrotik_ftp_client
 from app.modules.routers import RouterService
 from .commands import (
     load_command_templates,
@@ -97,58 +98,96 @@ class ProvisioningService:
         """Create a new provisioning session."""
         try:
             # Validate router exists and is accessible
-            router = await self.router_service.get_by_id(router_id)
-            if not router:
-                raise ValidationError(f"Router {router_id} not found")
+            try:
+                router = await self.router_service.get_by_id(router_id)
+                if not router:
+                    raise ValidationError(f"Router {router_id} not found")
+            except SQLAlchemyError as e:
+                await self.db.rollback()
+                self.logger.error(f"Database error while fetching router {router_id}: {e}")
+                raise
 
             # Check for existing active sessions
-            existing_session = await self._get_active_session(router_id)
-            if existing_session:
-                raise ProvisioningError(
-                    f"Router {router_id} already has an active provisioning session: {existing_session.session_id}"
-                )
+            try:
+                existing_session = await self._get_active_session(router_id)
+                if existing_session:
+                    raise ProvisioningError(
+                        f"Router {router_id} already has an active provisioning session: {existing_session.session_id}"
+                    )
+            except ProvisioningError:
+                raise
+            except SQLAlchemyError as e:
+                await self.db.rollback()
+                self.logger.error(f"Database error while checking active sessions: {e}")
+                raise
 
             # Generate unique session ID
             session_id = str(uuid.uuid4())
 
             # Load template if specified
             if template_id:
-                template = await self._get_template(template_id)
-                if template and template.service_type == service_type:
-                    # Merge template configuration with provided configuration
-                    template_config = template.get_default_configuration()
-                    configuration = {**template_config, **configuration}
+                try:
+                    template = await self._get_template(template_id)
+                    if template and template.service_type == service_type:
+                        # Merge template configuration with provided configuration
+                        template_config = template.get_default_configuration()
+                        configuration = {**template_config, **configuration}
+                except SQLAlchemyError as e:
+                    await self.db.rollback()
+                    self.logger.error(f"Database error while loading template: {e}")
+                    raise
 
-            # Validate configuration
-            validated_config = await self._validate_configuration(service_type, configuration)
+            # Validate configuration and inject billing server URLs
+            try:
+                validated_config = await self._validate_configuration(
+                    service_type, configuration, router_id=router_id, user_id=user_id
+                )
+            except SQLAlchemyError as e:
+                await self.db.rollback()
+                self.logger.error(f"Database error during configuration validation: {e}")
+                raise
 
             # Calculate timeout
             timeout_at = datetime.utcnow() + timedelta(minutes=self.default_timeout_minutes)
 
-            # Create session
-            session = ProvisioningSession(
-                session_id=session_id,
-                router_id=router_id,
-                user_id=user_id,
-                service_type=service_type,
-                configuration=validated_config,
-                priority=priority,
-                scheduled_at=scheduled_at,
-                timeout_at=timeout_at,
-                status=ProvisioningStatus.PENDING
-            )
+            # Create session - ensure transaction is clean before INSERT
+            try:
+                session = ProvisioningSession(
+                    session_id=session_id,
+                    router_id=router_id,
+                    user_id=user_id,
+                    service_type=service_type,
+                    configuration=validated_config,
+                    priority=priority,
+                    scheduled_at=scheduled_at,
+                    timeout_at=timeout_at,
+                    status=ProvisioningStatus.PENDING
+                )
 
-            self.db.add(session)
-            await self.db.commit()
-            await self.db.refresh(session)
+                self.db.add(session)
+                await self.db.commit()
+                await self.db.refresh(session)
+            except SQLAlchemyError as e:
+                await self.db.rollback()
+                self.logger.error(f"Database error while creating provisioning session: {e}")
+                raise
 
             # Create initial step logs
-            await self._create_step_logs(session.id)
+            try:
+                await self._create_step_logs(session.id)
+            except SQLAlchemyError as e:
+                await self.db.rollback()
+                self.logger.error(f"Database error while creating step logs: {e}")
+                raise
 
             self.logger.info(f"Created provisioning session {session_id} for router {router_id}")
             return session
 
+        except (ValidationError, ProvisioningError):
+            # Re-raise application errors without additional rollback
+            raise
         except Exception as e:
+            # Rollback for any unexpected errors
             await self.db.rollback()
             self.logger.error(f"Failed to create provisioning session: {e}")
             raise
@@ -156,19 +195,30 @@ class ProvisioningService:
     async def start_provisioning(self, session_id: str) -> bool:
         """Start the provisioning process for a session."""
         try:
-            session = await self._get_session_by_id(session_id)
-            if not session:
-                raise ProvisioningError(f"Session {session_id} not found")
+            # Get session with proper error handling
+            try:
+                session = await self._get_session_by_id(session_id)
+                if not session:
+                    raise ProvisioningError(f"Session {session_id} not found")
 
-            if session.status != ProvisioningStatus.PENDING:
-                raise ProvisioningError(f"Session {session_id} is not in pending status")
+                if session.status != ProvisioningStatus.PENDING:
+                    raise ProvisioningError(f"Session {session_id} is not in pending status")
+            except SQLAlchemyError as e:
+                await self.db.rollback()
+                self.logger.error(f"Database error while fetching session {session_id}: {e}")
+                raise
 
             # Update session status
-            session.status = ProvisioningStatus.IN_PROGRESS
-            session.started_at = datetime.utcnow()
-            session.current_step = ProvisioningStep.CONNECTION
+            try:
+                session.status = ProvisioningStatus.IN_PROGRESS
+                session.started_at = datetime.utcnow()
+                session.current_step = ProvisioningStep.CONNECTION
 
-            await self.db.commit()
+                await self.db.commit()
+            except SQLAlchemyError as e:
+                await self.db.rollback()
+                self.logger.error(f"Database error while updating session {session_id}: {e}")
+                raise
 
             # Start provisioning process in background
             asyncio.create_task(self._execute_provisioning_workflow(session))
@@ -176,7 +226,11 @@ class ProvisioningService:
             self.logger.info(f"Started provisioning session {session_id}")
             return True
 
+        except (ValidationError, ProvisioningError) as e:
+            self.logger.error(f"Failed to start provisioning session {session_id}: {e}")
+            return False
         except Exception as e:
+            await self.db.rollback()
             self.logger.error(f"Failed to start provisioning session {session_id}: {e}")
             return False
 
@@ -452,6 +506,29 @@ class ProvisioningService:
             await self._update_step_progress(step_log, 90.0, "Applying security configurations...", session)
             await apply_security_configuration(client, connection, config, self.command_templates, self.logger, session.session_id)
 
+            # Upload hotspot templates via FTP (only for hotspot services)
+            if session.service_type in [ServiceType.HOTSPOT, ServiceType.BOTH]:
+                await self._update_step_progress(step_log, 92.0, "Uploading hotspot templates...", session)
+                try:
+                    await self._upload_hotspot_templates(router, config, session)
+                    # Send success notification via WebSocket
+                    await streaming_manager.log_provisioning_step(
+                        session.session_id,
+                        "template_upload",
+                        "[OK] Hotspot templates uploaded successfully",
+                        "success"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to upload hotspot templates: {e}. Continuing anyway...")
+                    # Send warning notification via WebSocket
+                    await streaming_manager.log_provisioning_step(
+                        session.session_id,
+                        "template_upload",
+                        f"[WARN] Failed to upload hotspot templates: {str(e)}. Continuing with default templates.",
+                        "warning"
+                    )
+                    # Non-critical error, continue provisioning
+
             # Final verification
             await self._update_step_progress(step_log, 95.0, "Performing final verification...", session)
             await verify_service_configuration(client, connection, session.service_type, config)
@@ -469,6 +546,178 @@ class ProvisioningService:
 
         except Exception as e:
             await self._handle_step_error(session, step_log, str(e))
+
+    async def _upload_hotspot_templates(
+        self,
+        router: Router,
+        config: Dict[str, Any],
+        session: ProvisioningSession
+    ) -> bool:
+        """Upload custom hotspot templates to the MikroTik router via FTP.
+
+        This uploads login_redirect.html and alogin.html to redirect users to
+        the external captive portal.
+
+        Args:
+            router: Router model instance
+            config: Configuration dictionary
+            session: Current provisioning session
+
+        Returns:
+            True if upload was successful
+        """
+        import os
+        from pathlib import Path
+
+        try:
+            # Get FTP client
+            ftp_client = get_mikrotik_ftp_client()
+
+            # Determine template type (default to modern if not specified)
+            template_type = config.get('hotspot_template_type', 'modern')
+
+            # Get redirect URL from config
+            base_url = config.get('billing_server_url', settings.frontend_url)
+            if not base_url:
+                self.logger.warning("No redirect URL configured, skipping template upload")
+                return False
+
+            # Get organization slug for constructing captive portal URL
+            org_slug = config.get('organization_slug', 'default')
+
+            # Construct full captive portal URL: /buy/{org_slug}
+            captive_portal_url = f"{base_url.rstrip('/')}/buy/{org_slug}"
+
+            self.logger.info(
+                f"[TEMPLATE UPLOAD] Configuring captive portal redirect",
+                extra={
+                    "session_id": session.session_id,
+                    "base_url": base_url,
+                    "org_slug": org_slug,
+                    "full_url": captive_portal_url
+                }
+            )
+
+            # Also send to WebSocket for user visibility
+            await streaming_manager.log_provisioning_step(
+                session.session_id,
+                "template_config",
+                f"[INFO] Captive portal URL: {captive_portal_url}",
+                "info"
+            )
+
+            # Build template directory path
+            template_dir = Path(__file__).parent / "hotspot_templates"
+            if not template_dir.exists():
+                self.logger.error(f"Template directory not found: {template_dir}")
+                return False
+
+            # Read and process templates with URL replacement
+            import tempfile
+            processed_templates = []
+
+            template_files = [
+                {
+                    "source": "login_redirect.html",
+                    "target": "login.html"  # Upload as login.html to override default
+                },
+                {
+                    "source": "alogin.html",
+                    "target": "alogin.html"  # After-login success page
+                }
+            ]
+
+            for template_info in template_files:
+                source_path = template_dir / template_info["source"]
+
+                if not source_path.exists():
+                    self.logger.warning(f"Template file not found: {source_path}")
+                    continue
+
+                # Read template content
+                with open(source_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+                # Replace $(redirect-url) placeholder with actual captive portal URL
+                content = content.replace('$(redirect-url)', captive_portal_url)
+
+                # Create temporary file with processed content
+                temp_file = tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', delete=False, suffix='.html')
+                temp_file.write(content)
+                temp_file.close()
+
+                processed_templates.append({
+                    "path": temp_file.name,
+                    "name": template_info["target"]
+                })
+
+            # Delete old templates first to ensure fresh upload
+            try:
+                for template_info in template_files:
+                    target_name = template_info["target"]
+                    self.logger.info(f"Deleting old template: {target_name}")
+                    await ftp_client.delete_hotspot_file(
+                        router_ip=router.ip_address,
+                        username=router.username,
+                        password=router.password,
+                        filename=target_name,
+                        port=21
+                    )
+            except Exception as e:
+                # It's okay if deletion fails (files might not exist)
+                self.logger.info(f"Could not delete old templates (might not exist): {e}")
+
+            # Upload processed templates
+            results = await ftp_client.upload_hotspot_templates_batch(
+                router_ip=router.ip_address,
+                username=router.username,
+                password=router.password,
+                templates=processed_templates,
+                port=21  # Standard FTP port
+            )
+
+            # Clean up temporary files
+            for template in processed_templates:
+                try:
+                    os.unlink(template["path"])
+                except Exception as e:
+                    self.logger.warning(f"Failed to delete temp file {template['path']}: {e}")
+
+            # Check results
+            all_success = all(results.values())
+
+            if all_success:
+                uploaded_files = ", ".join(results.keys())
+                self.logger.info(
+                    f"[TEMPLATE UPLOAD] Successfully uploaded {len(results)} templates: {uploaded_files}",
+                    extra={"session_id": session.session_id, "templates": list(results.keys())}
+                )
+
+                # Log to WebSocket with file details
+                await streaming_manager.log_provisioning_step(
+                    session.session_id,
+                    "template_files",
+                    f"[INFO] Uploaded templates: {uploaded_files} to /hotspot/ directory",
+                    "info"
+                )
+            else:
+                failed = [name for name, success in results.items() if not success]
+                error_msg = f"Failed to upload some templates: {', '.join(failed)}"
+                self.logger.error(
+                    f"[TEMPLATE UPLOAD] {error_msg}",
+                    extra={"session_id": session.session_id}
+                )
+                # Raise exception to make failure visible
+                raise Exception(error_msg)
+
+            return all_success
+
+        except Exception as e:
+            self.logger.error(
+                f"Error uploading hotspot templates to router {router.name}: {e}",
+                extra={"session_id": session.session_id}
+            )
+            raise
 
     async def _generate_configuration_commands(
         self, 
@@ -697,9 +946,14 @@ class ProvisioningService:
     async def _validate_configuration(
         self,
         service_type: ServiceType,
-        configuration: Dict[str, Any]
+        configuration: Dict[str, Any],
+        router_id: Optional[int] = None,
+        user_id: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Validate and normalize configuration parameters."""
+        """Validate and normalize configuration parameters.
+
+        Also injects billing server and captive portal URLs for external portal redirect.
+        """
         validated_config = configuration.copy()
 
         # Common validation
@@ -714,31 +968,159 @@ class ProvisioningService:
         if 'wan_interface' not in validated_config:
             validated_config['wan_interface'] = 'ether1'
 
+        # Inject billing server URLs for captive portal configuration
+        # These are used by generate_hotspot_commands to configure walled garden and login redirect
+        if 'billing_server_url' not in validated_config:
+            # Use frontend_url from settings (the captive portal is served by frontend)
+            frontend_url = settings.frontend_url
+            if frontend_url:
+                validated_config['billing_server_url'] = frontend_url
+            else:
+                # Fallback: try to get from backend_url (same host, different port typically)
+                backend_url = settings.backend_url
+                if backend_url:
+                    # Frontend typically runs on port 3000, backend on 8000
+                    import re
+                    match = re.search(r'(https?://[^:]+):?(\d+)?', backend_url)
+                    if match:
+                        host = match.group(1)
+                        validated_config['billing_server_url'] = f"{host}:3000"
+
+        if 'api_server_url' not in validated_config:
+            # Backend API URL for package purchases
+            if settings.backend_url:
+                validated_config['api_server_url'] = settings.backend_url
+
+        # Get organization slug for portal URL construction
+        if 'organization_slug' not in validated_config:
+            org_slug = await self._get_organization_slug(router_id, user_id)
+            validated_config['organization_slug'] = org_slug or 'default'
+
+        # Get organization hotspot settings for template and redirect configuration
+        if service_type in [ServiceType.HOTSPOT, ServiceType.BOTH]:
+            org_settings = await self._get_organization_settings(router_id, user_id)
+            if org_settings:
+                # Inject hotspot template type
+                if 'hotspot_template_type' not in validated_config:
+                    validated_config['hotspot_template_type'] = org_settings.hotspot_template or 'Aurora'
+
+                # Inject redirect URL from organization settings
+                if 'hotspot_redirect_url' not in validated_config and org_settings.hotspot_redirect_url:
+                    validated_config['hotspot_redirect_url'] = org_settings.hotspot_redirect_url
+
+                # Inject session timeout
+                if 'session_timeout_minutes' not in validated_config:
+                    validated_config['session_timeout_minutes'] = org_settings.session_timeout_minutes
+
         # Service-specific validation
         if service_type == ServiceType.HOTSPOT:
             if 'hotspot_name' not in validated_config:
                 validated_config['hotspot_name'] = 'ISP-Hotspot'
-            
+
             if 'ip_pool_start' not in validated_config:
                 validated_config['ip_pool_start'] = '172.31.1.1'
-            
+
             if 'ip_pool_end' not in validated_config:
                 validated_config['ip_pool_end'] = '172.31.1.254'
-                
+
             if 'gateway' not in validated_config:
                 validated_config['gateway'] = '172.31.1.1'
+
+            # Add default walled garden hosts if not provided
+            if 'walled_garden_hosts' not in validated_config:
+                validated_config['walled_garden_hosts'] = []
 
         elif service_type == ServiceType.PPPOE_SERVER:
             if 'service_name' not in validated_config:
                 validated_config['service_name'] = 'ISP-PPPoE'
-            
+
             if 'ip_pool_start' not in validated_config:
                 validated_config['ip_pool_start'] = '172.31.1.1'
-            
+
             if 'ip_pool_end' not in validated_config:
                 validated_config['ip_pool_end'] = '172.31.1.254'
 
         return validated_config
+
+    async def _get_organization_slug(
+        self,
+        router_id: Optional[int] = None,
+        user_id: Optional[int] = None
+    ) -> Optional[str]:
+        """Get organization slug from router or user."""
+        try:
+            # Try to get from router's organization
+            if router_id:
+                from app.models.router import Router
+                from app.models.organization import Organization
+                result = await self.db.execute(
+                    select(Organization.slug)
+                    .join(Router, Router.organization_id == Organization.id)
+                    .where(Router.id == router_id)
+                )
+                slug = result.scalar_one_or_none()
+                if slug:
+                    return slug
+
+            # Fallback to user's organization
+            if user_id:
+                from app.models.user import User
+                from app.models.organization import Organization
+                result = await self.db.execute(
+                    select(Organization.slug)
+                    .join(User, User.organization_id == Organization.id)
+                    .where(User.id == user_id)
+                )
+                slug = result.scalar_one_or_none()
+                if slug:
+                    return slug
+
+            return None
+        except Exception as e:
+            self.logger.warning(f"Failed to get organization slug: {e}")
+            return None
+
+    async def _get_organization_settings(
+        self,
+        router_id: Optional[int] = None,
+        user_id: Optional[int] = None
+    ) -> Optional['OrganizationSettings']:
+        """Get organization settings from router or user."""
+        try:
+            from app.models.router import Router
+            from app.models.organization import Organization, OrganizationSettings
+            from app.models.user import User
+
+            organization_id = None
+
+            # Try to get from router's organization
+            if router_id:
+                result = await self.db.execute(
+                    select(Router.organization_id).where(Router.id == router_id)
+                )
+                organization_id = result.scalar_one_or_none()
+
+            # Fallback to user's organization
+            if not organization_id and user_id:
+                result = await self.db.execute(
+                    select(User.organization_id).where(User.id == user_id)
+                )
+                organization_id = result.scalar_one_or_none()
+
+            if not organization_id:
+                return None
+
+            # Get organization settings
+            result = await self.db.execute(
+                select(OrganizationSettings).where(
+                    OrganizationSettings.organization_id == organization_id
+                )
+            )
+            return result.scalar_one_or_none()
+
+        except Exception as e:
+            self.logger.warning(f"Failed to get organization settings: {e}")
+            return None
 
     # Helper methods for session management
     async def _get_session_by_id(self, session_id: str) -> Optional[ProvisioningSession]:

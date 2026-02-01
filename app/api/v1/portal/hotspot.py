@@ -19,11 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.api.deps_tenant import get_organization_by_slug
-from app.models.organization import Organization, OrganizationSettings
+from app.models.organization import Organization
 from app.models.plan import ServicePlan, PlanType, PlanStatus
 from app.models.customer_portal import VoucherCode, CustomerSession, CustomerPurchase, VoucherStatus, SessionStatus
 from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
+from app.models.router import Router
 from app.integrations.payment_gateways import PaymentGatewayFactory
+from app.integrations.mikrotik import get_mikrotik_client
 from app.utils.hotspot_username import generate_hotspot_credentials
 
 router = APIRouter(prefix="/hotspot", tags=["Portal - Hotspot"])
@@ -127,13 +129,10 @@ async def get_portal_config(
 
     Public endpoint - no authentication required.
     """
-    # Get organization settings
+    # Get organization settings (defaults to True for both)
+    # TODO: Add organization_settings table if custom portal settings are needed
     show_packages = True
     allow_guest = True
-
-    if organization.settings:
-        show_packages = organization.settings.show_packages_on_portal
-        allow_guest = organization.settings.allow_guest_purchases
 
     return PortalConfigResponse(
         organization_name=organization.name,
@@ -465,12 +464,81 @@ async def redeem_voucher(
         data_limit=plan.data_limit * 1024 * 1024 * 1024 if plan.data_limit > 0 else None,  # Convert to bytes
     )
     db.add(session)
+    await db.flush()
+
+    # Sync user to MikroTik router if available
+    from app.models.router import Router
+    from app.modules.routers.mikrotik import get_mikrotik_client
+
+    router_result = await db.execute(
+        select(Router).where(
+            Router.organization_id == organization.id,
+            Router.is_active == True,
+        ).limit(1)
+    )
+    router = router_result.scalar_one_or_none()
+
+    if router and voucher.hotspot_username and voucher.hotspot_password:
+        try:
+            # Connect to router
+            client = get_mikrotik_client()
+            connection = await client.connect(
+                ip_address=router.ip_address,
+                username=router.username,
+                password=router.password,
+                port=router.port,
+            )
+
+            # Use plan's time_limit (in seconds) if set, otherwise unlimited
+            time_limit_seconds = plan.time_limit if plan.time_limit > 0 else None
+
+            # Calculate data limit in bytes (plan.data_limit is in MB)
+            data_limit_bytes = None
+            if plan.data_limit > 0 and not plan.is_unlimited_data:
+                data_limit_bytes = plan.data_limit * 1024 * 1024  # MB to bytes
+
+            # Create or update hotspot user with limits
+            await client.create_hotspot_user(
+                connection=connection,
+                username=voucher.hotspot_username,
+                password=voucher.hotspot_password,
+                profile="default",
+                **{
+                    "limit-uptime": f"{time_limit_seconds}s" if time_limit_seconds else None,
+                    "limit-bytes-total": data_limit_bytes if data_limit_bytes else None,
+                    "comment": f"Redeemed voucher {voucher.code} - {plan.name}",
+                }
+            )
+
+            await client.disconnect(router.ip_address, router.port)
+
+            logger.info(
+                f"Synced hotspot user {voucher.hotspot_username} to router {router.name} "
+                f"on voucher redemption {voucher.code}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to sync hotspot user {voucher.hotspot_username} to router {router.name}: {e}. "
+                f"User may need to reconnect or authenticate manually."
+            )
+            # Don't fail voucher redemption if router sync fails
+    else:
+        if not router:
+            logger.warning(
+                f"No active router found for organization {organization.id}. "
+                f"Hotspot user not synced to router."
+            )
+        else:
+            logger.warning(
+                f"Voucher {voucher.code} missing hotspot credentials. "
+                f"Cannot sync to router."
+            )
 
     await db.commit()
 
     return VoucherRedeemResponse(
         success=True,
-        message="Voucher redeemed successfully",
+        message="Voucher redeemed successfully. You can now connect to the internet.",
         plan_name=plan.name,
         validity_hours=validity_hours,
         expires_at=expires_at,
@@ -654,6 +722,61 @@ async def payment_webhook(
 
             logger.info(f"Generated voucher {voucher_code} with hotspot credentials {hotspot_username} for purchase {purchase.id}")
 
+            # Create MikroTik hotspot user on the router
+            # Get organization's primary hotspot router
+            router_result = await db.execute(
+                select(Router).where(
+                    Router.organization_id == organization.id,
+                    Router.is_active == True,
+                ).limit(1)
+            )
+            router = router_result.scalar_one_or_none()
+
+            if router:
+                try:
+                    # Connect to router and create hotspot user
+                    client = get_mikrotik_client()
+                    connection = await client.connect(
+                        ip_address=router.ip_address,
+                        username=router.username,
+                        password=router.password,
+                        port=router.port,
+                    )
+
+                    # Calculate time limit in seconds (validity_days * 24 hours * 3600 seconds)
+                    time_limit_seconds = plan.validity_days * 24 * 3600 if plan.validity_days > 0 else 0
+
+                    # Create hotspot user with bandwidth and time limits
+                    await client.create_hotspot_user(
+                        connection=connection,
+                        username=hotspot_username,
+                        password=hotspot_password,
+                        profile="default",
+                        **{
+                            "limit-uptime": f"{time_limit_seconds}s" if time_limit_seconds > 0 else None,
+                            "limit-bytes-total": plan.data_limit * 1024 * 1024 * 1024 if plan.data_limit > 0 and not plan.is_unlimited_data else None,
+                            "comment": f"Purchased {plan.name} - Voucher {voucher_code}",
+                        }
+                    )
+
+                    await client.disconnect(router.ip_address, router.port)
+
+                    logger.info(
+                        f"Created MikroTik hotspot user {hotspot_username} on router {router.name} "
+                        f"for purchase {purchase.id}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to create hotspot user {hotspot_username} on router {router.name}: {e}. "
+                        f"User can still redeem voucher manually."
+                    )
+                    # Don't fail the whole purchase if router sync fails
+            else:
+                logger.warning(
+                    f"No active router found for organization {organization.id}. "
+                    f"Hotspot user {hotspot_username} not created on router."
+                )
+
     await db.commit()
 
     logger.info(f"Processed webhook for reference {reference}: status={payment_status}")
@@ -715,3 +838,19 @@ async def get_payment_status(
                 response["hotspot_password"] = voucher.hotspot_password
 
     return response
+
+
+@router.get("/{org_slug}/terms")
+async def get_terms_and_conditions(
+    org_slug: str,
+    organization: Organization = Depends(get_organization_by_slug),
+):
+    """
+    Get organization's terms of service and privacy policy.
+
+    Public endpoint - no authentication required.
+    """
+    return {
+        "terms_of_service": organization.terms_of_service or "Terms of service not configured.",
+        "privacy_policy": organization.privacy_policy or "Privacy policy not configured.",
+    }

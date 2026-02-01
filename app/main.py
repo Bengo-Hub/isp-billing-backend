@@ -271,12 +271,15 @@ register_exception_handlers(app)
 app.add_middleware(RequestIDMiddleware)
 
 # Add CORS middleware
+# In development, allow all origins for easier testing
+cors_origins = settings.cors_origins if settings.is_production else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=cors_origins,
     allow_credentials=settings.cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Add trusted host middleware for production

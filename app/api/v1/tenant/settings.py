@@ -647,3 +647,659 @@ async def update_pppoe_settings(
         session_timeout_minutes=settings.session_timeout_minutes,
         auto_disconnect_expired=settings.auto_disconnect_expired,
     )
+
+
+# =========================================================================
+# Notification Settings
+# =========================================================================
+
+class NotificationSettingsResponse(BaseModel):
+    """Schema for notification settings response."""
+
+    # MikroTik Status
+    enable_mikrotik_status_notifications: bool
+
+    # Payment Confirmation Settings
+    send_hotspot_payment_confirmation: bool
+    hotspot_payment_confirmation_sms: Optional[str]
+    send_pppoe_payment_confirmation: bool
+    pppoe_payment_confirmation_sms: Optional[str]
+
+    # Expiry Notification Settings
+    send_hotspot_expiry_notification: bool
+    hotspot_expiry_notification_sms: Optional[str]
+    send_pppoe_expiry_notification: bool
+    pppoe_expiry_notification_sms: Optional[str]
+
+    # Expiry Reminder Settings
+    send_hotspot_expiry_reminder: bool
+    hotspot_expiry_reminder_sms: Optional[str]
+    send_pppoe_expiry_reminder: bool
+    pppoe_expiry_reminder_sms: Optional[str]
+
+    # Email Reminder Settings
+    enable_email_subscription_reminders: bool
+    send_pppoe_email_reminders: bool
+    pppoe_email_reminder_subject: Optional[str]
+    pppoe_email_reminder_message: Optional[str]
+
+
+class NotificationSettingsUpdate(BaseModel):
+    """Schema for updating notification settings."""
+
+    # MikroTik Status
+    enable_mikrotik_status_notifications: Optional[bool] = None
+
+    # Payment Confirmation Settings
+    send_hotspot_payment_confirmation: Optional[bool] = None
+    hotspot_payment_confirmation_sms: Optional[str] = None
+    send_pppoe_payment_confirmation: Optional[bool] = None
+    pppoe_payment_confirmation_sms: Optional[str] = None
+
+    # Expiry Notification Settings
+    send_hotspot_expiry_notification: Optional[bool] = None
+    hotspot_expiry_notification_sms: Optional[str] = None
+    send_pppoe_expiry_notification: Optional[bool] = None
+    pppoe_expiry_notification_sms: Optional[str] = None
+
+    # Expiry Reminder Settings
+    send_hotspot_expiry_reminder: Optional[bool] = None
+    hotspot_expiry_reminder_sms: Optional[str] = None
+    send_pppoe_expiry_reminder: Optional[bool] = None
+    pppoe_expiry_reminder_sms: Optional[str] = None
+
+    # Email Reminder Settings
+    enable_email_subscription_reminders: Optional[bool] = None
+    send_pppoe_email_reminders: Optional[bool] = None
+    pppoe_email_reminder_subject: Optional[str] = None
+    pppoe_email_reminder_message: Optional[str] = None
+
+
+@router.get("/notifications", response_model=NotificationSettingsResponse)
+async def get_notification_settings(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_isp_admin),
+    organization: Organization = Depends(get_current_organization),
+):
+    """
+    Get notification settings.
+
+    ISP Admin only.
+    """
+    # Get or create settings
+    result = await db.execute(
+        select(OrganizationSettings).where(
+            OrganizationSettings.organization_id == organization.id
+        )
+    )
+    settings = result.scalar_one_or_none()
+
+    if not settings:
+        settings = OrganizationSettings(organization_id=organization.id)
+        db.add(settings)
+        await db.commit()
+        await db.refresh(settings)
+
+    return NotificationSettingsResponse(
+        enable_mikrotik_status_notifications=settings.enable_mikrotik_status_notifications,
+        send_hotspot_payment_confirmation=settings.send_hotspot_payment_confirmation,
+        hotspot_payment_confirmation_sms=settings.hotspot_payment_confirmation_sms,
+        send_pppoe_payment_confirmation=settings.send_pppoe_payment_confirmation,
+        pppoe_payment_confirmation_sms=settings.pppoe_payment_confirmation_sms,
+        send_hotspot_expiry_notification=settings.send_hotspot_expiry_notification,
+        hotspot_expiry_notification_sms=settings.hotspot_expiry_notification_sms,
+        send_pppoe_expiry_notification=settings.send_pppoe_expiry_notification,
+        pppoe_expiry_notification_sms=settings.pppoe_expiry_notification_sms,
+        send_hotspot_expiry_reminder=settings.send_hotspot_expiry_reminder,
+        hotspot_expiry_reminder_sms=settings.hotspot_expiry_reminder_sms,
+        send_pppoe_expiry_reminder=settings.send_pppoe_expiry_reminder,
+        pppoe_expiry_reminder_sms=settings.pppoe_expiry_reminder_sms,
+        enable_email_subscription_reminders=settings.enable_email_subscription_reminders,
+        send_pppoe_email_reminders=settings.send_pppoe_email_reminders,
+        pppoe_email_reminder_subject=settings.pppoe_email_reminder_subject,
+        pppoe_email_reminder_message=settings.pppoe_email_reminder_message,
+    )
+
+
+@router.patch("/notifications", response_model=NotificationSettingsResponse)
+async def update_notification_settings(
+    data: NotificationSettingsUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_isp_admin),
+    organization: Organization = Depends(get_current_organization),
+):
+    """
+    Update notification settings.
+
+    ISP Admin only.
+    """
+    # Get or create settings
+    result = await db.execute(
+        select(OrganizationSettings).where(
+            OrganizationSettings.organization_id == organization.id
+        )
+    )
+    settings = result.scalar_one_or_none()
+
+    if not settings:
+        settings = OrganizationSettings(organization_id=organization.id)
+        db.add(settings)
+
+    # Update fields
+    update_data = data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        if hasattr(settings, field):
+            setattr(settings, field, value)
+
+    await db.commit()
+    await db.refresh(settings)
+
+    return NotificationSettingsResponse(
+        enable_mikrotik_status_notifications=settings.enable_mikrotik_status_notifications,
+        send_hotspot_payment_confirmation=settings.send_hotspot_payment_confirmation,
+        hotspot_payment_confirmation_sms=settings.hotspot_payment_confirmation_sms,
+        send_pppoe_payment_confirmation=settings.send_pppoe_payment_confirmation,
+        pppoe_payment_confirmation_sms=settings.pppoe_payment_confirmation_sms,
+        send_hotspot_expiry_notification=settings.send_hotspot_expiry_notification,
+        hotspot_expiry_notification_sms=settings.hotspot_expiry_notification_sms,
+        send_pppoe_expiry_notification=settings.send_pppoe_expiry_notification,
+        pppoe_expiry_notification_sms=settings.pppoe_expiry_notification_sms,
+        send_hotspot_expiry_reminder=settings.send_hotspot_expiry_reminder,
+        hotspot_expiry_reminder_sms=settings.hotspot_expiry_reminder_sms,
+        send_pppoe_expiry_reminder=settings.send_pppoe_expiry_reminder,
+        pppoe_expiry_reminder_sms=settings.pppoe_expiry_reminder_sms,
+        enable_email_subscription_reminders=settings.enable_email_subscription_reminders,
+        send_pppoe_email_reminders=settings.send_pppoe_email_reminders,
+        pppoe_email_reminder_subject=settings.pppoe_email_reminder_subject,
+        pppoe_email_reminder_message=settings.pppoe_email_reminder_message,
+    )
+
+
+# =========================================================================
+# WhatsApp Settings
+# =========================================================================
+
+class WhatsAppSettingsResponse(BaseModel):
+    """Schema for WhatsApp settings response."""
+
+    whatsapp_provider: Optional[str]
+    whatsapp_enabled: bool
+
+    # Payment Confirmation Settings
+    send_hotspot_payment_confirmation_whatsapp: bool
+    hotspot_payment_confirmation_whatsapp: Optional[str]
+    send_pppoe_payment_confirmation_whatsapp: bool
+    pppoe_payment_confirmation_whatsapp: Optional[str]
+
+    # Expiry Notification Settings
+    send_hotspot_expiry_notification_whatsapp: bool
+    hotspot_expiry_notification_whatsapp: Optional[str]
+    send_pppoe_expiry_notification_whatsapp: bool
+    pppoe_expiry_notification_whatsapp: Optional[str]
+
+    # Expiry Reminder Settings
+    send_hotspot_expiry_reminder_whatsapp: bool
+    hotspot_expiry_reminder_whatsapp: Optional[str]
+    send_pppoe_expiry_reminder_whatsapp: bool
+    pppoe_expiry_reminder_whatsapp: Optional[str]
+
+
+class WhatsAppSettingsUpdate(BaseModel):
+    """Schema for updating WhatsApp settings."""
+
+    whatsapp_provider: Optional[str] = None
+
+    # Payment Confirmation Settings
+    send_hotspot_payment_confirmation_whatsapp: Optional[bool] = None
+    hotspot_payment_confirmation_whatsapp: Optional[str] = None
+    send_pppoe_payment_confirmation_whatsapp: Optional[bool] = None
+    pppoe_payment_confirmation_whatsapp: Optional[str] = None
+
+    # Expiry Notification Settings
+    send_hotspot_expiry_notification_whatsapp: Optional[bool] = None
+    hotspot_expiry_notification_whatsapp: Optional[str] = None
+    send_pppoe_expiry_notification_whatsapp: Optional[bool] = None
+    pppoe_expiry_notification_whatsapp: Optional[str] = None
+
+    # Expiry Reminder Settings
+    send_hotspot_expiry_reminder_whatsapp: Optional[bool] = None
+    hotspot_expiry_reminder_whatsapp: Optional[str] = None
+    send_pppoe_expiry_reminder_whatsapp: Optional[bool] = None
+    pppoe_expiry_reminder_whatsapp: Optional[str] = None
+
+
+class WhatsAppSubscriptionStatusResponse(BaseModel):
+    """Schema for WhatsApp subscription status."""
+
+    is_subscribed: bool
+    is_active: bool
+    status: Optional[str]
+    provider_type: Optional[str]
+    start_date: Optional[str]
+    end_date: Optional[str]
+    next_billing_date: Optional[str]
+    messages_sent_this_month: int
+    is_trial: bool
+    trial_end_date: Optional[str]
+    monthly_fee: float
+    currency: str
+
+
+@router.get("/whatsapp", response_model=WhatsAppSettingsResponse)
+async def get_whatsapp_settings(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_isp_admin),
+    organization: Organization = Depends(get_current_organization),
+):
+    """
+    Get WhatsApp settings.
+
+    ISP Admin only.
+    """
+    # Get or create settings
+    result = await db.execute(
+        select(OrganizationSettings).where(
+            OrganizationSettings.organization_id == organization.id
+        )
+    )
+    settings = result.scalar_one_or_none()
+
+    if not settings:
+        settings = OrganizationSettings(organization_id=organization.id)
+        db.add(settings)
+        await db.commit()
+        await db.refresh(settings)
+
+    return WhatsAppSettingsResponse(
+        whatsapp_provider=settings.whatsapp_provider,
+        whatsapp_enabled=settings.whatsapp_enabled,
+        send_hotspot_payment_confirmation_whatsapp=settings.send_hotspot_payment_confirmation_whatsapp,
+        hotspot_payment_confirmation_whatsapp=settings.hotspot_payment_confirmation_whatsapp,
+        send_pppoe_payment_confirmation_whatsapp=settings.send_pppoe_payment_confirmation_whatsapp,
+        pppoe_payment_confirmation_whatsapp=settings.pppoe_payment_confirmation_whatsapp,
+        send_hotspot_expiry_notification_whatsapp=settings.send_hotspot_expiry_notification_whatsapp,
+        hotspot_expiry_notification_whatsapp=settings.hotspot_expiry_notification_whatsapp,
+        send_pppoe_expiry_notification_whatsapp=settings.send_pppoe_expiry_notification_whatsapp,
+        pppoe_expiry_notification_whatsapp=settings.pppoe_expiry_notification_whatsapp,
+        send_hotspot_expiry_reminder_whatsapp=settings.send_hotspot_expiry_reminder_whatsapp,
+        hotspot_expiry_reminder_whatsapp=settings.hotspot_expiry_reminder_whatsapp,
+        send_pppoe_expiry_reminder_whatsapp=settings.send_pppoe_expiry_reminder_whatsapp,
+        pppoe_expiry_reminder_whatsapp=settings.pppoe_expiry_reminder_whatsapp,
+    )
+
+
+@router.patch("/whatsapp", response_model=WhatsAppSettingsResponse)
+async def update_whatsapp_settings(
+    data: WhatsAppSettingsUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_isp_admin),
+    organization: Organization = Depends(get_current_organization),
+):
+    """
+    Update WhatsApp settings.
+
+    ISP Admin only.
+    """
+    # Get or create settings
+    result = await db.execute(
+        select(OrganizationSettings).where(
+            OrganizationSettings.organization_id == organization.id
+        )
+    )
+    settings = result.scalar_one_or_none()
+
+    if not settings:
+        settings = OrganizationSettings(organization_id=organization.id)
+        db.add(settings)
+
+    # Update fields
+    update_data = data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        if hasattr(settings, field):
+            setattr(settings, field, value)
+
+    await db.commit()
+    await db.refresh(settings)
+
+    return WhatsAppSettingsResponse(
+        whatsapp_provider=settings.whatsapp_provider,
+        whatsapp_enabled=settings.whatsapp_enabled,
+        send_hotspot_payment_confirmation_whatsapp=settings.send_hotspot_payment_confirmation_whatsapp,
+        hotspot_payment_confirmation_whatsapp=settings.hotspot_payment_confirmation_whatsapp,
+        send_pppoe_payment_confirmation_whatsapp=settings.send_pppoe_payment_confirmation_whatsapp,
+        pppoe_payment_confirmation_whatsapp=settings.pppoe_payment_confirmation_whatsapp,
+        send_hotspot_expiry_notification_whatsapp=settings.send_hotspot_expiry_notification_whatsapp,
+        hotspot_expiry_notification_whatsapp=settings.hotspot_expiry_notification_whatsapp,
+        send_pppoe_expiry_notification_whatsapp=settings.send_pppoe_expiry_notification_whatsapp,
+        pppoe_expiry_notification_whatsapp=settings.pppoe_expiry_notification_whatsapp,
+        send_hotspot_expiry_reminder_whatsapp=settings.send_hotspot_expiry_reminder_whatsapp,
+        hotspot_expiry_reminder_whatsapp=settings.hotspot_expiry_reminder_whatsapp,
+        send_pppoe_expiry_reminder_whatsapp=settings.send_pppoe_expiry_reminder_whatsapp,
+        pppoe_expiry_reminder_whatsapp=settings.pppoe_expiry_reminder_whatsapp,
+    )
+
+
+@router.get("/whatsapp/subscription", response_model=WhatsAppSubscriptionStatusResponse)
+async def get_whatsapp_subscription_status(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_isp_admin),
+    organization: Organization = Depends(get_current_organization),
+):
+    """
+    Get WhatsApp subscription status for the organization.
+
+    ISP Admin only.
+    """
+    from app.models.whatsapp import WhatsAppOrganizationSubscription, WhatsAppSubscriptionPackage
+
+    # Get subscription
+    result = await db.execute(
+        select(WhatsAppOrganizationSubscription).where(
+            WhatsAppOrganizationSubscription.organization_id == organization.id
+        )
+    )
+    subscription = result.scalar_one_or_none()
+
+    if not subscription:
+        # Get default package pricing
+        package_result = await db.execute(
+            select(WhatsAppSubscriptionPackage).where(
+                WhatsAppSubscriptionPackage.is_active == True
+            ).limit(1)
+        )
+        package = package_result.scalar_one_or_none()
+
+        return WhatsAppSubscriptionStatusResponse(
+            is_subscribed=False,
+            is_active=False,
+            status=None,
+            provider_type=None,
+            start_date=None,
+            end_date=None,
+            next_billing_date=None,
+            messages_sent_this_month=0,
+            is_trial=False,
+            trial_end_date=None,
+            monthly_fee=float(package.monthly_fee) if package else 500.00,
+            currency=package.currency if package else "KES",
+        )
+
+    return WhatsAppSubscriptionStatusResponse(
+        is_subscribed=True,
+        is_active=subscription.is_active,
+        status=subscription.status.value,
+        provider_type=subscription.provider_type.value,
+        start_date=subscription.start_date.isoformat() if subscription.start_date else None,
+        end_date=subscription.end_date.isoformat() if subscription.end_date else None,
+        next_billing_date=subscription.next_billing_date.isoformat() if subscription.next_billing_date else None,
+        messages_sent_this_month=subscription.messages_sent_this_month,
+        is_trial=subscription.is_trial,
+        trial_end_date=subscription.trial_end_date.isoformat() if subscription.trial_end_date else None,
+        monthly_fee=500.00,  # Fixed 500 KES
+        currency="KES",
+    )
+
+
+class WhatsAppSubscriptionInvoiceRequest(BaseModel):
+    """Request schema for creating WhatsApp subscription invoice."""
+    provider: str = Field(default="APIWAP", description="WhatsApp provider (default: APIWAP)")
+
+
+class WhatsAppSubscriptionInvoiceResponse(BaseModel):
+    """Response schema for WhatsApp subscription invoice creation."""
+    success: bool
+    invoice_id: Optional[int] = None
+    amount: Optional[float] = None
+    currency: Optional[str] = None
+    message: Optional[str] = None
+
+
+@router.post("/whatsapp/subscription/invoice", response_model=WhatsAppSubscriptionInvoiceResponse)
+async def create_whatsapp_subscription_invoice(
+    request_data: WhatsAppSubscriptionInvoiceRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_isp_admin),
+    organization: Organization = Depends(get_current_organization),
+):
+    """
+    Create an invoice for WhatsApp subscription payment.
+
+    This endpoint:
+    1. Gets WhatsApp subscription package details
+    2. Creates an invoice for the monthly subscription
+    3. Returns the invoice_id for payment processing
+
+    The frontend should then use the invoice_id with /payments/paystack/initiate
+    to get the Paystack checkout URL.
+    """
+    from app.models.whatsapp import WhatsAppSubscriptionPackage
+    from app.models.billing import Invoice, InvoiceItem, InvoiceStatus
+    from decimal import Decimal
+    import uuid
+
+    try:
+        # 1. Get WhatsApp subscription package
+        result = await db.execute(
+            select(WhatsAppSubscriptionPackage).where(
+                WhatsAppSubscriptionPackage.is_active == True,
+                WhatsAppSubscriptionPackage.provider_type == request_data.provider
+            ).limit(1)
+        )
+        package = result.scalar_one_or_none()
+
+        if not package:
+            # Fallback to default APIWAP pricing
+            monthly_fee = Decimal("500.00")
+            currency = "KES"
+            description = "WhatsApp Messaging Subscription (APIWAP)"
+        else:
+            monthly_fee = package.monthly_fee
+            currency = package.currency
+            description = f"WhatsApp Messaging Subscription ({package.provider_type.value})"
+
+        # 2. Generate invoice reference
+        invoice_reference = f"WA-SUB-{organization.id}-{uuid.uuid4().hex[:8].upper()}"
+
+        # 3. Create invoice
+        invoice = Invoice(
+            invoice_number=invoice_reference,
+            organization_id=organization.id,
+            customer_id=None,  # Subscription is organization-level
+            amount=monthly_fee,
+            currency=currency,
+            status=InvoiceStatus.PENDING,
+            payment_method="paystack",
+            description=description,
+            metadata={
+                "type": "whatsapp_subscription",
+                "provider": request_data.provider,
+                "user_id": current_user.id,
+            }
+        )
+        db.add(invoice)
+        await db.flush()
+
+        # 4. Add invoice item
+        invoice_item = InvoiceItem(
+            invoice_id=invoice.id,
+            description=description,
+            quantity=1,
+            unit_price=monthly_fee,
+            amount=monthly_fee,
+        )
+        db.add(invoice_item)
+
+        await db.commit()
+        await db.refresh(invoice)
+
+        return WhatsAppSubscriptionInvoiceResponse(
+            success=True,
+            invoice_id=invoice.id,
+            amount=float(monthly_fee),
+            currency=currency,
+            message="Invoice created successfully",
+        )
+
+    except Exception as e:
+        await db.rollback()
+        return WhatsAppSubscriptionInvoiceResponse(
+            success=False,
+            message=f"Failed to create invoice: {str(e)}",
+        )
+
+
+@router.post("/whatsapp/subscribe")
+async def subscribe_to_whatsapp(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_isp_admin),
+    organization: Organization = Depends(get_current_organization),
+):
+    """
+    Subscribe to WhatsApp messaging.
+
+    Creates a WhatsApp subscription for the organization with 7-day trial.
+    Monthly fee: 500 KES
+
+    ISP Admin only.
+    """
+    from app.models.whatsapp import (
+        WhatsAppOrganizationSubscription, WhatsAppSubscriptionPackage,
+        WhatsAppSubscriptionStatus, WhatsAppProviderType
+    )
+    from datetime import datetime, timedelta
+
+    # Check if already subscribed
+    result = await db.execute(
+        select(WhatsAppOrganizationSubscription).where(
+            WhatsAppOrganizationSubscription.organization_id == organization.id
+        )
+    )
+    existing_subscription = result.scalar_one_or_none()
+
+    if existing_subscription:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Organization is already subscribed to WhatsApp"
+        )
+
+    # Get WhatsApp package
+    package_result = await db.execute(
+        select(WhatsAppSubscriptionPackage).where(
+            WhatsAppSubscriptionPackage.is_active == True
+        ).limit(1)
+    )
+    package = package_result.scalar_one_or_none()
+
+    if not package:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="WhatsApp subscription package not found. Please contact support."
+        )
+
+    # Create subscription with trial
+    now = datetime.utcnow()
+    trial_end = now + timedelta(days=package.trial_days)
+    subscription_end = now + timedelta(days=30)  # First month
+
+    subscription = WhatsAppOrganizationSubscription(
+        organization_id=organization.id,
+        package_id=package.id,
+        status=WhatsAppSubscriptionStatus.ACTIVE,
+        provider_type=WhatsAppProviderType.APIWAP,
+        start_date=now,
+        end_date=subscription_end,
+        next_billing_date=trial_end,
+        is_auto_renewal=True,
+        is_trial=True,
+        trial_end_date=trial_end,
+        created_by=current_user.id,
+        activated_at=now,
+    )
+
+    db.add(subscription)
+
+    # Enable WhatsApp in organization settings
+    settings_result = await db.execute(
+        select(OrganizationSettings).where(
+            OrganizationSettings.organization_id == organization.id
+        )
+    )
+    settings = settings_result.scalar_one_or_none()
+
+    if not settings:
+        settings = OrganizationSettings(organization_id=organization.id)
+        db.add(settings)
+
+    settings.whatsapp_enabled = True
+    settings.whatsapp_provider = "apiwap"
+
+    await db.commit()
+    await db.refresh(subscription)
+
+    return {
+        "success": True,
+        "message": "Successfully subscribed to WhatsApp! You have a 7-day free trial.",
+        "subscription": {
+            "status": subscription.status.value,
+            "provider": subscription.provider_type.value,
+            "trial_end_date": subscription.trial_end_date.isoformat(),
+            "next_billing_date": subscription.next_billing_date.isoformat(),
+            "monthly_fee": 500.00,
+            "currency": "KES",
+        }
+    }
+
+
+@router.post("/whatsapp/cancel")
+async def cancel_whatsapp_subscription(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_isp_admin),
+    organization: Organization = Depends(get_current_organization),
+):
+    """
+    Cancel WhatsApp subscription.
+
+    Cancels the WhatsApp subscription at the end of the current billing period.
+
+    ISP Admin only.
+    """
+    from app.models.whatsapp import WhatsAppOrganizationSubscription, WhatsAppSubscriptionStatus
+    from datetime import datetime
+
+    # Get subscription
+    result = await db.execute(
+        select(WhatsAppOrganizationSubscription).where(
+            WhatsAppOrganizationSubscription.organization_id == organization.id
+        )
+    )
+    subscription = result.scalar_one_or_none()
+
+    if not subscription:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active WhatsApp subscription found"
+        )
+
+    # Cancel subscription
+    subscription.status = WhatsAppSubscriptionStatus.CANCELLED
+    subscription.is_auto_renewal = False
+    subscription.cancelled_at = datetime.utcnow()
+
+    # Disable WhatsApp in organization settings
+    settings_result = await db.execute(
+        select(OrganizationSettings).where(
+            OrganizationSettings.organization_id == organization.id
+        )
+    )
+    settings = settings_result.scalar_one_or_none()
+
+    if settings:
+        settings.whatsapp_enabled = False
+
+    await db.commit()
+
+    return {
+        "success": True,
+        "message": "WhatsApp subscription cancelled. Service will end on " + subscription.end_date.strftime("%Y-%m-%d"),
+        "end_date": subscription.end_date.isoformat(),
+    }

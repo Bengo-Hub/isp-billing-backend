@@ -101,6 +101,15 @@ class User(Base):
     payments = relationship("Payment", back_populates="user", cascade="all, delete-orphan", lazy="select", foreign_keys="Payment.user_id")
     tickets = relationship("SupportTicket", back_populates="user", cascade="all, delete-orphan", lazy="select", foreign_keys="SupportTicket.user_id")
     notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan", lazy="select")
+    expenses_added = relationship("Expense", back_populates="added_by", cascade="all, delete-orphan", lazy="select", foreign_keys="Expense.added_by_user_id")
+    expenses_approved = relationship("Expense", back_populates="approved_by", lazy="select", foreign_keys="Expense.approved_by_user_id")
+    system_logs = relationship("SystemLog", back_populates="user", lazy="select", foreign_keys="SystemLog.user_id")
+    campaigns_created = relationship("Campaign", back_populates="created_by", lazy="select", foreign_keys="Campaign.created_by_user_id")
+    assigned_leads = relationship("Lead", back_populates="assigned_to", lazy="select", foreign_keys="Lead.assigned_to_user_id")
+    converted_from_lead = relationship("Lead", back_populates="converted_to_customer", lazy="select", foreign_keys="Lead.converted_to_user_id")
+    leads_created = relationship("Lead", back_populates="created_by", lazy="select", foreign_keys="Lead.created_by_user_id")
+    emails_received = relationship("Email", back_populates="user", lazy="select", foreign_keys="Email.user_id")
+    emails_sent = relationship("Email", back_populates="sent_by", lazy="select", foreign_keys="Email.sent_by_user_id")
 
     @property
     def full_name(self) -> str:

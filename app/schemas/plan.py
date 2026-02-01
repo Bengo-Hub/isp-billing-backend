@@ -98,6 +98,16 @@ class ServicePlanBase(BaseModel):
     auto_renewal: bool = False
     is_popular: bool = False
     sort_order: int = 0
+    # Burst configuration
+    enable_burst: bool = False
+    burst_download: Optional[int] = Field(None, ge=0)
+    burst_upload: Optional[int] = Field(None, ge=0)
+    burst_threshold: Optional[int] = Field(None, ge=0, le=100)
+    burst_time: Optional[int] = Field(None, ge=0)
+    # Schedule configuration
+    enable_schedule: bool = False
+    schedule_start_time: Optional[str] = Field(None, max_length=5)
+    schedule_end_time: Optional[str] = Field(None, max_length=5)
     config: Optional[str] = None
     notes: Optional[str] = None
 
@@ -157,6 +167,16 @@ class ServicePlanUpdate(BaseModel):
     auto_renewal: Optional[bool] = None
     is_popular: Optional[bool] = None
     sort_order: Optional[int] = None
+    # Burst configuration
+    enable_burst: Optional[bool] = None
+    burst_download: Optional[int] = Field(None, ge=0)
+    burst_upload: Optional[int] = Field(None, ge=0)
+    burst_threshold: Optional[int] = Field(None, ge=0, le=100)
+    burst_time: Optional[int] = Field(None, ge=0)
+    # Schedule configuration
+    enable_schedule: Optional[bool] = None
+    schedule_start_time: Optional[str] = Field(None, max_length=5)
+    schedule_end_time: Optional[str] = Field(None, max_length=5)
     config: Optional[str] = None
     notes: Optional[str] = None
 

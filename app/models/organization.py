@@ -133,6 +133,13 @@ class Organization(Base):
     payment_gateways = relationship("PaymentGatewayConfig", back_populates="organization")
     platform_invoices = relationship("PlatformInvoice", back_populates="organization")
     voucher_codes = relationship("VoucherCode", back_populates="organization")
+    whatsapp_subscription = relationship("WhatsAppOrganizationSubscription", back_populates="organization", uselist=False)
+    expenses = relationship("Expense", back_populates="organization")
+    system_logs = relationship("SystemLog", back_populates="organization")
+    campaigns = relationship("Campaign", back_populates="organization")
+    leads = relationship("Lead", back_populates="organization")
+    emails = relationship("Email", back_populates="organization")
+    tickets = relationship("SupportTicket", back_populates="organization")
 
     def __repr__(self) -> str:
         """String representation."""
@@ -283,6 +290,62 @@ class OrganizationSettings(Base):
     enable_webhooks = Column(Boolean, default=False, nullable=False)
     webhook_url = Column(String(500), nullable=True)
     webhook_secret = Column(String(255), nullable=True)
+
+    # Notification Template Settings
+    # MikroTik Status Notifications
+    enable_mikrotik_status_notifications = Column(Boolean, default=False, nullable=False)
+
+    # Payment Confirmation SMS Templates
+    send_hotspot_payment_confirmation = Column(Boolean, default=True, nullable=False)
+    hotspot_payment_confirmation_sms = Column(Text, nullable=True, default="Dear @username, you have successfully subscribed to GoFiNet @package_name. Your subscription will expire on @expiry_date. Your username is @username and password is @password.")
+
+    send_pppoe_payment_confirmation = Column(Boolean, default=True, nullable=False)
+    pppoe_payment_confirmation_sms = Column(Text, nullable=True, default="Dear customer, you have successfully subscribed to GoFiNet @package_name. Your subscription will expire on @expiry_date.")
+
+    # Expiry Notification SMS Templates
+    send_hotspot_expiry_notification = Column(Boolean, default=True, nullable=False)
+    hotspot_expiry_notification_sms = Column(Text, nullable=True, default="Dear @username, your package has expired. Kindly select another package to continue using the internet.")
+
+    send_pppoe_expiry_notification = Column(Boolean, default=True, nullable=False)
+    pppoe_expiry_notification_sms = Column(Text, nullable=True, default="Dear @username, your package has expired. Kindly pay using the paybill @paybill and account number @account_number to continue using the internet.")
+
+    # Expiry Reminder SMS Templates
+    send_hotspot_expiry_reminder = Column(Boolean, default=True, nullable=False)
+    hotspot_expiry_reminder_sms = Column(Text, nullable=True, default="Dear @username, your package will expire in @days_left. Kindly pay using the paybill @paybill and account number @account_number to continue using the internet.")
+
+    send_pppoe_expiry_reminder = Column(Boolean, default=True, nullable=False)
+    pppoe_expiry_reminder_sms = Column(Text, nullable=True, default="Dear @username, your package will expire in @days_left. Kindly pay using the paybill @paybill and account number @account_number to continue using the internet.")
+
+    # Email Subscription Reminder Settings
+    enable_email_subscription_reminders = Column(Boolean, default=True, nullable=False)
+    send_pppoe_email_reminders = Column(Boolean, default=True, nullable=False)
+    pppoe_email_reminder_subject = Column(String(200), nullable=True, default="Your subscription expires in @days_left days")
+    pppoe_email_reminder_message = Column(Text, nullable=True, default="Dear @first_name,<br><br>Your internet subscription will expire in @days_left days on @expiry_date.<br><br>Please renew by paying to paybill @paybill using account number @account_number to avoid service interruption.<br><br>Kind regards,<br>@company_name")
+
+    # WhatsApp Settings
+    whatsapp_provider = Column(String(50), nullable=True)  # apiwap, twilio_whatsapp, etc.
+    whatsapp_enabled = Column(Boolean, default=False, nullable=False)
+
+    # WhatsApp Payment Confirmation Templates
+    send_hotspot_payment_confirmation_whatsapp = Column(Boolean, default=False, nullable=False)
+    hotspot_payment_confirmation_whatsapp = Column(Text, nullable=True, default="Hello @username! 👋\n\nYou've successfully subscribed to *@package_name*\n\n✅ Username: @username\n🔑 Password: @password\n📅 Expires: @expiry_date\n\nThank you for choosing us!")
+
+    send_pppoe_payment_confirmation_whatsapp = Column(Boolean, default=False, nullable=False)
+    pppoe_payment_confirmation_whatsapp = Column(Text, nullable=True, default="Hello! 👋\n\nYour subscription to *@package_name* is now active!\n\n📅 Expires: @expiry_date\n\nThank you for choosing us!")
+
+    # WhatsApp Expiry Notification Templates
+    send_hotspot_expiry_notification_whatsapp = Column(Boolean, default=False, nullable=False)
+    hotspot_expiry_notification_whatsapp = Column(Text, nullable=True, default="Hello @username! 📢\n\nYour internet package has expired. Please purchase a new package to continue browsing.\n\nThank you!")
+
+    send_pppoe_expiry_notification_whatsapp = Column(Boolean, default=False, nullable=False)
+    pppoe_expiry_notification_whatsapp = Column(Text, nullable=True, default="Hello @username! 📢\n\nYour internet subscription has expired.\n\n💳 Paybill: @paybill\n📋 Account: @account_number\n\nRenew now to continue browsing!")
+
+    # WhatsApp Expiry Reminder Templates
+    send_hotspot_expiry_reminder_whatsapp = Column(Boolean, default=False, nullable=False)
+    hotspot_expiry_reminder_whatsapp = Column(Text, nullable=True, default="Hello @username! ⏰\n\nYour package expires in *@days_left days*\n\n📅 Expiry Date: @expiry_date\n💳 Paybill: @paybill\n📋 Account: @account_number\n\nRenew now to avoid interruption!")
+
+    send_pppoe_expiry_reminder_whatsapp = Column(Boolean, default=False, nullable=False)
+    pppoe_expiry_reminder_whatsapp = Column(Text, nullable=True, default="Hello @username! ⏰\n\nYour subscription expires in *@days_left days*\n\n📅 Expiry Date: @expiry_date\n💳 Paybill: @paybill\n📋 Account: @account_number\n\nRenew now to stay connected!")
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

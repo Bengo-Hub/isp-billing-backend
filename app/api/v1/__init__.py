@@ -60,6 +60,7 @@ from .network import router as network_router
 from .business import router as business_router
 from .admin import router as admin_router
 from .support import router as support_router
+from .communications import router as communications_router
 from .integrations import router as integrations_router
 from .provisioning import router as provisioning_router
 from .platform import router as platform_router
@@ -108,6 +109,11 @@ api_router.include_router(admin_router)
 # 6. Support & Analytics
 # =============================================================================
 api_router.include_router(support_router)
+
+# =============================================================================
+# 6.5. Communications
+# =============================================================================
+api_router.include_router(communications_router)
 
 # =============================================================================
 # 7. External Integrations

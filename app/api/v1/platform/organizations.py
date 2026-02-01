@@ -38,6 +38,12 @@ class OrganizationCreate(BaseModel):
     city: Optional[str] = None
     country: str = "Kenya"
     primary_color: str = "#ec4899"
+    secondary_color: Optional[str] = "#8b5cf6"
+    default_currency: str = "KES"
+    timezone: str = "Africa/Nairobi"
+    notification_email: Optional[str] = None
+    notification_phone: Optional[str] = None
+    sms_sender_id: Optional[str] = None
     subscription_tier_id: Optional[int] = None
     trial_days: int = 14
     max_routers: int = 5
@@ -274,6 +280,12 @@ async def create_organization(
         city=data.city,
         country=data.country,
         primary_color=data.primary_color,
+        secondary_color=data.secondary_color,
+        default_currency=data.default_currency,
+        timezone=data.timezone,
+        notification_email=data.notification_email,
+        notification_phone=data.notification_phone,
+        sms_sender_id=data.sms_sender_id,
         subscription_tier_id=data.subscription_tier_id,
         trial_ends_at=trial_ends_at,
         max_routers=data.max_routers,
@@ -285,6 +297,105 @@ async def create_organization(
     db.add(organization)
     await db.commit()
     await db.refresh(organization)
+
+    # Create default organization settings
+    org_settings = OrganizationSettings(
+        organization_id=organization.id,
+        # MikroTik Settings
+        enable_mikrotik_status_notifications=True,
+        # SMS Payment Confirmations
+        send_hotspot_payment_confirmation=True,
+        hotspot_payment_confirmation_sms=(
+            "Hello @username! You've successfully subscribed to @package_name. "
+            "Username: @username, Password: @password, Expires: @expiry_date. Thank you!"
+        ),
+        send_pppoe_payment_confirmation=True,
+        pppoe_payment_confirmation_sms=(
+            "Hello @username! You've successfully subscribed to @package_name. "
+            "Username: @username, Password: @password, Expires: @expiry_date. Thank you!"
+        ),
+        # SMS Expiry Notifications
+        send_hotspot_expiry_notification=True,
+        hotspot_expiry_notification_sms=(
+            "Hello @username! Your @package_name subscription expired on @expiry_date. "
+            "Renew now to continue enjoying our services. Paybill: @paybill, Account: @account_number"
+        ),
+        send_pppoe_expiry_notification=True,
+        pppoe_expiry_notification_sms=(
+            "Hello @username! Your @package_name subscription expired on @expiry_date. "
+            "Renew now to continue enjoying our services. Paybill: @paybill, Account: @account_number"
+        ),
+        # SMS Expiry Reminders
+        send_hotspot_expiry_reminder=True,
+        hotspot_expiry_reminder_sms=(
+            "Hello @username! Your @package_name subscription expires in @days_left days on @expiry_date. "
+            "Renew now to avoid interruption. Paybill: @paybill, Account: @account_number"
+        ),
+        send_pppoe_expiry_reminder=True,
+        pppoe_expiry_reminder_sms=(
+            "Hello @username! Your @package_name subscription expires in @days_left days on @expiry_date. "
+            "Renew now to avoid interruption. Paybill: @paybill, Account: @account_number"
+        ),
+        # WhatsApp Settings (disabled by default - requires subscription)
+        whatsapp_enabled=False,
+        whatsapp_provider=None,
+        send_hotspot_payment_confirmation_whatsapp=False,
+        hotspot_payment_confirmation_whatsapp=(
+            "Hello @username! 👋\n\n"
+            "You've successfully subscribed to *@package_name*\n\n"
+            "✅ Username: @username\n"
+            "🔑 Password: @password\n"
+            "📅 Expires: @expiry_date\n\n"
+            "Thank you for choosing us!"
+        ),
+        send_pppoe_payment_confirmation_whatsapp=False,
+        pppoe_payment_confirmation_whatsapp=(
+            "Hello @username! 👋\n\n"
+            "You've successfully subscribed to *@package_name*\n\n"
+            "✅ Username: @username\n"
+            "🔑 Password: @password\n"
+            "📅 Expires: @expiry_date\n\n"
+            "Thank you for choosing us!"
+        ),
+        send_hotspot_expiry_notification_whatsapp=False,
+        hotspot_expiry_notification_whatsapp=(
+            "Hello @username! ⚠️\n\n"
+            "Your *@package_name* subscription has expired.\n\n"
+            "📅 Expired on: @expiry_date\n"
+            "💳 Paybill: @paybill\n"
+            "📋 Account: @account_number\n\n"
+            "Renew now to continue enjoying our services!"
+        ),
+        send_pppoe_expiry_notification_whatsapp=False,
+        pppoe_expiry_notification_whatsapp=(
+            "Hello @username! ⚠️\n\n"
+            "Your *@package_name* subscription has expired.\n\n"
+            "📅 Expired on: @expiry_date\n"
+            "💳 Paybill: @paybill\n"
+            "📋 Account: @account_number\n\n"
+            "Renew now to continue enjoying our services!"
+        ),
+        send_hotspot_expiry_reminder_whatsapp=False,
+        hotspot_expiry_reminder_whatsapp=(
+            "Hello @username! ⏰\n\n"
+            "Your package expires in *@days_left days*\n\n"
+            "📅 Expiry Date: @expiry_date\n"
+            "💳 Paybill: @paybill\n"
+            "📋 Account: @account_number\n\n"
+            "Renew now to avoid interruption!"
+        ),
+        send_pppoe_expiry_reminder_whatsapp=False,
+        pppoe_expiry_reminder_whatsapp=(
+            "Hello @username! ⏰\n\n"
+            "Your package expires in *@days_left days*\n\n"
+            "📅 Expiry Date: @expiry_date\n"
+            "💳 Paybill: @paybill\n"
+            "📋 Account: @account_number\n\n"
+            "Renew now to avoid interruption!"
+        ),
+    )
+    db.add(org_settings)
+    await db.commit()
 
     return OrganizationResponse(
         **organization.to_dict(),

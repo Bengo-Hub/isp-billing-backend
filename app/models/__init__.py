@@ -25,6 +25,11 @@ from .router import Router, RouterDevice, RouterLog
 from .plan import ServicePlan, PlanFeature, PlanPricing
 from .subscription import Subscription, SubscriptionUsageLog, SubscriptionHistory
 from .billing import Invoice, InvoiceItem, Payment, PaymentLog, BillingCycle
+from .expense import Expense, ExpenseStatus, ExpenseCategory
+from .system_log import SystemLog, LogLevel
+from .campaign import Campaign, CampaignType, CampaignStatus
+from .lead import Lead, LeadStatus, LeadSource
+from .email import Email, EmailStatus
 from .notification import Notification, SupportTicket, TicketMessage, NotificationTemplate
 from .provisioning import (
     ProvisioningSession, ProvisioningStepLog, ProvisioningCommand,
@@ -43,6 +48,11 @@ from .package_template import (
 from .sms_credit import (
     SMSCreditAccount, SMSTransaction, SMSTopUp, SMSCreditAlert,
     PhoneNumberManagement, SMSCreditUsageStats
+)
+from .whatsapp import (
+    WhatsAppGatewayConfig, WhatsAppSubscriptionPackage, WhatsAppOrganizationSubscription,
+    WhatsAppSubscriptionPayment, WhatsAppMessage, PlatformWhatsAppSettings,
+    WhatsAppProviderType, WhatsAppGatewayStatus, WhatsAppSubscriptionStatus, WhatsAppTransactionStatus
 )
 from .rbac import (
     Role, Permission, UserPermission, SystemLicence,
@@ -119,6 +129,29 @@ __all__ = [
     "PaymentLog",
     "BillingCycle",
 
+    # Expenses
+    "Expense",
+    "ExpenseStatus",
+    "ExpenseCategory",
+
+    # System Logs
+    "SystemLog",
+    "LogLevel",
+
+    # Campaigns
+    "Campaign",
+    "CampaignType",
+    "CampaignStatus",
+
+    # Leads
+    "Lead",
+    "LeadStatus",
+    "LeadSource",
+
+    # Emails
+    "Email",
+    "EmailStatus",
+
     # Notifications
     "Notification",
     "SupportTicket",
@@ -162,6 +195,18 @@ __all__ = [
     "SMSCreditAlert",
     "PhoneNumberManagement",
     "SMSCreditUsageStats",
+
+    # WhatsApp
+    "WhatsAppGatewayConfig",
+    "WhatsAppSubscriptionPackage",
+    "WhatsAppOrganizationSubscription",
+    "WhatsAppSubscriptionPayment",
+    "WhatsAppMessage",
+    "PlatformWhatsAppSettings",
+    "WhatsAppProviderType",
+    "WhatsAppGatewayStatus",
+    "WhatsAppSubscriptionStatus",
+    "WhatsAppTransactionStatus",
 
     # RBAC
     "Role",

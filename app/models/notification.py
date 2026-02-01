@@ -125,7 +125,10 @@ class SupportTicket(Base):
 
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
-    
+
+    # Organization (tenant)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+
     # Foreign keys
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -155,6 +158,7 @@ class SupportTicket(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationships
+    organization = relationship("Organization", back_populates="tickets")
     user = relationship("User", back_populates="tickets", foreign_keys=[user_id])
     assignee = relationship("User", foreign_keys=[assigned_to])
     messages = relationship("TicketMessage", back_populates="ticket", cascade="all, delete-orphan")

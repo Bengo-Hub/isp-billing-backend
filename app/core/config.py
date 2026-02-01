@@ -68,7 +68,14 @@ class Settings(BaseSettings):
     force_https: bool = False  # Force HTTPS for all integration URLs
 
     # CORS
-    cors_origins: List[str] = ["http://localhost:3000", "http://localhost:3001"]
+    cors_origins: List[str] = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://192.168.100.4:3000",
+        "http://192.168.100.4:3001",
+        "http://172.31.255.221:3000",
+        "http://172.31.255.221:3001",
+    ]
     cors_allow_credentials: bool = True
 
     # MPESA

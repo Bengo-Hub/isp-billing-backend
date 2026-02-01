@@ -409,7 +409,17 @@ async def get_available_gateways(
         .order_by(PaymentGatewayConfig.is_primary.desc(), PaymentGatewayConfig.name)
     )
     gateways = list(result.scalars().all())
-    
+
+    # Sort to prioritize Paystack first (primary gateway), then others
+    def gateway_sort_key(g):
+        # Paystack gets priority 0, others get priority 1
+        is_paystack = 0 if g.gateway_type == GatewayType.PAYSTACK else 1
+        # Primary gateways come before non-primary
+        is_primary = 0 if g.is_primary else 1
+        return (is_paystack, is_primary, g.name)
+
+    gateways.sort(key=gateway_sort_key)
+
     # Build response with gateway info
     gateway_info = []
     for g in gateways:

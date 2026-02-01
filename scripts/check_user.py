@@ -9,13 +9,16 @@ from app.core.database import AsyncSessionLocal
 from app.models.user import User
 
 async def main():
+    # Get username from command line args or use default
+    username = sys.argv[1] if len(sys.argv) > 1 else "codevertexadmin"
+
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(User).where(User.username == "demoispadmin"))
+        result = await db.execute(select(User).where(User.username == username))
         user = result.scalar_one_or_none()
         if not user:
-            print("NOT FOUND")
+            print(f"NOT FOUND: {username}")
             return
-        print("FOUND")
+        print(f"FOUND: {username}")
         print("id:", user.id)
         print("username:", user.username)
         print("email:", user.email)

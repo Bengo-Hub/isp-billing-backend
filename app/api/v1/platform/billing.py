@@ -358,6 +358,171 @@ async def list_payments(
     )
 
 
+@router.get("/payments/{payment_id}", response_model=PlatformPaymentResponse)
+async def get_payment_details(
+    payment_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_platform_owner),
+):
+    """
+    Get payment details by ID.
+
+    Platform owner only.
+    """
+    result = await db.execute(
+        select(PlatformPayment).where(PlatformPayment.id == payment_id)
+    )
+    payment = result.scalar_one_or_none()
+
+    if not payment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Payment not found"
+        )
+
+    return PlatformPaymentResponse.model_validate(payment)
+
+
+class RefundPaymentRequest(BaseModel):
+    """Request schema for payment refund."""
+    amount: Optional[float] = Field(None, description="Partial refund amount (leave empty for full refund)")
+    reason: str = Field(..., description="Reason for refund")
+
+
+class RefundPaymentResponse(BaseModel):
+    """Response schema for payment refund."""
+    success: bool
+    message: str
+    refund_reference: Optional[str] = None
+    refunded_amount: Optional[float] = None
+
+
+@router.post("/payments/{payment_id}/refund", response_model=RefundPaymentResponse)
+async def refund_payment(
+    payment_id: int,
+    refund_request: RefundPaymentRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_platform_owner),
+):
+    """
+    Initiate a refund for a payment.
+
+    Platform owner only.
+    Supports both full and partial refunds.
+    """
+    from decimal import Decimal
+    from app.integrations.payment_gateways import PaymentGatewayFactory
+    from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
+    from app.models.billing import Invoice
+
+    # 1. Get the payment
+    result = await db.execute(
+        select(PlatformPayment).where(PlatformPayment.id == payment_id)
+    )
+    payment = result.scalar_one_or_none()
+
+    if not payment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Payment not found"
+        )
+
+    # 2. Check if payment is refundable
+    if payment.status != PaymentStatus.COMPLETED:
+        return RefundPaymentResponse(
+            success=False,
+            message=f"Cannot refund payment with status: {payment.status.value}",
+        )
+
+    if not payment.transaction_id:
+        return RefundPaymentResponse(
+            success=False,
+            message="Payment has no transaction reference",
+        )
+
+    # 3. Get payment gateway configuration
+    # Determine which gateway was used based on payment metadata or method
+    gateway_type = GatewayType.PAYSTACK  # Default to Paystack for platform payments
+
+    result = await db.execute(
+        select(PaymentGatewayConfig).where(
+            PaymentGatewayConfig.gateway_type == gateway_type,
+            PaymentGatewayConfig.is_active == True,
+            PaymentGatewayConfig.organization_id.is_(None),  # Platform-level gateway
+        ).limit(1)
+    )
+    gateway_config = result.scalar_one_or_none()
+
+    if not gateway_config:
+        return RefundPaymentResponse(
+            success=False,
+            message="Payment gateway not configured",
+        )
+
+    # 4. Initialize payment gateway
+    try:
+        gateway = PaymentGatewayFactory.create(gateway_config)
+    except Exception as e:
+        return RefundPaymentResponse(
+            success=False,
+            message=f"Failed to initialize payment gateway: {str(e)}",
+        )
+
+    # 5. Process refund
+    try:
+        refund_amount = Decimal(str(refund_request.amount)) if refund_request.amount else None
+
+        refund_result = await gateway.refund_payment(
+            transaction_reference=payment.transaction_id,
+            amount=refund_amount,
+            reason=refund_request.reason,
+        )
+
+        if refund_result.success:
+            # Update payment status
+            payment.status = PaymentStatus.REFUNDED
+            payment.metadata = payment.metadata or {}
+            payment.metadata["refund"] = {
+                "refund_reference": refund_result.refund_reference,
+                "refund_amount": float(refund_result.amount) if refund_result.amount else float(payment.amount),
+                "refund_reason": refund_request.reason,
+                "refunded_by": current_user.id,
+                "refunded_at": datetime.utcnow().isoformat(),
+            }
+
+            # If there's an associated invoice, update it
+            if payment.invoice_id:
+                invoice_result = await db.execute(
+                    select(Invoice).where(Invoice.id == payment.invoice_id)
+                )
+                invoice = invoice_result.scalar_one_or_none()
+                if invoice:
+                    invoice.status = InvoiceStatus.CANCELLED
+                    invoice.metadata = invoice.metadata or {}
+                    invoice.metadata["refund_info"] = payment.metadata["refund"]
+
+            await db.commit()
+
+            return RefundPaymentResponse(
+                success=True,
+                message=refund_result.message or "Refund processed successfully",
+                refund_reference=refund_result.refund_reference,
+                refunded_amount=float(refund_result.amount) if refund_result.amount else float(payment.amount),
+            )
+        else:
+            return RefundPaymentResponse(
+                success=False,
+                message=refund_result.message or "Refund failed",
+            )
+
+    except Exception as e:
+        await db.rollback()
+        return RefundPaymentResponse(
+            success=False,
+            message=f"Refund processing error: {str(e)}",
+        )
+
+
 @router.post("/webhooks/paystack")
 async def paystack_webhook(
     payload: dict,
