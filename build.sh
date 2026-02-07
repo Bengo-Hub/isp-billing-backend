@@ -76,7 +76,7 @@ if [[ ${DEPLOY} == "true" ]]; then
   SYNC_SCRIPT=$(mktemp)
   if curl -fsSL https://raw.githubusercontent.com/Bengo-Hub/devops-k8s/main/scripts/tools/check-and-sync-secrets.sh -o "$SYNC_SCRIPT" 2>/dev/null; then
     source "$SYNC_SCRIPT"
-    check_and_sync_secrets "KUBE_CONFIG" "REGISTRY_USERNAME" "REGISTRY_PASSWORD" "GITHUB_TOKEN" "POSTGRES_PASSWORD" "REDIS_PASSWORD" || warn "Secret sync failed - continuing with existing secrets"
+    check_and_sync_secrets "KUBE_CONFIG" "REGISTRY_USERNAME" "REGISTRY_PASSWORD" "GIT_TOKEN" "POSTGRES_PASSWORD" "REDIS_PASSWORD" || warn "Secret sync failed - continuing with existing secrets"
     rm -f "$SYNC_SCRIPT"
   else
     warn "Unable to download secret sync script - continuing with existing secrets"
@@ -148,7 +148,7 @@ if [[ "$SETUP_DATABASES" == "true" && -n "${KUBE_CONFIG:-}" ]]; then
 
     # Ensure devops repo is available
     if [[ ! -d "$DEVOPS_DIR" ]]; then
-      TOKEN="${GH_PAT:-${GIT_SECRET:-${GITHUB_TOKEN:-}}}"
+      TOKEN="${GH_PAT:-${GIT_SECRET:-${GIT_TOKEN:-}}}"
       CLONE_URL="https://github.com/${DEVOPS_REPO}.git"
       [[ -n $TOKEN ]] && CLONE_URL="https://x-access-token:${TOKEN}@github.com/${DEVOPS_REPO}.git"
       git clone "$CLONE_URL" "$DEVOPS_DIR" || warn "Unable to clone devops repo for database setup"
