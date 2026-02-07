@@ -104,8 +104,28 @@ fi
 # =============================================================================
 # DOCKER PUSH
 # =============================================================================
-if [[ -n ${REGISTRY_USERNAME:-} && -n ${REGISTRY_PASSWORD:-} ]]; then
-  echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY_SERVER" -u "$REGISTRY_USERNAME" --password-stdin
+info "Preparing to push image to registry..."
+echo "[DEBUG] REGISTRY_SERVER: ${REGISTRY_SERVER}"
+echo "[DEBUG] REGISTRY_USERNAME: ${REGISTRY_USERNAME:-<not set>}"
+echo "[DEBUG] REGISTRY_PASSWORD length: ${#REGISTRY_PASSWORD} chars"
+echo "[DEBUG] Image: ${IMAGE_REPO}:${GIT_COMMIT_ID}"
+
+if [[ -z ${REGISTRY_USERNAME:-} ]]; then
+  error "REGISTRY_USERNAME is not set - cannot login to Docker registry"
+  exit 1
+fi
+
+if [[ -z ${REGISTRY_PASSWORD:-} ]]; then
+  error "REGISTRY_PASSWORD is not set - cannot login to Docker registry"
+  exit 1
+fi
+
+info "Logging in to Docker registry..."
+if echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY_SERVER" -u "$REGISTRY_USERNAME" --password-stdin; then
+  success "Docker login successful"
+else
+  error "Docker login failed"
+  exit 1
 fi
 
 docker push "${IMAGE_REPO}:${GIT_COMMIT_ID}"
