@@ -1,5 +1,7 @@
 """Middleware for auto-seeding demo and superuser accounts."""
 
+import logging
+
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy.orm import Session
@@ -11,6 +13,8 @@ from app.models.user import User, UserRole, UserStatus
 from app.models.rbac import Role, SystemLicence, Permission, UserPermission
 from app.modules.auth import RBACService
 from sqlalchemy.orm import sessionmaker
+
+logger = logging.getLogger(__name__)
 
 
 class SeedMiddleware(BaseHTTPMiddleware):
@@ -47,14 +51,14 @@ class SeedMiddleware(BaseHTTPMiddleware):
             rbac_service = RBACService(db)
             
             # Initialize system roles and permissions
-            print("Initializing RBAC system...")
+            logger.info("Initializing RBAC system...")
             roles = rbac_service.initialize_system_roles_and_permissions()
-            print(f"Created {len(roles)} system roles")
+            logger.info(f"Created {len(roles)} system roles")
             
-            # Ensure superuser account exists
+            # Ensure superuser account exists (always needed)
             superuser = db.query(User).filter(User.username == "superuser").first()
             if not superuser:
-                print("Creating superuser account...")
+                logger.info("Creating superuser account...")
                 superuser_role = roles["superuser"]
                 superuser = User(
                     username="superuser",
@@ -62,7 +66,7 @@ class SeedMiddleware(BaseHTTPMiddleware):
                     first_name="Super",
                     last_name="User",
                     company_name="Codevertex IT Solutions",
-                    hashed_password=get_password_hash("superuser123"),
+                    hashed_password=get_password_hash(settings.master_password or "superuser123"),
                     role=UserRole.SUPERUSER,
                     status=UserStatus.ACTIVE,
                     is_verified=True,
@@ -70,64 +74,64 @@ class SeedMiddleware(BaseHTTPMiddleware):
                 )
                 superuser.role_obj = superuser_role
                 db.add(superuser)
-                print("Superuser account created")
+                logger.info("Superuser account created")
             else:
                 # Ensure superuser has the correct role
                 if not superuser.role_obj or superuser.role_obj.name != "superuser":
                     superuser.role_obj = roles["superuser"]
-                    print("Superuser role updated")
+                    logger.info("Superuser role updated")
             
-            # Ensure demo admin account exists
-            demo_admin = db.query(User).filter(User.username == "demo").first()
-            if not demo_admin:
-                print("Creating demo admin account...")
-                admin_role = roles["admin"]
-                demo_admin = User(
-                    username="demo",
-                    email="demo@codevertexitsolutions.com",
-                    first_name="Demo",
-                    last_name="Admin",
-                    company_name="Demo ISP Company",
-                    hashed_password=get_password_hash("demo123"),
-                    role=UserRole.ADMIN,
-                    status=UserStatus.ACTIVE,
-                    is_verified=True,
-                    is_active=True
-                )
-                demo_admin.role_obj = admin_role
-                db.add(demo_admin)
-                print("Demo admin account created")
-            else:
-                # Ensure demo admin has the correct role
-                if not demo_admin.role_obj or demo_admin.role_obj.name != "admin":
-                    demo_admin.role_obj = roles["admin"]
-                    print("Demo admin role updated")
-            
-            # Ensure demo licence exists
-            demo_licence = db.query(SystemLicence).filter(SystemLicence.licence_key == "DEMO-TRIAL-2024").first()
-            if not demo_licence:
-                print("Creating demo licence...")
-                demo_licence = rbac_service.create_system_licence(
-                    licence_key="DEMO-TRIAL-2024",
-                    organization_name="Demo ISP Company",
-                    contact_email="demo@codevertexitsolutions.com",
-                    contact_phone="+254 700 000 000",
-                    licence_type="trial",
-                    trial_days=14,
-                    max_users=100,
-                    max_routers=20
-                )
-                # Activate the trial
-                rbac_service.activate_licence_trial(demo_licence.id)
-                print("Demo licence created and activated")
+            # Demo accounts and licence only in non-production environments
+            if not settings.is_production:
+                # Ensure demo admin account exists
+                demo_admin = db.query(User).filter(User.username == "demo").first()
+                if not demo_admin:
+                    logger.info("Creating demo admin account (dev/staging only)...")
+                    admin_role = roles["admin"]
+                    demo_admin = User(
+                        username="demo",
+                        email="demo@codevertexitsolutions.com",
+                        first_name="Demo",
+                        last_name="Admin",
+                        company_name="Demo ISP Company",
+                        hashed_password=get_password_hash("demo123"),
+                        role=UserRole.ADMIN,
+                        status=UserStatus.ACTIVE,
+                        is_verified=True,
+                        is_active=True
+                    )
+                    demo_admin.role_obj = admin_role
+                    db.add(demo_admin)
+                    logger.info("Demo admin account created")
+                else:
+                    # Ensure demo admin has the correct role
+                    if not demo_admin.role_obj or demo_admin.role_obj.name != "admin":
+                        demo_admin.role_obj = roles["admin"]
+                        logger.info("Demo admin role updated")
+                
+                # Ensure demo licence exists
+                demo_licence = db.query(SystemLicence).filter(SystemLicence.licence_key == "DEMO-TRIAL-2024").first()
+                if not demo_licence:
+                    logger.info("Creating demo licence...")
+                    demo_licence = rbac_service.create_system_licence(
+                        licence_key="DEMO-TRIAL-2024",
+                        organization_name="Demo ISP Company",
+                        contact_email="demo@codevertexitsolutions.com",
+                        contact_phone="+254 700 000 000",
+                        licence_type="trial",
+                        trial_days=14,
+                        max_users=100,
+                        max_routers=20
+                    )
+                    # Activate the trial
+                    rbac_service.activate_licence_trial(demo_licence.id)
+                    logger.info("Demo licence created and activated")
             
             db.commit()
-            print("RBAC system initialization completed successfully")
+            logger.info("RBAC system initialization completed successfully")
             
         except Exception as e:
-            print(f"Error seeding accounts: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Error seeding accounts: {e}", exc_info=True)
             db.rollback()
         finally:
             db.close()

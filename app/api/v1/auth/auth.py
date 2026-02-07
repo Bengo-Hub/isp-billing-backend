@@ -83,6 +83,35 @@ async def login(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Inactive user"
         )
+
+    # Check if 2FA is enabled — return challenge token instead of full access
+    from sqlalchemy import select as sa_select
+    from app.models.user_settings import UserSettings
+    from app.core.security import create_2fa_challenge_token
+
+    settings_result = await db.execute(
+        sa_select(UserSettings).where(UserSettings.user_id == user.id)
+    )
+    user_settings = settings_result.scalar_one_or_none()
+
+    if (
+        user_settings
+        and user_settings.two_factor_enabled
+        and user_settings.two_factor_confirmed_at
+    ):
+        challenge_token = create_2fa_challenge_token(
+            user_id=user.id,
+            username=user.username,
+            role=user.role.value,
+            organization_id=user.organization_id,
+        )
+        return {
+            "data": {
+                "requires_2fa": True,
+                "temp_token": challenge_token,
+                "message": "Two-factor authentication required.",
+            }
+        }
     
     # Create tokens
     token_data = create_token_pair(

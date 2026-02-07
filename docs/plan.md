@@ -1,8 +1,8 @@
 # ISP Billing System - Backend Implementation Plan
 
-**Document Version:** 2.0
-**Last Updated:** 2026-01-26
-**Project Status:** 85% Complete
+**Document Version:** 2.1
+**Last Updated:** 2026-02-01
+**Project Status:** 88% Complete
 **Target:** 100% Production-Ready Multi-Tenant ISP Billing Platform
 
 ---
@@ -92,6 +92,8 @@ This plan outlines the comprehensive backend implementation for a production-rea
 | Router CRUD endpoints | COMPLETED | Full management |
 | PPPoE user handlers | COMPLETED | Profile management |
 | Hotspot user handlers | COMPLETED | Voucher support |
+| Hotspot login endpoint | COMPLETED | Two-strategy auth (voucher → subscription), MikroTik sync |
+| Voucher management CRUD | COMPLETED | Admin generate/list/update/delete via /business/vouchers |
 | Usage data fetching | COMPLETED | Real-time metrics |
 | Connection monitoring | COMPLETED | CPU, memory, uptime |
 
@@ -238,12 +240,16 @@ This plan outlines the comprehensive backend implementation for a production-rea
 - css_custom_overrides
 
 #### Sprint 12: Captive Portal Customization
-**Status:** PENDING
+**Status:** PARTIAL
 **Priority:** HIGH
 **Estimated Duration:** 1 week
 
 | Task | Status | Notes |
 |------|--------|-------|
+| Hotspot portal login API | COMPLETED | POST /{org_slug}/login with voucher + subscription auth |
+| MikroTik user sync on login | COMPLETED | Auto-creates/updates hotspot user with plan limits |
+| Hotspot portal config/packages/purchase | COMPLETED | Full purchase flow with M-PESA/Paystack |
+| PPPoE portal login/purchase | COMPLETED | Full PPPoE customer portal |
 | Captive portal templates | PENDING | Customizable HTML/CSS |
 | Portal asset management | PENDING | Images, backgrounds |
 | Welcome message config | PENDING | Custom messaging |
@@ -322,13 +328,13 @@ This plan outlines the comprehensive backend implementation for a production-rea
 ### Phase 8: Security Hardening (PENDING)
 
 #### Sprint 17: Authentication Enhancement
-**Status:** PENDING
+**Status:** IN PROGRESS
 **Priority:** CRITICAL
 **Estimated Duration:** 1 week
 
 | Task | Status | Notes |
 |------|--------|-------|
-| 2FA TOTP implementation | PENDING | Authenticator app support |
+| 2FA TOTP implementation | COMPLETED | pyotp + QR setup, recovery codes, challenge login flow |
 | Password policy enforcement | PENDING | Complexity, history |
 | Session management | PENDING | Device tracking, logout all |
 | Brute force protection | PENDING | Account lockout |
@@ -459,7 +465,8 @@ This plan outlines the comprehensive backend implementation for a production-rea
 |--------|-----------|--------|
 | Tenants | 15 | PENDING |
 | Branding | 10 | PENDING |
-| Captive Portal | 8 | PENDING |
+| Captive Portal | 12 | PARTIAL (6/12 done) |
+| Voucher Management | 6 | COMPLETED |
 | Paystack | 7 | PENDING |
 
 ---
@@ -542,7 +549,7 @@ This plan outlines the comprehensive backend implementation for a production-rea
 | API Response Time (P95) | < 200ms | ~150ms |
 | Uptime | 99.9% | N/A (dev) |
 | Test Coverage | > 80% | ~40% |
-| API Endpoints | 220+ | 180+ |
+| API Endpoints | 220+ | 195+ |
 | Database Tables | 50+ | 40+ |
 
 ---
@@ -568,13 +575,44 @@ This plan outlines the comprehensive backend implementation for a production-rea
 
 ## Next Actions
 
-1. **Immediate:** Begin Sprint 9 (Tenant Foundation)
-2. **Week 2:** Sprint 10 (Tenant Configuration)
+1. **Immediate:** Complete Sprint 12 remaining (portal templates, branding assets)
+2. **Week 1-2:** Sprint 9-10 (Tenant Foundation & Configuration)
 3. **Week 3:** Sprint 11 (Tenant Branding)
-4. **Week 4:** Sprint 12 (Captive Portal)
+4. **Week 4-5:** Sprint 13 (Paystack full integration)
 5. **Week 5-6:** Security Hardening (Sprint 17-18)
 6. **Week 7-8:** Performance Optimization (Sprint 15-16)
 7. **Week 9-10:** Testing & Documentation (Sprint 21)
+
+---
+
+## Recent Changes (Sprint Delta)
+
+### 2FA TOTP — Full Implementation
+- **Dependencies**: Added `pyotp>=2.9.0`, `qrcode[pil]>=7.4.0` to `pyproject.toml`.
+- **Model**: Added `totp_secret`, `recovery_codes` (JSON), `two_factor_confirmed_at` columns to `UserSettings`.
+- **API** (`api/v1/auth/two_factor.py`): New endpoints — GET `/2fa/status`, POST `/2fa/setup` (QR + TOTP secret), POST `/2fa/verify` (confirms setup, generates recovery codes), POST `/2fa/disable` (password-protected), GET `/2fa/recovery-codes` (regenerate), POST `/2fa/authenticate` (login 2FA challenge).
+- **Login flow** (`auth.py`): When `two_factor_enabled` + `two_factor_confirmed_at` is set, returns `{requires_2fa: true, temp_token}` instead of tokens. The temp_token is a 5-minute `2fa_challenge` JWT.
+- **Security** (`core/security.py`): Added `create_2fa_challenge_token()`.
+
+### IP Bindings — Backend API
+- **API** (`api/v1/network/ip_bindings.py`): CRUD endpoints for MikroTik `/ip/hotspot/ip-binding` — list, create, update, delete. Reads/writes directly to router (no local DB model). Supports `regular`, `bypassed`, `blocked` binding types.
+- **Route registration** (`network/__init__.py`): Added `/ip-bindings` prefix.
+
+### Bandwidth Unit Conversion Bug Fix
+- **`modules/subscriptions/bandwidth_manager.py`**: Fixed `_sync_hotspot_profile()`, `_sync_ppp_profile()`, and `create_user_queue()` — plan stores speeds in Mbps but `format_rate_limit()` expects Kbps. Now multiplies by 1000 at call sites (e.g., 10 Mbps → `10000k` instead of wrong `10k`).
+
+### PPPoE Paystack Callback Fix
+- **`api/v1/portal/pppoe.py`**: Added `request: Request` parameter and `callback_url` construction for Paystack redirects in `renew_subscription` endpoint. Mirrors the hotspot portal pattern — uses `request.headers.get('origin')` to build the frontend callback URL.
+
+### 2FA Alembic Migration
+- **Migration** (`alembic/versions/a2f8c94d1e3b_add_2fa_totp_columns_to_user_settings.py`): Adds `totp_secret` (String 255), `recovery_codes` (JSON), `two_factor_confirmed_at` (DateTime) to `user_settings` table. Revision chain: 7f442b4e719a → a2f8c94d1e3b.
+
+### Production Hardening
+- **Logging cleanup** (`core/seed_middleware.py`, `core/security.py`): Replaced all `print()` statements with proper `logging.getLogger(__name__)` calls.
+- **Demo account safety** (`core/seed_middleware.py`): Demo accounts and licences now only seeded when `not settings.is_production`.
+- **TrustedHostMiddleware** (`main.py`): Now uses configurable `settings.allowed_hosts` instead of hardcoded domains.
+- **OpenAPI demo credentials** (`main.py`): Full demo info shown only in development; minimal info in production.
+- **Config** (`core/config.py`): Added `allowed_hosts: Optional[str]` setting for TrustedHostMiddleware.
 
 ---
 

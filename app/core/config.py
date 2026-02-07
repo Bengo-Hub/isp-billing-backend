@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     ]
     cors_allow_credentials: bool = True
 
+    # Trusted hosts (comma-separated for production)
+    allowed_hosts: Optional[str] = None  # e.g., "api.example.com,*.example.com"
+
     # MPESA
     mpesa_environment: str = "sandbox"
     mpesa_consumer_key: str

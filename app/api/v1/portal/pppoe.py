@@ -506,6 +506,7 @@ async def get_available_plans(
 async def renew_subscription(
     org_slug: str,
     data: RenewalRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     organization: Organization = Depends(get_organization_by_slug),
     user_id: int = Query(..., description="Customer user ID"),
@@ -571,11 +572,19 @@ async def renew_subscription(
     db.add(payment)
     await db.commit()
 
+    # Build callback URL for Paystack browser redirects
+    callback_url = None
+    if gateway_config.gateway_type.value == "paystack":
+        origin = request.headers.get("origin", "")
+        if origin:
+            callback_url = f"{origin}/payment/callback"
+
     result = await gateway.initiate_payment(
         amount=Decimal(str(plan.price)),
         phone_number=data.phone_number,
         reference=reference,
         description=f"Renewal - {plan.name}",
+        callback_url=callback_url,
         metadata={
             "organization_id": organization.id,
             "user_id": user_id,

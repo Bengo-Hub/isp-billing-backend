@@ -6,8 +6,11 @@ Public endpoints for hotspot customers to:
 - Purchase packages via M-PESA
 - Redeem voucher codes
 - Check session status
+- Login and reconnect (returning users)
 """
 
+import logging
+import secrets
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import List, Optional
@@ -16,17 +19,21 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db
 from app.api.deps_tenant import get_organization_by_slug
 from app.models.organization import Organization
 from app.models.plan import ServicePlan, PlanType, PlanStatus
 from app.models.customer_portal import VoucherCode, CustomerSession, CustomerPurchase, VoucherStatus, SessionStatus
+from app.models.subscription import Subscription, SubscriptionStatus
 from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
 from app.models.router import Router
 from app.integrations.payment_gateways import PaymentGatewayFactory
 from app.integrations.mikrotik import get_mikrotik_client
 from app.utils.hotspot_username import generate_hotspot_credentials
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/hotspot", tags=["Portal - Hotspot"])
 
@@ -113,6 +120,26 @@ class PortalConfigResponse(BaseModel):
     portal_description: Optional[str]
     show_packages: bool
     allow_guest_purchases: bool
+
+
+class HotspotLoginRequest(BaseModel):
+    """Schema for hotspot login (returning users)."""
+
+    username: str = Field(..., min_length=1, max_length=50)
+    password: str = Field(..., min_length=1, max_length=255)
+    mac_address: Optional[str] = Field(None, description="Client MAC from captive redirect")
+
+
+class HotspotLoginResponse(BaseModel):
+    """Schema for hotspot login response."""
+
+    success: bool
+    message: str
+    session_token: Optional[str] = None
+    login_url: Optional[str] = None
+    plan_name: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    is_active: bool = False
 
 
 # =========================================================================
@@ -205,6 +232,253 @@ async def get_packages(
         ))
 
     return packages
+
+
+@router.post("/{org_slug}/login", response_model=HotspotLoginResponse)
+async def hotspot_login(
+    org_slug: str,
+    request: Request,
+    data: HotspotLoginRequest,
+    db: AsyncSession = Depends(get_db),
+    organization: Organization = Depends(get_organization_by_slug),
+):
+    """
+    Hotspot customer login for returning users.
+
+    Validates credentials against voucher codes or subscriptions, checks if the
+    associated package is still active, syncs the user to MikroTik with proper
+    limits, and returns a login URL for the captive redirect.
+
+    Public endpoint - no authentication required.
+    """
+    client_ip = request.client.host if request.client else None
+    mac_address = data.mac_address
+
+    # ── Strategy 1: Match against voucher hotspot credentials ──────────
+    voucher_result = await db.execute(
+        select(VoucherCode)
+        .where(
+            VoucherCode.organization_id == organization.id,
+            VoucherCode.hotspot_username == data.username,
+            VoucherCode.hotspot_password == data.password,
+        )
+    )
+    voucher = voucher_result.scalar_one_or_none()
+
+    if voucher:
+        # Check voucher expiry
+        if voucher.status == VoucherStatus.EXPIRED or (
+            voucher.expires_at and datetime.utcnow() > voucher.expires_at
+        ):
+            voucher.status = VoucherStatus.EXPIRED
+            await db.commit()
+            return HotspotLoginResponse(
+                success=False,
+                message="Your package has expired. Please purchase a new package.",
+                is_active=False,
+            )
+
+        # Get associated plan for limits
+        plan_result = await db.execute(
+            select(ServicePlan).where(ServicePlan.id == voucher.plan_id)
+        )
+        plan = plan_result.scalar_one_or_none()
+
+        if not plan:
+            return HotspotLoginResponse(
+                success=False,
+                message="Associated package not found.",
+                is_active=False,
+            )
+
+        # Sync to MikroTik router
+        login_url = await _sync_hotspot_user_to_router(
+            db=db,
+            organization=organization,
+            username=data.username,
+            password=data.password,
+            plan=plan,
+            mac_address=mac_address,
+            comment=f"Login - voucher {voucher.code} - {plan.name}",
+        )
+
+        # Create / refresh customer session
+        session_token = secrets.token_urlsafe(32)
+        validity_hours = plan.validity_days * 24
+        if plan.time_limit > 0:
+            validity_hours = min(validity_hours, plan.time_limit)
+        expires_at = voucher.expires_at or (datetime.utcnow() + timedelta(hours=validity_hours))
+
+        session = CustomerSession(
+            organization_id=organization.id,
+            session_token=session_token,
+            mac_address=mac_address or "00:00:00:00:00:00",
+            ip_address=client_ip,
+            status=SessionStatus.ACTIVE,
+            expires_at=expires_at,
+            plan_name=plan.name,
+            speed_limit_down=plan.download_speed * 1000,
+            speed_limit_up=plan.upload_speed * 1000,
+            data_limit=plan.data_limit * 1024 * 1024 * 1024 if plan.data_limit > 0 else None,
+        )
+        db.add(session)
+        await db.commit()
+
+        return HotspotLoginResponse(
+            success=True,
+            message="Connected successfully.",
+            session_token=session_token,
+            login_url=login_url,
+            plan_name=plan.name,
+            expires_at=expires_at,
+            is_active=True,
+        )
+
+    # ── Strategy 2: Match against subscription credentials ─────────────
+    sub_result = await db.execute(
+        select(Subscription)
+        .options(selectinload(Subscription.plan))
+        .where(
+            Subscription.organization_id == organization.id,
+            Subscription.username == data.username,
+            Subscription.password == data.password,
+            Subscription.subscription_type == "hotspot",
+        )
+        .order_by(Subscription.created_at.desc())
+        .limit(1)
+    )
+    subscription = sub_result.scalar_one_or_none()
+
+    if subscription:
+        if not subscription.is_active:
+            return HotspotLoginResponse(
+                success=False,
+                message="Your subscription has expired. Please renew your package.",
+                is_active=False,
+            )
+
+        plan = subscription.plan
+        if not plan:
+            return HotspotLoginResponse(
+                success=False,
+                message="Associated package not found.",
+                is_active=False,
+            )
+
+        # Sync to MikroTik
+        login_url = await _sync_hotspot_user_to_router(
+            db=db,
+            organization=organization,
+            username=data.username,
+            password=data.password,
+            plan=plan,
+            mac_address=mac_address,
+            comment=f"Login - subscription #{subscription.id} - {plan.name}",
+        )
+
+        # Update subscription activity
+        subscription.last_activity = datetime.utcnow()
+        subscription.session_count += 1
+        await db.commit()
+
+        return HotspotLoginResponse(
+            success=True,
+            message="Connected successfully.",
+            login_url=login_url,
+            plan_name=plan.name,
+            expires_at=subscription.end_date,
+            is_active=True,
+        )
+
+    # ── No match ──────────────────────────────────────────────────────
+    return HotspotLoginResponse(
+        success=False,
+        message="Invalid username or password.",
+        is_active=False,
+    )
+
+
+async def _sync_hotspot_user_to_router(
+    db: AsyncSession,
+    organization: Organization,
+    username: str,
+    password: str,
+    plan: ServicePlan,
+    mac_address: Optional[str],
+    comment: str,
+) -> Optional[str]:
+    """
+    Create / update a hotspot user on the org's MikroTik router with proper
+    bandwidth, data and time limits derived from the plan.
+
+    Returns the MikroTik login URL if sync succeeded, None otherwise.
+    """
+    router_result = await db.execute(
+        select(Router).where(
+            Router.organization_id == organization.id,
+            Router.is_active == True,
+        ).limit(1)
+    )
+    router_obj = router_result.scalar_one_or_none()
+
+    if not router_obj:
+        logger.warning(
+            f"No active router for org {organization.id}. "
+            f"Hotspot user {username} not synced."
+        )
+        return None
+
+    try:
+        client = get_mikrotik_client()
+        connection = await client.connect(
+            ip_address=router_obj.ip_address,
+            username=router_obj.username,
+            password=router_obj.password,
+            port=router_obj.port,
+        )
+
+        time_limit_seconds = plan.time_limit if plan.time_limit > 0 else None
+        data_limit_bytes = None
+        if plan.data_limit > 0 and not plan.is_unlimited_data:
+            data_limit_bytes = plan.data_limit * 1024 * 1024  # MB → bytes
+
+        await client.create_hotspot_user(
+            connection=connection,
+            username=username,
+            password=password,
+            profile="default",
+            **{
+                k: v
+                for k, v in {
+                    "limit-uptime": f"{time_limit_seconds}s" if time_limit_seconds else None,
+                    "limit-bytes-total": data_limit_bytes,
+                    "comment": comment,
+                }.items()
+                if v is not None
+            },
+        )
+
+        await client.disconnect(router_obj.ip_address, router_obj.port)
+
+        logger.info(
+            f"Synced hotspot user {username} to router {router_obj.name}"
+        )
+
+        # Build MikroTik login URL
+        login_url = (
+            f"http://{router_obj.ip_address}/login"
+            f"?username={username}&password={password}"
+        )
+        if mac_address:
+            login_url += f"&mac={mac_address}"
+
+        return login_url
+    except Exception as e:
+        logger.error(
+            f"Failed to sync hotspot user {username} to router "
+            f"{router_obj.name}: {e}"
+        )
+        return None
 
 
 @router.post("/{org_slug}/purchase", response_model=PurchaseResponse)
