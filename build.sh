@@ -76,20 +76,15 @@ if [[ ${DEPLOY} == "true" ]]; then
   SYNC_SCRIPT=$(mktemp)
   if curl -fsSL https://raw.githubusercontent.com/Bengo-Hub/devops-k8s/main/scripts/tools/check-and-sync-secrets.sh -o "$SYNC_SCRIPT" 2>/dev/null; then
     source "$SYNC_SCRIPT"
-    # Note: KUBE_CONFIG is excluded from sync as it's environment-specific
-    # Critical infrastructure secrets should be set manually per environment
-    if ! check_and_sync_secrets "REGISTRY_USERNAME" "REGISTRY_PASSWORD" "GIT_TOKEN" "POSTGRES_PASSWORD" "REDIS_PASSWORD"; then
+    # Sync all deployment secrets including KUBE_CONFIG
+    # Note: KUBE_CONFIG should be base64-encoded in devops-k8s (already encoded)
+    # All other secrets should be plaintext (passwords, usernames, tokens)
+    if ! check_and_sync_secrets "REGISTRY_USERNAME" "REGISTRY_PASSWORD" "GIT_TOKEN" "POSTGRES_PASSWORD" "REDIS_PASSWORD" "KUBE_CONFIG"; then
       error "Failed to sync required secrets from devops-k8s"
       error "Build cannot continue without required secrets"
       exit 1
     fi
     rm -f "$SYNC_SCRIPT"
-    
-    # Validate KUBE_CONFIG separately (should be set manually for this repo)
-    if ! gh secret list --repo "$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null || echo "${GITHUB_REPOSITORY}")" --json name -q '.[].name' 2>/dev/null | grep -q "^KUBE_CONFIG$"; then
-      warn "KUBE_CONFIG not found - Kubernetes deployment will be skipped"
-      warn "Set KUBE_CONFIG secret manually for this repository's target cluster"
-    fi
   else
     error "Unable to download secret sync script from devops-k8s"
     error "Build cannot continue without secret sync capability"
