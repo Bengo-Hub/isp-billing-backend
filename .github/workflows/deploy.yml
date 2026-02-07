@@ -40,31 +40,95 @@ jobs:
         run: |
           echo "Verifying deployment secrets..."
           MISSING=0
+          INVALID=0
           
-          [[ -n "${{ secrets.REGISTRY_USERNAME }}" ]] && echo "✅ REGISTRY_USERNAME (${#REGISTRY_USERNAME} chars)" || { echo "❌ REGISTRY_USERNAME missing"; MISSING=1; }
-          [[ -n "${{ secrets.REGISTRY_PASSWORD }}" ]] && echo "✅ REGISTRY_PASSWORD (${#REGISTRY_PASSWORD} chars)" || { echo "❌ REGISTRY_PASSWORD missing"; MISSING=1; }
-          [[ -n "${{ secrets.KUBE_CONFIG }}" ]] && echo "✅ KUBE_CONFIG (${#KUBE_CONFIG} chars)" || { echo "❌ KUBE_CONFIG missing"; MISSING=1; }
-          [[ -n "${{ secrets.GIT_TOKEN }}" ]] && echo "✅ GIT_TOKEN (${#GIT_TOKEN} chars)" || { echo "❌ GIT_TOKEN missing"; MISSING=1; }
-          [[ -n "${{ secrets.POSTGRES_PASSWORD }}" ]] && echo "✅ POSTGRES_PASSWORD (${#POSTGRES_PASSWORD} chars)" || { echo "❌ POSTGRES_PASSWORD missing"; MISSING=1; }
-          [[ -n "${{ secrets.REDIS_PASSWORD }}" ]] && echo "✅ REDIS_PASSWORD (${#REDIS_PASSWORD} chars)" || { echo "❌ REDIS_PASSWORD missing"; MISSING=1; }
+          # Check REGISTRY_USERNAME (expected: 10 chars "codevertex")
+          if [[ -z "$REGISTRY_USERNAME" ]]; then
+            echo "❌ REGISTRY_USERNAME missing"
+            MISSING=1
+          elif [[ ${#REGISTRY_USERNAME} -lt 5 ]]; then
+            echo "⚠️  REGISTRY_USERNAME too short (${#REGISTRY_USERNAME} chars, expected ~10)"
+            INVALID=1
+          else
+            echo "✅ REGISTRY_USERNAME (${#REGISTRY_USERNAME} chars)"
+          fi
           
-          if [ $MISSING -eq 1 ]; then
+          # Check REGISTRY_PASSWORD (expected: 36 chars)
+          if [[ -z "$REGISTRY_PASSWORD" ]]; then
+            echo "❌ REGISTRY_PASSWORD missing"
+            MISSING=1
+          elif [[ ${#REGISTRY_PASSWORD} -lt 20 ]]; then
+            echo "⚠️  REGISTRY_PASSWORD too short (${#REGISTRY_PASSWORD} chars, expected ~36)"
+            INVALID=1
+          else
+            echo "✅ REGISTRY_PASSWORD (${#REGISTRY_PASSWORD} chars)"
+          fi
+          
+          # Check KUBE_CONFIG (expected: 7540 chars base64)
+          if [[ -z "$KUBE_CONFIG" ]]; then
+            echo "❌ KUBE_CONFIG missing"
+            MISSING=1
+          elif [[ ${#KUBE_CONFIG} -lt 1000 ]]; then
+            echo "⚠️  KUBE_CONFIG too short (${#KUBE_CONFIG} chars, expected ~7540)"
+            INVALID=1
+          else
+            echo "✅ KUBE_CONFIG (${#KUBE_CONFIG} chars)"
+          fi
+          
+          # Check GIT_TOKEN (expected: 40 chars)
+          if [[ -z "$GIT_TOKEN" ]]; then
+            echo "❌ GIT_TOKEN missing"
+            MISSING=1
+          elif [[ ${#GIT_TOKEN} -lt 20 ]]; then
+            echo "⚠️  GIT_TOKEN too short (${#GIT_TOKEN} chars, expected ~40)"
+            INVALID=1
+          else
+            echo "✅ GIT_TOKEN (${#GIT_TOKEN} chars)"
+          fi
+          
+          # Check POSTGRES_PASSWORD (expected: 11 chars)
+          if [[ -z "$POSTGRES_PASSWORD" ]]; then
+            echo "❌ POSTGRES_PASSWORD missing"
+            MISSING=1
+          elif [[ ${#POSTGRES_PASSWORD} -lt 8 ]]; then
+            echo "⚠️  POSTGRES_PASSWORD too short (${#POSTGRES_PASSWORD} chars, expected ~11)"
+            INVALID=1
+          else
+            echo "✅ POSTGRES_PASSWORD (${#POSTGRES_PASSWORD} chars)"
+          fi
+          
+          # Check REDIS_PASSWORD (expected: 11 chars)
+          if [[ -z "$REDIS_PASSWORD" ]]; then
+            echo "❌ REDIS_PASSWORD missing"
+            MISSING=1
+          elif [[ ${#REDIS_PASSWORD} -lt 8 ]]; then
+            echo "⚠️  REDIS_PASSWORD too short (${#REDIS_PASSWORD} chars, expected ~11)"
+            INVALID=1
+          else
+            echo "✅ REDIS_PASSWORD (${#REDIS_PASSWORD} chars)"
+          fi
+          
+          if [[ $MISSING -eq 1 ]] || [[ $INVALID -eq 1 ]]; then
             echo ""
-            echo "❌ ERROR: Required secrets are missing!"
+            echo "❌ ERROR: Secrets are missing or have invalid values!"
             echo ""
-            echo "Run the sync workflow to create secrets from devops-k8s:"
+            echo "CRITICAL: GitHub Actions loads secrets at WORKFLOW START."
+            echo "Syncing secrets mid-workflow does NOT update already-loaded values."
+            echo ""
+            echo "Solution: Sync secrets BEFORE triggering this workflow:"
             echo ""
             echo "  gh workflow run sync-secrets.yml \\"
             echo "    --repo Bengo-Hub/devops-k8s \\"
             echo "    -f target_repo=Bengo-Hub/isp-billing-backend \\"
             echo "    -f secrets='REGISTRY_USERNAME REGISTRY_PASSWORD REGISTRY_EMAIL GIT_TOKEN POSTGRES_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD KUBE_CONFIG'"
             echo ""
-            echo "Then re-run this deployment."
+            echo "Wait 30 seconds for sync to complete, then trigger THIS workflow again."
+            echo ""
             exit 1
           fi
           
           echo ""
-          echo "✅ All required secrets verified"
+          echo "✅ All required secrets verified (correct lengths)"
         env:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
