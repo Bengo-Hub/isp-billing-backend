@@ -87,6 +87,9 @@ class UserSettings(Base):
     # Security settings
     two_factor_enabled = Column(Boolean, default=False, nullable=False)
     two_factor_method = Column(String(20), default="totp", nullable=False)  # totp, sms, email
+    totp_secret = Column(String(255), nullable=True)  # Encrypted TOTP secret
+    recovery_codes = Column(JSON, nullable=True)  # Hashed recovery codes
+    two_factor_confirmed_at = Column(DateTime, nullable=True)  # When 2FA was fully verified
     session_timeout_minutes = Column(Integer, default=480, nullable=False)  # 8 hours
     require_password_on_sensitive = Column(Boolean, default=True, nullable=False)
     

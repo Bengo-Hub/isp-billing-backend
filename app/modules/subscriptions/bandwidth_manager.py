@@ -202,12 +202,14 @@ class BandwidthProfileManager:
         try:
             profile_name = f"plan_{plan.id}_{plan.name[:20].replace(' ', '_')}"
 
-            # Format rate limit
+            # Format rate limit — plan stores speeds in Mbps, convert to Kbps
+            burst_dl = getattr(plan, 'burst_download', None)
+            burst_ul = getattr(plan, 'burst_upload', None)
             rate_limit = self.format_rate_limit(
-                download_kbps=plan.download_speed,
-                upload_kbps=plan.upload_speed,
-                burst_download_kbps=getattr(plan, 'burst_download', None),
-                burst_upload_kbps=getattr(plan, 'burst_upload', None)
+                download_kbps=plan.download_speed * 1000,
+                upload_kbps=plan.upload_speed * 1000,
+                burst_download_kbps=burst_dl * 1000 if burst_dl else None,
+                burst_upload_kbps=burst_ul * 1000 if burst_ul else None
             )
 
             # Get existing profiles
@@ -272,12 +274,14 @@ class BandwidthProfileManager:
         try:
             profile_name = f"plan_{plan.id}_{plan.name[:20].replace(' ', '_')}"
 
-            # Format rate limit
+            # Format rate limit — plan stores speeds in Mbps, convert to Kbps
+            burst_dl = getattr(plan, 'burst_download', None)
+            burst_ul = getattr(plan, 'burst_upload', None)
             rate_limit = self.format_rate_limit(
-                download_kbps=plan.download_speed,
-                upload_kbps=plan.upload_speed,
-                burst_download_kbps=getattr(plan, 'burst_download', None),
-                burst_upload_kbps=getattr(plan, 'burst_upload', None)
+                download_kbps=plan.download_speed * 1000,
+                upload_kbps=plan.upload_speed * 1000,
+                burst_download_kbps=burst_dl * 1000 if burst_dl else None,
+                burst_upload_kbps=burst_ul * 1000 if burst_ul else None
             )
 
             # Get existing profiles
@@ -366,15 +370,19 @@ class BandwidthProfileManager:
         try:
             queue_name = f"user_{username}"
 
-            # Format limits
-            max_limit = f"{plan.upload_speed}k/{plan.download_speed}k"
+            # Format limits — plan stores speeds in Mbps, convert to Kbps for MikroTik k notation
+            ul_kbps = plan.upload_speed * 1000
+            dl_kbps = plan.download_speed * 1000
+            max_limit = f"{ul_kbps}k/{dl_kbps}k"
 
             # Calculate burst if available
             burst_limit = None
             burst_threshold = None
             if hasattr(plan, 'burst_download') and plan.burst_download:
-                burst_limit = f"{getattr(plan, 'burst_upload', plan.upload_speed)}k/{plan.burst_download}k"
-                burst_threshold = f"{int(plan.upload_speed * 0.75)}k/{int(plan.download_speed * 0.75)}k"
+                burst_ul = getattr(plan, 'burst_upload', plan.upload_speed) * 1000
+                burst_dl = plan.burst_download * 1000
+                burst_limit = f"{burst_ul}k/{burst_dl}k"
+                burst_threshold = f"{int(ul_kbps * 0.75)}k/{int(dl_kbps * 0.75)}k"
 
             # Check for existing queue
             queues = await client.execute_command(

@@ -1,0 +1,6 @@
+# Never commit actual secrets — only the template (devENV.yml) if needed
+# The devENV.yml itself should be in .gitignore at the repo root
+# This is a safety net
+*
+!.gitignore
+!devENV.yml

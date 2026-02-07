@@ -30,7 +30,8 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         # Verify using bcrypt
         return bcrypt.checkpw(password_bytes, hash_bytes)
     except Exception as e:
-        print(f"Password verification error: {str(e)}")
+        import logging
+        logging.getLogger(__name__).error(f"Password verification error: {str(e)}")
         return False
 
 
@@ -47,7 +48,8 @@ def get_password_hash(password: str) -> str:
         # Return as string
         return hashed.decode('utf-8')
     except Exception as e:
-        print(f"Password hashing error: {str(e)}")
+        import logging
+        logging.getLogger(__name__).error(f"Password hashing error: {str(e)}")
         raise
 
 
@@ -133,3 +135,22 @@ def create_token_pair(
         "refresh_token": refresh_token,
         "token_type": "bearer",
     }
+
+
+def create_2fa_challenge_token(
+    user_id: int,
+    username: str,
+    role: str,
+    organization_id: Optional[int] = None,
+) -> str:
+    """Create a short-lived token for 2FA challenge step."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=5)
+    to_encode = {
+        "sub": str(user_id),
+        "username": username,
+        "role": role,
+        "organization_id": organization_id,
+        "exp": expire,
+        "type": "2fa_challenge",
+    }
+    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
