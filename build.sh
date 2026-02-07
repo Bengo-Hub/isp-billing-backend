@@ -76,10 +76,16 @@ if [[ ${DEPLOY} == "true" ]]; then
   SYNC_SCRIPT=$(mktemp)
   if curl -fsSL https://raw.githubusercontent.com/Bengo-Hub/devops-k8s/main/scripts/tools/check-and-sync-secrets.sh -o "$SYNC_SCRIPT" 2>/dev/null; then
     source "$SYNC_SCRIPT"
-    check_and_sync_secrets "KUBE_CONFIG" "REGISTRY_USERNAME" "REGISTRY_PASSWORD" "GIT_TOKEN" "POSTGRES_PASSWORD" "REDIS_PASSWORD" || warn "Secret sync failed - continuing with existing secrets"
+    if ! check_and_sync_secrets "KUBE_CONFIG" "REGISTRY_USERNAME" "REGISTRY_PASSWORD" "GIT_TOKEN" "POSTGRES_PASSWORD" "REDIS_PASSWORD"; then
+      error "Failed to sync required secrets from devops-k8s"
+      error "Build cannot continue without required secrets"
+      exit 1
+    fi
     rm -f "$SYNC_SCRIPT"
   else
-    warn "Unable to download secret sync script - continuing with existing secrets"
+    error "Unable to download secret sync script from devops-k8s"
+    error "Build cannot continue without secret sync capability"
+    exit 1
   fi
 fi
 
