@@ -72,7 +72,19 @@ jobs:
           set -e
           IMAGE_REPO="${REGISTRY_SERVER}/${REGISTRY_NAMESPACE}/isp-billing-backend"
           SHORT_SHA=${GITHUB_SHA::8}
+          echo "[DEBUG] REGISTRY_SERVER: $REGISTRY_SERVER"
+          echo "[DEBUG] REGISTRY_USERNAME: ${REGISTRY_USERNAME:-<not set>}"
+          echo "[DEBUG] REGISTRY_PASSWORD length: ${#REGISTRY_PASSWORD} chars"
           echo "Tagging ${IMAGE_REPO}:${SHORT_SHA} as :latest"
+          if [ -z "$REGISTRY_USERNAME" ]; then
+            echo "ERROR: REGISTRY_USERNAME is not set"
+            exit 1
+          fi
+          if [ -z "$REGISTRY_PASSWORD" ]; then
+            echo "ERROR: REGISTRY_PASSWORD is not set"
+            exit 1
+          fi
+          echo "Logging in to Docker registry..."
           echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY_SERVER" -u "$REGISTRY_USERNAME" --password-stdin
           docker pull "${IMAGE_REPO}:${SHORT_SHA}" || true
           docker tag "${IMAGE_REPO}:${SHORT_SHA}" "${IMAGE_REPO}:latest"
