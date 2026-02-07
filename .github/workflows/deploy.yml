@@ -5,7 +5,84 @@ on:
     branches: [ main, master ]
 
 jobs:
+  sync-secrets:
+    runs-on: ubuntu-latest
+    outputs:
+      secrets-synced: ${{ steps.sync.outputs.synced }}
+    steps:
+      - name: Check if secrets exist
+        id: check
+        run: |
+          echo "Checking if secrets are already available..."
+          MISSING=0
+          
+          [[ -n "${{ secrets.REGISTRY_USERNAME }}" ]] && echo "✅ REGISTRY_USERNAME" || { echo "⚠️  REGISTRY_USERNAME missing"; MISSING=1; }
+          [[ -n "${{ secrets.REGISTRY_PASSWORD }}" ]] && echo "✅ REGISTRY_PASSWORD" || { echo "⚠️  REGISTRY_PASSWORD missing"; MISSING=1; }
+          [[ -n "${{ secrets.KUBE_CONFIG }}" ]] && echo "✅ KUBE_CONFIG" || { echo "⚠️  KUBE_CONFIG missing"; MISSING=1; }
+          [[ -n "${{ secrets.GIT_TOKEN }}" ]] && echo "✅ GIT_TOKEN" || { echo "⚠️  GIT_TOKEN missing"; MISSING=1; }
+          
+          if [ $MISSING -eq 1 ]; then
+            echo "need_sync=true" >> $GITHUB_OUTPUT
+          else
+            echo "need_sync=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install GitHub CLI
+        if: steps.check.outputs.need_sync == 'true'
+        run: |
+          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt update
+          sudo apt install gh -y
+
+      - name: Sync secrets from devops-k8s
+        id: sync
+        if: steps.check.outputs.need_sync == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROPAGATE_PAT || secrets.GH_PAT || secrets.GIT_TOKEN || github.token }}
+        run: |
+          REQUIRED_SECRETS=(REGISTRY_USERNAME REGISTRY_PASSWORD REGISTRY_EMAIL GIT_TOKEN POSTGRES_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD KUBE_CONFIG)
+          
+          echo "🔄 Triggering secret sync from devops-k8s..."
+          gh workflow run sync-secrets.yml \
+            --repo Bengo-Hub/devops-k8s \
+            -f target_repo=${{ github.repository }} \
+            -f secrets="${REQUIRED_SECRETS[*]}"
+          
+          echo "⏳ Waiting for secrets to be synced (max 5 minutes)..."
+          ELAPSED=0
+          MAX_WAIT=300
+          
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            sleep 10
+            ELAPSED=$((ELAPSED + 10))
+            
+            # Check if all secrets now exist
+            MISSING=0
+            for secret in "${REQUIRED_SECRETS[@]}"; do
+              if ! gh secret list --repo ${{ github.repository }} 2>/dev/null | grep -q "^${secret}[[:space:]]"; then
+                MISSING=$((MISSING + 1))
+              fi
+            done
+            
+            if [ $MISSING -eq 0 ]; then
+              echo "✅ All secrets synced after ${ELAPSED}s"
+              echo "synced=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            echo "⏳ ${MISSING} secrets pending (${ELAPSED}s elapsed)..."
+          done
+          
+          echo "❌ Timeout waiting for secrets"
+          echo "synced=false" >> $GITHUB_OUTPUT
+          exit 1
+
   deploy:
+    needs: sync-secrets
+    if: always()  # Run even if sync-secrets was skipped
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -35,61 +112,21 @@ jobs:
           echo "SERVICE_DB_NAME=isp_billing" >> $GITHUB_ENV
           echo "SERVICE_DB_USER=isp_billing_user" >> $GITHUB_ENV
 
-      - name: Sync deployment secrets
-        env:
-          GH_TOKEN: ${{ secrets.PROPAGATE_PAT || secrets.GH_PAT || secrets.GIT_TOKEN || github.token }}
-        run: |
-          REQUIRED_SECRETS=(REGISTRY_USERNAME REGISTRY_PASSWORD REGISTRY_EMAIL GIT_TOKEN POSTGRES_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD KUBE_CONFIG)
-          MAX_RETRIES=3
-          MAX_WAIT=300
-          RETRY_COUNT=0
-          
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            echo "[Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES] Triggering secret sync from devops-k8s..."
-            
-            gh workflow run sync-secrets.yml \
-              --repo Bengo-Hub/devops-k8s \
-              -f target_repo=${{ github.repository }} \
-              -f secrets="${REQUIRED_SECRETS[*]}"
-            
-            echo "Waiting for sync workflow to complete (max ${MAX_WAIT}s)..."
-            ELAPSED=0
-            while [ $ELAPSED -lt $MAX_WAIT ]; do
-              sleep 10
-              ELAPSED=$((ELAPSED + 10))
-              
-              # Check if secrets exist
-              MISSING=0
-              for secret in "${REQUIRED_SECRETS[@]}"; do
-                if ! gh secret list --repo ${{ github.repository }} 2>/dev/null | grep -q "^${secret}[[:space:]]"; then
-                  MISSING=$((MISSING + 1))
-                fi
-              done
-              
-              if [ $MISSING -eq 0 ]; then
-                echo "✅ All secrets synced successfully after ${ELAPSED}s"
-                exit 0
-              fi
-              
-              echo "⏳ Still waiting... (${MISSING} secrets pending, ${ELAPSED}s elapsed)"
-            done
-            
-            echo "⚠️  Timeout waiting for secrets (attempt $((RETRY_COUNT + 1)))"
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-          done
-          
-          echo "❌ Failed to sync secrets after $MAX_RETRIES attempts"
-          echo "Build.sh will attempt to continue with existing secrets..."
-          exit 0
-
       - name: Run production deployment
         env:
+          # Secrets (from org-level or repo-level)
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GIT_SECRET: ${{ secrets.GIT_SECRET }}
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          REGISTRY_EMAIL: ${{ secrets.REGISTRY_EMAIL }}
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
+          # Git authentication fallbacks
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GIT_SECRET: ${{ secrets.GIT_SECRET }}
+          # Deployment configuration
           GITHUB_SHA: ${{ github.sha }}
           DEPLOY: true
           SETUP_DATABASES: true
@@ -113,6 +150,7 @@ jobs:
         env:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          REGISTRY_EMAIL: ${{ secrets.REGISTRY_EMAIL }}
           REGISTRY_SERVER: docker.io
           REGISTRY_NAMESPACE: codevertex
         run: |
