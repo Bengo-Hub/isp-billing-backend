@@ -6,7 +6,61 @@ on:
   workflow_dispatch:  # Allow manual triggers
 
 jobs:
+  sync-secrets:
+    runs-on: ubuntu-latest
+    outputs:
+      synced: ${{ steps.sync.outputs.synced }}
+    steps:
+      - name: Install GitHub CLI
+        run: |
+          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt update
+          sudo apt install gh -y
+
+      - name: Sync secrets from devops-k8s
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.PROPAGATE_PAT || secrets.GH_PAT || secrets.GIT_TOKEN || github.token }}
+        run: |
+          echo "🔄 Triggering secret sync from devops-k8s..."
+          gh workflow run sync-secrets.yml \
+            --repo Bengo-Hub/devops-k8s \
+            -f target_repo=${{ github.repository }} \
+            -f secrets='REGISTRY_USERNAME REGISTRY_PASSWORD REGISTRY_EMAIL GIT_TOKEN POSTGRES_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD KUBE_CONFIG'
+          
+          echo "⏳ Waiting for secrets to be synced (max 5 minutes)..."
+          ELAPSED=0
+          MAX_WAIT=300
+          
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            sleep 10
+            ELAPSED=$((ELAPSED + 10))
+            
+            # Check if all secrets exist in repo
+            MISSING=0
+            for secret in REGISTRY_USERNAME REGISTRY_PASSWORD REGISTRY_EMAIL GIT_TOKEN POSTGRES_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD KUBE_CONFIG; do
+              if ! gh secret list --repo ${{ github.repository }} 2>/dev/null | grep -q "^${secret}[[:space:]]"; then
+                MISSING=$((MISSING + 1))
+              fi
+            done
+            
+            if [ $MISSING -eq 0 ]; then
+              echo "✅ All 8 secrets synced successfully after ${ELAPSED}s"
+              echo "synced=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            echo "⏳ ${MISSING} secrets still syncing (${ELAPSED}s elapsed)..."
+          done
+          
+          echo "⚠️ Timeout after ${MAX_WAIT}s - secrets may still be syncing"
+          echo "synced=partial" >> $GITHUB_OUTPUT
+
   deploy:
+    needs: sync-secrets
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -35,6 +89,20 @@ jobs:
           echo "APP_NAME=isp-billing-backend" >> $GITHUB_ENV
           echo "SERVICE_DB_NAME=isp_billing" >> $GITHUB_ENV
           echo "SERVICE_DB_USER=isp_billing_user" >> $GITHUB_ENV
+
+      - name: Sync status
+        run: |
+          echo "📊 Sync job result: ${{ needs.sync-secrets.outputs.synced }}"
+          if [[ "${{ needs.sync-secrets.outputs.synced }}" == "true" ]]; then
+            echo "✅ Secrets were synced in previous job"
+          else
+            echo "⚠️  Secret sync may be incomplete"
+          fi
+          echo ""
+          echo "⚠️  IMPORTANT: GitHub Actions limitation:"
+          echo "Secrets are loaded when the WORKFLOW starts, not when jobs start."
+          echo "If this is the FIRST run after sync, secrets may show as empty/1-char."
+          echo "Solution: Re-run this workflow after secrets are created."
 
       - name: Verify secrets exist
         run: |
@@ -112,17 +180,15 @@ jobs:
             echo ""
             echo "❌ ERROR: Secrets are missing or have invalid values!"
             echo ""
-            echo "CRITICAL: GitHub Actions loads secrets at WORKFLOW START."
-            echo "Syncing secrets mid-workflow does NOT update already-loaded values."
+            echo "This happens because GitHub Actions loads secrets at WORKFLOW START."
+            echo "The sync-secrets job created them, but this workflow started before they existed."
             echo ""
-            echo "Solution: Sync secrets BEFORE triggering this workflow:"
+            echo "✅ SOLUTION: Re-run this workflow now that secrets exist"
+            echo "   gh workflow run deploy.yml --repo ${{ github.repository }}"
             echo ""
-            echo "  gh workflow run sync-secrets.yml \\"
-            echo "    --repo Bengo-Hub/devops-k8s \\"
-            echo "    -f target_repo=Bengo-Hub/isp-billing-backend \\"
-            echo "    -f secrets='REGISTRY_USERNAME REGISTRY_PASSWORD REGISTRY_EMAIL GIT_TOKEN POSTGRES_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD KUBE_CONFIG'"
+            echo "   OR click 'Re-run all jobs' in the GitHub Actions UI"
             echo ""
-            echo "Wait 30 seconds for sync to complete, then trigger THIS workflow again."
+            echo "The next run will load the correct secret values (36 chars for REGISTRY_PASSWORD)."
             echo ""
             exit 1
           fi
