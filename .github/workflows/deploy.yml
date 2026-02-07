@@ -3,86 +3,10 @@ name: Build and Deploy ISP Billing Backend
 on:
   push:
     branches: [ main, master ]
+  workflow_dispatch:  # Allow manual triggers
 
 jobs:
-  sync-secrets:
-    runs-on: ubuntu-latest
-    outputs:
-      secrets-synced: ${{ steps.sync.outputs.synced }}
-    steps:
-      - name: Check if secrets exist
-        id: check
-        run: |
-          echo "Checking if secrets are already available..."
-          MISSING=0
-          
-          [[ -n "${{ secrets.REGISTRY_USERNAME }}" ]] && echo "✅ REGISTRY_USERNAME" || { echo "⚠️  REGISTRY_USERNAME missing"; MISSING=1; }
-          [[ -n "${{ secrets.REGISTRY_PASSWORD }}" ]] && echo "✅ REGISTRY_PASSWORD" || { echo "⚠️  REGISTRY_PASSWORD missing"; MISSING=1; }
-          [[ -n "${{ secrets.KUBE_CONFIG }}" ]] && echo "✅ KUBE_CONFIG" || { echo "⚠️  KUBE_CONFIG missing"; MISSING=1; }
-          [[ -n "${{ secrets.GIT_TOKEN }}" ]] && echo "✅ GIT_TOKEN" || { echo "⚠️  GIT_TOKEN missing"; MISSING=1; }
-          
-          if [ $MISSING -eq 1 ]; then
-            echo "need_sync=true" >> $GITHUB_OUTPUT
-          else
-            echo "need_sync=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Install GitHub CLI
-        if: steps.check.outputs.need_sync == 'true'
-        run: |
-          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt update
-          sudo apt install gh -y
-
-      - name: Sync secrets from devops-k8s
-        id: sync
-        if: steps.check.outputs.need_sync == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.PROPAGATE_PAT || secrets.GH_PAT || secrets.GIT_TOKEN || github.token }}
-        run: |
-          REQUIRED_SECRETS=(REGISTRY_USERNAME REGISTRY_PASSWORD REGISTRY_EMAIL GIT_TOKEN POSTGRES_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD KUBE_CONFIG)
-          
-          echo "🔄 Triggering secret sync from devops-k8s..."
-          gh workflow run sync-secrets.yml \
-            --repo Bengo-Hub/devops-k8s \
-            -f target_repo=${{ github.repository }} \
-            -f secrets="${REQUIRED_SECRETS[*]}"
-          
-          echo "⏳ Waiting for secrets to be synced (max 5 minutes)..."
-          ELAPSED=0
-          MAX_WAIT=300
-          
-          while [ $ELAPSED -lt $MAX_WAIT ]; do
-            sleep 10
-            ELAPSED=$((ELAPSED + 10))
-            
-            # Check if all secrets now exist
-            MISSING=0
-            for secret in "${REQUIRED_SECRETS[@]}"; do
-              if ! gh secret list --repo ${{ github.repository }} 2>/dev/null | grep -q "^${secret}[[:space:]]"; then
-                MISSING=$((MISSING + 1))
-              fi
-            done
-            
-            if [ $MISSING -eq 0 ]; then
-              echo "✅ All secrets synced after ${ELAPSED}s"
-              echo "synced=true" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            
-            echo "⏳ ${MISSING} secrets pending (${ELAPSED}s elapsed)..."
-          done
-          
-          echo "❌ Timeout waiting for secrets"
-          echo "synced=false" >> $GITHUB_OUTPUT
-          exit 1
-
   deploy:
-    needs: sync-secrets
-    if: always()  # Run even if sync-secrets was skipped
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -111,6 +35,43 @@ jobs:
           echo "APP_NAME=isp-billing-backend" >> $GITHUB_ENV
           echo "SERVICE_DB_NAME=isp_billing" >> $GITHUB_ENV
           echo "SERVICE_DB_USER=isp_billing_user" >> $GITHUB_ENV
+
+      - name: Verify secrets exist
+        run: |
+          echo "Verifying deployment secrets..."
+          MISSING=0
+          
+          [[ -n "${{ secrets.REGISTRY_USERNAME }}" ]] && echo "✅ REGISTRY_USERNAME (${#REGISTRY_USERNAME} chars)" || { echo "❌ REGISTRY_USERNAME missing"; MISSING=1; }
+          [[ -n "${{ secrets.REGISTRY_PASSWORD }}" ]] && echo "✅ REGISTRY_PASSWORD (${#REGISTRY_PASSWORD} chars)" || { echo "❌ REGISTRY_PASSWORD missing"; MISSING=1; }
+          [[ -n "${{ secrets.KUBE_CONFIG }}" ]] && echo "✅ KUBE_CONFIG (${#KUBE_CONFIG} chars)" || { echo "❌ KUBE_CONFIG missing"; MISSING=1; }
+          [[ -n "${{ secrets.GIT_TOKEN }}" ]] && echo "✅ GIT_TOKEN (${#GIT_TOKEN} chars)" || { echo "❌ GIT_TOKEN missing"; MISSING=1; }
+          [[ -n "${{ secrets.POSTGRES_PASSWORD }}" ]] && echo "✅ POSTGRES_PASSWORD (${#POSTGRES_PASSWORD} chars)" || { echo "❌ POSTGRES_PASSWORD missing"; MISSING=1; }
+          [[ -n "${{ secrets.REDIS_PASSWORD }}" ]] && echo "✅ REDIS_PASSWORD (${#REDIS_PASSWORD} chars)" || { echo "❌ REDIS_PASSWORD missing"; MISSING=1; }
+          
+          if [ $MISSING -eq 1 ]; then
+            echo ""
+            echo "❌ ERROR: Required secrets are missing!"
+            echo ""
+            echo "Run the sync workflow to create secrets from devops-k8s:"
+            echo ""
+            echo "  gh workflow run sync-secrets.yml \\"
+            echo "    --repo Bengo-Hub/devops-k8s \\"
+            echo "    -f target_repo=Bengo-Hub/isp-billing-backend \\"
+            echo "    -f secrets='REGISTRY_USERNAME REGISTRY_PASSWORD REGISTRY_EMAIL GIT_TOKEN POSTGRES_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD KUBE_CONFIG'"
+            echo ""
+            echo "Then re-run this deployment."
+            exit 1
+          fi
+          
+          echo ""
+          echo "✅ All required secrets verified"
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
 
       - name: Run production deployment
         env:
