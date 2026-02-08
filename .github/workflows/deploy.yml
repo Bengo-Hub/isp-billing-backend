@@ -73,6 +73,7 @@ jobs:
           
           gh workflow run sync-secrets.yml \
             --repo Bengo-Hub/devops-k8s \
+            --ref main \
             -f target_repo=${{ github.repository }} \
             -f secrets="$SECRETS_TO_SYNC"
           
