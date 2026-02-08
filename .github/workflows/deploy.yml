@@ -5,110 +5,13 @@ on:
     branches: [ main, master ]
   workflow_dispatch:  # Allow manual triggers
 
+# NOTE: Deployment secrets (REGISTRY_*, KUBE_CONFIG, GIT_TOKEN, POSTGRES_PASSWORD,
+# REDIS_PASSWORD, RABBITMQ_PASSWORD) are set at the Bengo-Hub ORGANIZATION level.
+# Do NOT create repo-level secrets with the same names — they override org secrets
+# and have historically been corrupted by sync workflows.
+
 jobs:
-  sync-secrets:
-    runs-on: ubuntu-latest
-    outputs:
-      synced: ${{ steps.sync.outputs.synced }}
-    steps:
-      - name: Install GitHub CLI
-        run: |
-          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt update
-          sudo apt install gh -y
-
-      - name: Sync secrets from devops-k8s
-        id: sync
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          # Define all required secrets
-          REQUIRED_SECRETS=(
-            "REGISTRY_USERNAME"
-            "REGISTRY_PASSWORD"
-            "REGISTRY_EMAIL"
-            "GIT_TOKEN"
-            "POSTGRES_PASSWORD"
-            "REDIS_PASSWORD"
-            "RABBITMQ_PASSWORD"
-            "KUBE_CONFIG"
-          )
-          
-          echo "� Checking which secrets are missing..."
-          echo ""
-          
-          # Get current secrets in repo
-          EXISTING_SECRETS=$(gh secret list --repo ${{ github.repository }} 2>/dev/null || echo "")
-          
-          # Build list of missing secrets
-          MISSING_SECRETS=()
-          for secret in "${REQUIRED_SECRETS[@]}"; do
-            if echo "$EXISTING_SECRETS" | grep -q "^${secret}[[:space:]]"; then
-              echo "✅ $secret already exists"
-            else
-              echo "❌ $secret is missing"
-              MISSING_SECRETS+=("$secret")
-            fi
-          done
-          
-          echo ""
-          if [ ${#MISSING_SECRETS[@]} -eq 0 ]; then
-            echo "✅ All ${#REQUIRED_SECRETS[@]} secrets already exist - no sync needed"
-            echo "synced=skipped" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          echo "📊 Summary: ${#MISSING_SECRETS[@]} of ${#REQUIRED_SECRETS[@]} secrets need to be synced"
-          echo ""
-          
-          # Build space-separated list for sync workflow
-          SECRETS_TO_SYNC="${MISSING_SECRETS[*]}"
-          
-          echo "🔄 Triggering secret sync from devops-k8s..."
-          echo "   Syncing: $SECRETS_TO_SYNC"
-          echo ""
-          
-          gh workflow run sync-secrets.yml \
-            --repo Bengo-Hub/devops-k8s \
-            --ref main \
-            -f target_repo=${{ github.repository }} \
-            -f secrets="$SECRETS_TO_SYNC"
-          
-          echo "⏳ Waiting for secrets to be synced (max 5 minutes)..."
-          ELAPSED=0
-          MAX_WAIT=300
-          
-          while [ $ELAPSED -lt $MAX_WAIT ]; do
-            sleep 10
-            ELAPSED=$((ELAPSED + 10))
-            
-            # Check if all required secrets now exist
-            CURRENT_SECRETS=$(gh secret list --repo ${{ github.repository }} 2>/dev/null || echo "")
-            STILL_MISSING=0
-            
-            for secret in "${REQUIRED_SECRETS[@]}"; do
-              if ! echo "$CURRENT_SECRETS" | grep -q "^${secret}[[:space:]]"; then
-                STILL_MISSING=$((STILL_MISSING + 1))
-              fi
-            done
-            
-            if [ $STILL_MISSING -eq 0 ]; then
-              echo "✅ All ${#REQUIRED_SECRETS[@]} secrets now exist (${#MISSING_SECRETS[@]} synced in ${ELAPSED}s)"
-              echo "synced=true" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            
-            echo "⏳ ${STILL_MISSING} secrets still syncing (${ELAPSED}s elapsed)..."
-          done
-          
-          echo "⚠️ Timeout after ${MAX_WAIT}s - secrets may still be syncing"
-          echo "synced=partial" >> $GITHUB_OUTPUT
-
   deploy:
-    needs: sync-secrets
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -138,122 +41,55 @@ jobs:
           echo "SERVICE_DB_NAME=isp_billing" >> $GITHUB_ENV
           echo "SERVICE_DB_USER=isp_billing_user" >> $GITHUB_ENV
 
-      - name: Sync status
+      - name: Verify secrets
         run: |
-          echo "📊 Sync job result: ${{ needs.sync-secrets.outputs.synced }}"
-          echo ""
-          
-          if [[ "${{ needs.sync-secrets.outputs.synced }}" == "skipped" ]]; then
-            echo "✅ All secrets already existed - no sync was needed"
-            echo "Secrets loaded at workflow start should have correct values."
-          elif [[ "${{ needs.sync-secrets.outputs.synced }}" == "true" ]]; then
-            echo "✅ Missing secrets were synced in previous job"
-            echo ""
-            echo "⚠️  NOTE: GitHub Actions loads secrets at workflow start."
-            echo "If secrets were just created, this run may need a re-trigger."
-            echo "The verification step below will confirm."
-          else
-            echo "⚠️  Secret sync may be incomplete"
-            echo "If verification fails below, check secrets manually or re-run"
-          fi
-          echo ""
+          echo "Verifying deployment secrets (from org-level)..."
+          FAIL=0
 
-      - name: Verify secrets exist
-        run: |
-          echo "Verifying deployment secrets..."
-          MISSING=0
-          INVALID=0
-          
-          # Check REGISTRY_USERNAME (expected: 10 chars "codevertex")
-          if [[ -z "$REGISTRY_USERNAME" ]]; then
-            echo "❌ REGISTRY_USERNAME missing"
-            MISSING=1
-          elif [[ ${#REGISTRY_USERNAME} -lt 5 ]]; then
-            echo "⚠️  REGISTRY_USERNAME too short (${#REGISTRY_USERNAME} chars, expected ~10)"
-            INVALID=1
-          else
-            echo "✅ REGISTRY_USERNAME (${#REGISTRY_USERNAME} chars)"
-          fi
-          
-          # Check REGISTRY_PASSWORD (expected: 36 chars)
-          if [[ -z "$REGISTRY_PASSWORD" ]]; then
-            echo "❌ REGISTRY_PASSWORD missing"
-            MISSING=1
-          elif [[ ${#REGISTRY_PASSWORD} -lt 20 ]]; then
-            echo "⚠️  REGISTRY_PASSWORD too short (${#REGISTRY_PASSWORD} chars, expected ~36)"
-            INVALID=1
-          else
-            echo "✅ REGISTRY_PASSWORD (${#REGISTRY_PASSWORD} chars)"
-          fi
-          
-          # Check KUBE_CONFIG (expected: 7540 chars base64)
-          if [[ -z "$KUBE_CONFIG" ]]; then
-            echo "❌ KUBE_CONFIG missing"
-            MISSING=1
-          elif [[ ${#KUBE_CONFIG} -lt 1000 ]]; then
-            echo "⚠️  KUBE_CONFIG too short (${#KUBE_CONFIG} chars, expected ~7540)"
-            INVALID=1
-          else
-            echo "✅ KUBE_CONFIG (${#KUBE_CONFIG} chars)"
-          fi
-          
-          # Check GIT_TOKEN (expected: 40 chars)
-          if [[ -z "$GIT_TOKEN" ]]; then
-            echo "❌ GIT_TOKEN missing"
-            MISSING=1
-          elif [[ ${#GIT_TOKEN} -lt 20 ]]; then
-            echo "⚠️  GIT_TOKEN too short (${#GIT_TOKEN} chars, expected ~40)"
-            INVALID=1
-          else
-            echo "✅ GIT_TOKEN (${#GIT_TOKEN} chars)"
-          fi
-          
-          # Check POSTGRES_PASSWORD (expected: 11 chars)
-          if [[ -z "$POSTGRES_PASSWORD" ]]; then
-            echo "❌ POSTGRES_PASSWORD missing"
-            MISSING=1
-          elif [[ ${#POSTGRES_PASSWORD} -lt 8 ]]; then
-            echo "⚠️  POSTGRES_PASSWORD too short (${#POSTGRES_PASSWORD} chars, expected ~11)"
-            INVALID=1
-          else
-            echo "✅ POSTGRES_PASSWORD (${#POSTGRES_PASSWORD} chars)"
-          fi
-          
-          # Check REDIS_PASSWORD (expected: 11 chars)
-          if [[ -z "$REDIS_PASSWORD" ]]; then
-            echo "❌ REDIS_PASSWORD missing"
-            MISSING=1
-          elif [[ ${#REDIS_PASSWORD} -lt 8 ]]; then
-            echo "⚠️  REDIS_PASSWORD too short (${#REDIS_PASSWORD} chars, expected ~11)"
-            INVALID=1
-          else
-            echo "✅ REDIS_PASSWORD (${#REDIS_PASSWORD} chars)"
-          fi
-          
-          if [[ $MISSING -eq 1 ]] || [[ $INVALID -eq 1 ]]; then
+          check_secret() {
+            local name="$1" min_len="$2" value="$3"
+            if [[ -z "$value" ]]; then
+              echo "❌ $name is empty/missing"
+              FAIL=1
+            elif [[ ${#value} -lt $min_len ]]; then
+              echo "⚠️  $name too short (${#value} chars, min $min_len)"
+              FAIL=1
+            else
+              echo "✅ $name (${#value} chars)"
+            fi
+          }
+
+          check_secret "REGISTRY_USERNAME"  5    "$REGISTRY_USERNAME"
+          check_secret "REGISTRY_PASSWORD"  20   "$REGISTRY_PASSWORD"
+          check_secret "KUBE_CONFIG"        1000 "$KUBE_CONFIG"
+          check_secret "GIT_TOKEN"          20   "$GIT_TOKEN"
+          check_secret "POSTGRES_PASSWORD"  8    "$POSTGRES_PASSWORD"
+          check_secret "REDIS_PASSWORD"     8    "$REDIS_PASSWORD"
+
+          if [[ $FAIL -eq 1 ]]; then
             echo ""
-            echo "❌ ERROR: Secrets have invalid values (likely stored as 1-char '-')!"
+            echo "❌ Secret verification failed!"
             echo ""
-            echo "ROOT CAUSE: devops-k8s sync used 'gh secret set --body -' which"
-            echo "stored the literal character '-' instead of the actual secret value."
+            echo "These secrets come from Bengo-Hub ORGANIZATION-level secrets."
+            echo "Org secrets are automatically available — no sync needed."
             echo ""
-            echo "FIX: The sync-secrets.yml in devops-k8s has been patched."
-            echo "Delete corrupted secrets and re-sync:"
+            echo "If repo-level secrets exist with the same name, they OVERRIDE"
+            echo "org secrets and may contain corrupted values."
             echo ""
-            echo "  1. Delete corrupted secrets (they contain '-' not real values):"
-            echo "     for s in REGISTRY_USERNAME REGISTRY_PASSWORD REGISTRY_EMAIL GIT_TOKEN POSTGRES_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD KUBE_CONFIG; do"
-            echo "       gh secret delete \$s --repo ${{ github.repository }} 2>/dev/null"
-            echo "     done"
+            echo "Fix: Delete any repo-level overrides so org values are used:"
+            echo "  gh secret delete REGISTRY_USERNAME --repo ${{ github.repository }}"
+            echo "  gh secret delete REGISTRY_PASSWORD --repo ${{ github.repository }}"
+            echo "  gh secret delete KUBE_CONFIG --repo ${{ github.repository }}"
+            echo "  gh secret delete GIT_TOKEN --repo ${{ github.repository }}"
+            echo "  gh secret delete POSTGRES_PASSWORD --repo ${{ github.repository }}"
+            echo "  gh secret delete REDIS_PASSWORD --repo ${{ github.repository }}"
             echo ""
-            echo "  2. Re-run this workflow (sync-secrets job will re-sync correctly)"
-            echo "     gh workflow run deploy.yml --repo ${{ github.repository }}"
-            echo "     OR click 'Re-run all jobs' in the GitHub Actions UI"
-            echo ""
+            echo "Then re-run this workflow."
             exit 1
           fi
-          
+
           echo ""
-          echo "✅ All required secrets verified (correct lengths)"
+          echo "✅ All secrets verified"
         env:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
@@ -264,7 +100,6 @@ jobs:
 
       - name: Run production deployment
         env:
-          # Secrets (from org-level or repo-level)
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
@@ -273,10 +108,8 @@ jobs:
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
           RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
-          # Git authentication fallbacks
           GH_PAT: ${{ secrets.GH_PAT }}
           GIT_SECRET: ${{ secrets.GIT_SECRET }}
-          # Deployment configuration
           GITHUB_SHA: ${{ github.sha }}
           DEPLOY: true
           SETUP_DATABASES: true
@@ -307,18 +140,9 @@ jobs:
           set -e
           IMAGE_REPO="${REGISTRY_SERVER}/${REGISTRY_NAMESPACE}/isp-billing-backend"
           SHORT_SHA=${GITHUB_SHA::8}
-          echo "[DEBUG] REGISTRY_SERVER: $REGISTRY_SERVER"
           echo "[DEBUG] REGISTRY_USERNAME: ${REGISTRY_USERNAME:-<not set>}"
           echo "[DEBUG] REGISTRY_PASSWORD length: ${#REGISTRY_PASSWORD} chars"
           echo "Tagging ${IMAGE_REPO}:${SHORT_SHA} as :latest"
-          if [ -z "$REGISTRY_USERNAME" ]; then
-            echo "ERROR: REGISTRY_USERNAME is not set"
-            exit 1
-          fi
-          if [ -z "$REGISTRY_PASSWORD" ]; then
-            echo "ERROR: REGISTRY_PASSWORD is not set"
-            exit 1
-          fi
           echo "Logging in to Docker registry..."
           echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY_SERVER" -u "$REGISTRY_USERNAME" --password-stdin
           docker pull "${IMAGE_REPO}:${SHORT_SHA}" || true
@@ -369,7 +193,6 @@ jobs:
           echo "$KUBE_CONFIG_B64" | base64 -d > ~/.kube/config
 
           if kubectl get deployment isp-billing-backend -n ${NS} >/dev/null 2>&1; then
-            # Increased timeout to 20 minutes (1200s) for migrations and startup
             kubectl rollout status deployment/isp-billing-backend -n ${NS} --timeout=1200s
             HOSTS=$(kubectl get ingress -n ${NS} -o jsonpath='{.items[*].spec.rules[*].host}' | tr ' ' '\n' | grep -E 'isp.*billing|wifi.*billing' || true)
             if [ -n "$HOSTS" ]; then
