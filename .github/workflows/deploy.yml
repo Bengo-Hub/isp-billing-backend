@@ -23,7 +23,7 @@ jobs:
       - name: Sync secrets from devops-k8s
         id: sync
         env:
-          GH_TOKEN: ${{ secrets.PROPAGATE_PAT || secrets.GH_PAT || secrets.GIT_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           # Define all required secrets
           REQUIRED_SECRETS=(
