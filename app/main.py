@@ -124,7 +124,36 @@ def custom_openapi():
     
     # Add OAuth2 password bearer security scheme for Swagger UI integration
     # In production, hide demo credentials
-    demo_description = (\n        \"**OAuth2 Password Flow**\\n\\n\"\n        \"Use your username/email and password to authenticate.\\n\\n\"\n        \"**Note**: You can use either username OR email in the username field.\"\n    ) if settings.is_production else (\n        \"**OAuth2 Password Flow - Demo Credentials:**\\n\\n\"\n        \"**Demo Admin Account:**\\n\"\n        \"- Username: `demo`\\n\"\n        \"- Password: `demo123`\\n\"\n        \"- Email: `demo@codevertexitsolutions.com`\\n\"\n        \"- Role: Admin (ISP Provider)\\n\\n\"\n        \"**Superuser Account:**\\n\"\n        \"- Username: `superuser`\\n\"\n        \"- Password: `superuser123`\\n\"\n        \"- Email: `superuser@codevertexitsolutions.com`\\n\"\n        \"- Role: Superuser (Full System Access)\\n\\n\"\n        \"**Note**: You can use either username OR email in the username field.\"\n    )\n    \n    openapi_schema[\"components\"][\"securitySchemes\"] = {\n        \"OAuth2PasswordBearer\": {\n            \"type\": \"oauth2\",\n            \"flows\": {\n                \"password\": {\n                    \"tokenUrl\": \"/api/v1/auth/login\",\n                    \"scopes\": {},\n                }\n            },\n            \"description\": demo_description\n        },
+    demo_description = (
+        "**OAuth2 Password Flow**\n\n"
+        "Use your username/email and password to authenticate.\n\n"
+        "**Note**: You can use either username OR email in the username field."
+    ) if settings.is_production else (
+        "**OAuth2 Password Flow - Demo Credentials:**\n\n"
+        "**Demo Admin Account:**\n"
+        "- Username: `demo`\n"
+        "- Password: `demo123`\n"
+        "- Email: `demo@codevertexitsolutions.com`\n"
+        "- Role: Admin (ISP Provider)\n\n"
+        "**Superuser Account:**\n"
+        "- Username: `superuser`\n"
+        "- Password: `superuser123`\n"
+        "- Email: `superuser@codevertexitsolutions.com`\n"
+        "- Role: Superuser (Full System Access)\n\n"
+        "**Note**: You can use either username OR email in the username field."
+    )
+
+    openapi_schema["components"]["securitySchemes"] = {
+        "OAuth2PasswordBearer": {
+            "type": "oauth2",
+            "flows": {
+                "password": {
+                    "tokenUrl": "/api/v1/auth/login",
+                    "scopes": {},
+                }
+            },
+            "description": demo_description
+        },
         "BearerAuth": {
             "type": "http",
             "scheme": "bearer",

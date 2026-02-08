@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_technician_or_admin
-from app.database import get_db
+from app.core.database import get_db
 from app.models.user import User
 from app.modules.routers import RouterService
 

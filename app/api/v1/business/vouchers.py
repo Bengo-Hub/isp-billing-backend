@@ -7,11 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.core.database import get_db
 from app.models.customer_portal import VoucherCode, VoucherStatus
 from app.models.plan import ServicePlan
 from app.models.organization import Organization
-from app.api.v1.auth.dependencies import get_current_user, require_technician_or_admin
+from app.api.deps import get_current_user, require_technician_or_admin
 
 logger = logging.getLogger(__name__)
 
