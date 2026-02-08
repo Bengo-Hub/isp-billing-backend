@@ -252,8 +252,8 @@ jobs:
             HOSTS=$(kubectl get ingress -n ${NS} -o jsonpath='{.items[*].spec.rules[*].host}' \
               | tr ' ' '\n' | grep -E 'isp.*billing|wifi.*billing' || true)
             for H in $HOSTS; do
-              echo "Checking https://$H/healthz ..."
-              if curl -sk --max-time 10 "https://$H/healthz" | grep -qi "ok\|healthy"; then
+              echo "Checking https://$H/health ..."
+              if curl -sk --max-time 10 "https://$H/health" | grep -qi "ok\|healthy"; then
                 echo "✅ Health OK for $H"
                 break
               fi
