@@ -3,15 +3,79 @@ name: Build and Deploy ISP Billing Backend
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:  # Allow manual triggers
+  workflow_dispatch:
 
-# NOTE: Deployment secrets (REGISTRY_*, KUBE_CONFIG, GIT_TOKEN, POSTGRES_PASSWORD,
-# REDIS_PASSWORD, RABBITMQ_PASSWORD) are set at the Bengo-Hub ORGANIZATION level.
-# Do NOT create repo-level secrets with the same names — they override org secrets
-# and have historically been corrupted by sync workflows.
+# Deployment secrets are stored in devops-k8s repo and synced here on demand.
+# The sync-secrets job checks which secrets are missing and only requests those.
+# GH_PAT must exist in THIS repo to authenticate cross-repo workflow triggers.
 
 jobs:
+  sync-secrets:
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.sync.outputs.result }}
+    steps:
+      - name: Check and sync missing secrets
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          REQUIRED_SECRETS="REGISTRY_USERNAME REGISTRY_PASSWORD REGISTRY_EMAIL GIT_TOKEN POSTGRES_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD KUBE_CONFIG"
+
+          echo "🔍 Checking which deployment secrets exist..."
+          EXISTING=$(gh secret list --repo "${{ github.repository }}" --json name -q '.[].name' 2>/dev/null || echo "")
+
+          MISSING=()
+          for secret in $REQUIRED_SECRETS; do
+            if echo "$EXISTING" | grep -qx "$secret"; then
+              echo "  ✅ $secret"
+            else
+              echo "  ❌ $secret — missing"
+              MISSING+=("$secret")
+            fi
+          done
+
+          echo ""
+          if [ ${#MISSING[@]} -eq 0 ]; then
+            echo "✅ All secrets already exist — skipping sync"
+            echo "result=skipped" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          MISSING_LIST="${MISSING[*]}"
+          echo "📊 ${#MISSING[@]} secret(s) need syncing: $MISSING_LIST"
+          echo ""
+
+          # Trigger devops-k8s sync for ONLY the missing secrets
+          echo "🔄 Triggering devops-k8s/sync-secrets.yml..."
+          gh workflow run sync-secrets.yml \
+            --repo Bengo-Hub/devops-k8s \
+            --ref main \
+            -f target_repo="${{ github.repository }}" \
+            -f secrets="$MISSING_LIST"
+
+          # Wait for the missing secrets to appear (max 3 min)
+          echo "⏳ Waiting for secrets to be synced..."
+          for i in $(seq 1 18); do
+            sleep 10
+            CURRENT=$(gh secret list --repo "${{ github.repository }}" --json name -q '.[].name' 2>/dev/null || echo "")
+            STILL_MISSING=0
+            for secret in "${MISSING[@]}"; do
+              echo "$CURRENT" | grep -qx "$secret" || STILL_MISSING=$((STILL_MISSING + 1))
+            done
+            if [ $STILL_MISSING -eq 0 ]; then
+              echo "✅ All ${#MISSING[@]} secrets synced after $((i * 10))s"
+              echo "result=synced" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "  ⏳ ${STILL_MISSING} still missing ($((i * 10))s)..."
+          done
+
+          echo "⚠️ Timeout — some secrets may not have synced"
+          echo "result=partial" >> $GITHUB_OUTPUT
+
   deploy:
+    needs: sync-secrets
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -43,16 +107,18 @@ jobs:
 
       - name: Verify secrets
         run: |
-          echo "Verifying deployment secrets (from org-level)..."
+          echo "Verifying deployment secrets..."
+          echo "Sync result: ${{ needs.sync-secrets.outputs.result }}"
+          echo ""
           FAIL=0
 
           check_secret() {
             local name="$1" min_len="$2" value="$3"
             if [[ -z "$value" ]]; then
-              echo "❌ $name is empty/missing"
+              echo "❌ $name — empty"
               FAIL=1
             elif [[ ${#value} -lt $min_len ]]; then
-              echo "⚠️  $name too short (${#value} chars, min $min_len)"
+              echo "⚠️  $name — ${#value} chars (need >=$min_len)"
               FAIL=1
             else
               echo "✅ $name (${#value} chars)"
@@ -70,21 +136,17 @@ jobs:
             echo ""
             echo "❌ Secret verification failed!"
             echo ""
-            echo "These secrets come from Bengo-Hub ORGANIZATION-level secrets."
-            echo "Org secrets are automatically available — no sync needed."
+            echo "Possible causes:"
+            echo "  1. Secrets were just synced in this workflow run."
+            echo "     GitHub loads secrets when each job STARTS."
+            echo "     If sync-secrets just created them, re-run this workflow."
             echo ""
-            echo "If repo-level secrets exist with the same name, they OVERRIDE"
-            echo "org secrets and may contain corrupted values."
+            echo "  2. devops-k8s PROPAGATE_PAT may lack write access."
+            echo "     Check: https://github.com/Bengo-Hub/devops-k8s/actions"
             echo ""
-            echo "Fix: Delete any repo-level overrides so org values are used:"
-            echo "  gh secret delete REGISTRY_USERNAME --repo ${{ github.repository }}"
-            echo "  gh secret delete REGISTRY_PASSWORD --repo ${{ github.repository }}"
-            echo "  gh secret delete KUBE_CONFIG --repo ${{ github.repository }}"
-            echo "  gh secret delete GIT_TOKEN --repo ${{ github.repository }}"
-            echo "  gh secret delete POSTGRES_PASSWORD --repo ${{ github.repository }}"
-            echo "  gh secret delete REDIS_PASSWORD --repo ${{ github.repository }}"
-            echo ""
-            echo "Then re-run this workflow."
+            echo "  3. Corrupted repo-level secret overriding correct value."
+            echo "     Fix: delete the bad secret, then re-run:"
+            echo "     gh secret delete <NAME> --repo ${{ github.repository }}"
             exit 1
           fi
 
@@ -140,10 +202,7 @@ jobs:
           set -e
           IMAGE_REPO="${REGISTRY_SERVER}/${REGISTRY_NAMESPACE}/isp-billing-backend"
           SHORT_SHA=${GITHUB_SHA::8}
-          echo "[DEBUG] REGISTRY_USERNAME: ${REGISTRY_USERNAME:-<not set>}"
-          echo "[DEBUG] REGISTRY_PASSWORD length: ${#REGISTRY_PASSWORD} chars"
           echo "Tagging ${IMAGE_REPO}:${SHORT_SHA} as :latest"
-          echo "Logging in to Docker registry..."
           echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY_SERVER" -u "$REGISTRY_USERNAME" --password-stdin
           docker pull "${IMAGE_REPO}:${SHORT_SHA}" || true
           docker tag "${IMAGE_REPO}:${SHORT_SHA}" "${IMAGE_REPO}:latest"
@@ -157,23 +216,21 @@ jobs:
           APP_NAME: isp-billing-backend
         run: |
           if [ -z "${KUBE_CONFIG_B64}" ]; then
-            echo "⏭️ Skipping ArgoCD check - no KUBE_CONFIG available"
+            echo "⏭️ Skipping ArgoCD check — no KUBE_CONFIG"
             exit 0
           fi
-
           echo "::group::ArgoCD Application Status"
           mkdir -p ~/.kube
           echo "$KUBE_CONFIG_B64" | base64 -d > ~/.kube/config
-
           if kubectl get application ${APP_NAME} -n argocd >/dev/null 2>&1; then
             echo "✓ ArgoCD Application '${APP_NAME}' found"
-            kubectl patch application ${APP_NAME} -n argocd --type merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' || true
-            SYNC_STATUS=$(kubectl get application ${APP_NAME} -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
-            HEALTH_STATUS=$(kubectl get application ${APP_NAME} -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
-            echo "Current Status - Sync: ${SYNC_STATUS}, Health: ${HEALTH_STATUS}"
+            kubectl patch application ${APP_NAME} -n argocd --type merge \
+              -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' || true
+            SYNC=$(kubectl get application ${APP_NAME} -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+            HEALTH=$(kubectl get application ${APP_NAME} -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
+            echo "Status — Sync: ${SYNC}, Health: ${HEALTH}"
           else
             echo "⚠️ ArgoCD Application '${APP_NAME}' not found"
-            echo "Trigger provisioning: gh workflow run provision.yml --repo Bengo-Hub/devops-k8s"
           fi
           echo "::endgroup::"
 
@@ -184,29 +241,24 @@ jobs:
           NS: isp-billing
         run: |
           if [ -z "${KUBE_CONFIG_B64}" ]; then
-            echo "⏭️ Skipping health check - no KUBE_CONFIG available"
+            echo "⏭️ Skipping health check — no KUBE_CONFIG"
             exit 0
           fi
-
           echo "::group::Health check"
           mkdir -p ~/.kube
           echo "$KUBE_CONFIG_B64" | base64 -d > ~/.kube/config
-
           if kubectl get deployment isp-billing-backend -n ${NS} >/dev/null 2>&1; then
             kubectl rollout status deployment/isp-billing-backend -n ${NS} --timeout=1200s
-            HOSTS=$(kubectl get ingress -n ${NS} -o jsonpath='{.items[*].spec.rules[*].host}' | tr ' ' '\n' | grep -E 'isp.*billing|wifi.*billing' || true)
-            if [ -n "$HOSTS" ]; then
-              for H in $HOSTS; do
-                echo "Checking https://$H/healthz ..."
-                if curl -sk --max-time 10 "https://$H/healthz" | grep -qi "ok\|healthy"; then
-                  echo "✅ Health OK for $H"
-                  break
-                fi
-              done
-            else
-              echo "No ingress host found; skipping external health probe"
-            fi
+            HOSTS=$(kubectl get ingress -n ${NS} -o jsonpath='{.items[*].spec.rules[*].host}' \
+              | tr ' ' '\n' | grep -E 'isp.*billing|wifi.*billing' || true)
+            for H in $HOSTS; do
+              echo "Checking https://$H/healthz ..."
+              if curl -sk --max-time 10 "https://$H/healthz" | grep -qi "ok\|healthy"; then
+                echo "✅ Health OK for $H"
+                break
+              fi
+            done
           else
-            echo "Deployment not found yet - ArgoCD may still be syncing"
+            echo "Deployment not found yet — ArgoCD may still be syncing"
           fi
           echo "::endgroup::"
