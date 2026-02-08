@@ -199,7 +199,7 @@ async def get_bootstrap_command(
 
         # Choose between encrypted payload URL or traditional query params
         if use_encrypted_url:
-            # Centipid-style encrypted payload
+            # CodeVertex-style encrypted payload
             payload = {
                 "identity": identity,
                 "api_port": api_port,

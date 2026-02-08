@@ -1,4 +1,4 @@
-"""Seed script for Centipid licences and licence-related data."""
+"""Seed script for CodeVertex licences and licence-related data."""
 
 import asyncio
 import random
@@ -35,7 +35,7 @@ class LicenceSeeder:
         self.logger = get_logger(__name__)
 
     async def seed_licences(self, count: int = 5, clear_existing: bool = False) -> List[Licence]:
-        """Seed Centipid licences with realistic data."""
+        """Seed CodeVertex licences with realistic data."""
         if clear_existing:
             await self._clear_licences()
             if count == 0:

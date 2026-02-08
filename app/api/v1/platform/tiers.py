@@ -23,6 +23,24 @@ from app.modules.platform_billing.schemas import (
 router = APIRouter(prefix="/tiers", tags=["Platform - Subscription Tiers"])
 
 
+@router.get("/public", response_model=List[SubscriptionTierResponse])
+async def list_public_subscription_tiers(
+    db: AsyncSession = Depends(get_db),
+    tier_type: Optional[TierType] = None,
+):
+    """
+    List active subscription tiers for public display (e.g. landing page pricing).
+
+    No authentication required.
+    """
+    billing_service = PlatformBillingService(db)
+    tiers = await billing_service.get_subscription_tiers(
+        tier_type=tier_type,
+        active_only=True,
+    )
+    return [SubscriptionTierResponse.model_validate(tier) for tier in tiers]
+
+
 @router.get("/", response_model=List[SubscriptionTierResponse])
 async def list_subscription_tiers(
     db: AsyncSession = Depends(get_db),
@@ -186,7 +204,7 @@ async def seed_default_tiers(
         created.append(hotspot_tier.name)
 
     if not existing_pppoe:
-        # Create PPPoE tiers (following Centipid model)
+        # Create PPPoE tiers (following CodeVertex model)
         pppoe_basic = await billing_service.create_subscription_tier({
             "name": "PPPoE Starter",
             "description": "Starter package for PPPoE ISPs with up to 50 customers.",

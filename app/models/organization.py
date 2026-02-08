@@ -112,6 +112,13 @@ class Organization(Base):
     total_customers = Column(Integer, default=0, nullable=False)
     active_subscriptions = Column(Integer, default=0, nullable=False)
 
+    # Grace period and licence enforcement
+    grace_period_days = Column(Integer, default=2, nullable=False)
+    grace_period_ends_at = Column(DateTime, nullable=True)
+    licence_bypass = Column(Boolean, default=False, nullable=False)
+    bypass_reason = Column(Text, nullable=True)
+    bypass_set_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
     # Audit
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -192,6 +199,20 @@ class Organization(Base):
             return 0
         delta = self.subscription_ends_at - datetime.utcnow()
         return max(0, delta.days)
+
+    @property
+    def is_in_grace_period(self) -> bool:
+        """Check if organization is in grace period (expired but within grace window)."""
+        if self.status != OrganizationStatus.PENDING_PAYMENT:
+            return False
+        if self.grace_period_ends_at:
+            return datetime.utcnow() < self.grace_period_ends_at
+        return False
+
+    @property
+    def is_suspended(self) -> bool:
+        """Check if organization is suspended."""
+        return self.status == OrganizationStatus.SUSPENDED
 
     @property
     def max_staff_users(self) -> int:

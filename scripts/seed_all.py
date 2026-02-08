@@ -618,7 +618,7 @@ class MasterSeeder:
         print("  * ISP admins and technicians")
         print("  * Customer users")
         print("  * Realistic ISP service plans and pricing")
-        print("  * Centipid licences with payment history")
+        print("  * CodeVertex licences with payment history")
         print("  * Customer subscriptions with billing data")
         print("  * Package templates and categories")
         print("  * Notification templates (including SMS templates)")

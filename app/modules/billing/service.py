@@ -29,14 +29,16 @@ from app.api.deps import PaginationParams
 from app.core.logging import get_logger
 from app.core.exceptions import BillingError, PaymentError, ValidationError
 from app.core.datetime_utils import normalize_datetime
+from app.core.tenant_middleware import get_current_organization_id
 
 
 class BillingService:
     """Billing and payment management service."""
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, organization_id: Optional[int] = None):
         self.db = db
-        self.mpesa_service = MpesaService()
+        self.organization_id = organization_id or get_current_organization_id()
+        self.mpesa_service = MpesaService(db)
         self.logger = get_logger(__name__)
         self._max_retries = 3
         self._retry_delay = 1  # seconds
@@ -110,6 +112,10 @@ class BillingService:
     ) -> Dict[str, Any]:
         """Get all invoices with pagination and filters."""
         query = select(Invoice)
+
+        # Enforce tenant isolation
+        if self.organization_id:
+            query = query.where(Invoice.organization_id == self.organization_id)
 
         # Apply filters
         if user_id:
@@ -307,13 +313,14 @@ class BillingService:
     async def generate_billing_cycle_invoices(self) -> Dict[str, Any]:
         """Generate invoices for all active subscriptions."""
         # Get all active subscriptions that need billing
+        filters = [
+            Subscription.status == SubscriptionStatus.ACTIVE,
+            Subscription.is_auto_renewal == True,
+        ]
+        if self.organization_id:
+            filters.append(Subscription.organization_id == self.organization_id)
         result = await self.db.execute(
-            select(Subscription).where(
-                and_(
-                    Subscription.status == SubscriptionStatus.ACTIVE,
-                    Subscription.is_auto_renewal == True
-                )
-            )
+            select(Subscription).where(and_(*filters))
         )
         subscriptions = result.scalars().all()
 
@@ -361,6 +368,10 @@ class BillingService:
     ) -> Dict[str, Any]:
         """Get all payments with pagination and filters."""
         query = select(Payment)
+
+        # Enforce tenant isolation
+        if self.organization_id:
+            query = query.where(Payment.organization_id == self.organization_id)
 
         # Apply filters
         if user_id:
@@ -922,65 +933,64 @@ class BillingService:
         return result.scalars().all()
 
     async def get_overdue_invoices(self) -> List[Invoice]:
-        """Get overdue invoices."""
-        now = datetime.utcnow()
-        result = await self.db.execute(
-            select(Invoice).where(
-                and_(
-                    Invoice.due_date < now,
-                    Invoice.status == InvoiceStatus.PENDING
-                )
-            )
-        )
-        return result.scalars().all()
-
-    async def get_overdue_invoices(self) -> List[Invoice]:
         """Get all overdue invoices."""
         now = datetime.utcnow()
+        filters = [Invoice.status == InvoiceStatus.PENDING, Invoice.due_date < now]
+        if self.organization_id:
+            filters.append(Invoice.organization_id == self.organization_id)
         result = await self.db.execute(
-            select(Invoice).where(
-                and_(
-                    Invoice.status == InvoiceStatus.PENDING,
-                    Invoice.due_date < now
-                )
-            )
+            select(Invoice).where(and_(*filters))
         )
         return result.scalars().all()
 
     async def get_billing_stats(self) -> Dict[str, Any]:
         """Get billing statistics."""
+        org_filter = []
+        if self.organization_id:
+            org_filter.append(Invoice.organization_id == self.organization_id)
+
         # Total invoices
-        result = await self.db.execute(select(func.count(Invoice.id)))
+        result = await self.db.execute(
+            select(func.count(Invoice.id)).where(and_(True, *org_filter))
+        )
         total_invoices = result.scalar() or 0
 
         # Paid invoices
         result = await self.db.execute(
-            select(func.count(Invoice.id)).where(Invoice.status == InvoiceStatus.PAID)
+            select(func.count(Invoice.id)).where(
+                and_(Invoice.status == InvoiceStatus.PAID, *org_filter)
+            )
         )
         paid_invoices = result.scalar() or 0
 
         # Pending invoices
         result = await self.db.execute(
-            select(func.count(Invoice.id)).where(Invoice.status == InvoiceStatus.PENDING)
+            select(func.count(Invoice.id)).where(
+                and_(Invoice.status == InvoiceStatus.PENDING, *org_filter)
+            )
         )
         pending_invoices = result.scalar() or 0
 
         # Overdue invoices
         result = await self.db.execute(
-            select(func.count(Invoice.id)).where(Invoice.status == InvoiceStatus.OVERDUE)
+            select(func.count(Invoice.id)).where(
+                and_(Invoice.status == InvoiceStatus.OVERDUE, *org_filter)
+            )
         )
         overdue_invoices = result.scalar() or 0
 
         # Total revenue
         result = await self.db.execute(
-            select(func.sum(Invoice.paid_amount)).where(Invoice.status == InvoiceStatus.PAID)
+            select(func.sum(Invoice.paid_amount)).where(
+                and_(Invoice.status == InvoiceStatus.PAID, *org_filter)
+            )
         )
         total_revenue = result.scalar() or 0
 
         # Pending revenue
         result = await self.db.execute(
             select(func.sum(Invoice.total_amount)).where(
-                Invoice.status.in_([InvoiceStatus.PENDING, InvoiceStatus.OVERDUE])
+                and_(Invoice.status.in_([InvoiceStatus.PENDING, InvoiceStatus.OVERDUE]), *org_filter)
             )
         )
         pending_revenue = result.scalar() or 0
@@ -1128,54 +1138,66 @@ class BillingService:
             week_start = today_start - timedelta(days=7)
             month_start = today_start - timedelta(days=30)
 
+            org_filter = []
+            if self.organization_id:
+                org_filter.append(Payment.organization_id == self.organization_id)
+
             # Get total payments count
             total_payments_result = await self.db.execute(
-                select(func.count(Payment.id))
+                select(func.count(Payment.id)).where(and_(True, *org_filter))
             )
             total_payments = total_payments_result.scalar() or 0
 
             # Get successful payments count
             successful_payments_result = await self.db.execute(
-                select(func.count(Payment.id)).where(Payment.status == PaymentStatus.COMPLETED)
+                select(func.count(Payment.id)).where(
+                    and_(Payment.status == PaymentStatus.COMPLETED, *org_filter)
+                )
             )
             successful_payments = successful_payments_result.scalar() or 0
 
             # Get failed payments count
             failed_payments_result = await self.db.execute(
-                select(func.count(Payment.id)).where(Payment.status == PaymentStatus.FAILED)
+                select(func.count(Payment.id)).where(
+                    and_(Payment.status == PaymentStatus.FAILED, *org_filter)
+                )
             )
             failed_payments = failed_payments_result.scalar() or 0
 
             # Get pending payments count
             pending_payments_result = await self.db.execute(
-                select(func.count(Payment.id)).where(Payment.status == PaymentStatus.PENDING)
+                select(func.count(Payment.id)).where(
+                    and_(Payment.status == PaymentStatus.PENDING, *org_filter)
+                )
             )
             pending_payments = pending_payments_result.scalar() or 0
 
             # Get total amount collected
             total_amount_result = await self.db.execute(
-                select(func.sum(Payment.amount)).where(Payment.status == PaymentStatus.COMPLETED)
+                select(func.sum(Payment.amount)).where(
+                    and_(Payment.status == PaymentStatus.COMPLETED, *org_filter)
+                )
             )
             total_amount = total_amount_result.scalar() or 0
 
             # Get payment counts by method
             mpesa_payments_result = await self.db.execute(
                 select(func.count(Payment.id)).where(
-                    and_(Payment.payment_method == PaymentMethod.MPESA, Payment.status == PaymentStatus.COMPLETED)
+                    and_(Payment.payment_method == PaymentMethod.MPESA, Payment.status == PaymentStatus.COMPLETED, *org_filter)
                 )
             )
             mpesa_payments = mpesa_payments_result.scalar() or 0
 
             cash_payments_result = await self.db.execute(
                 select(func.count(Payment.id)).where(
-                    and_(Payment.payment_method == PaymentMethod.CASH, Payment.status == PaymentStatus.COMPLETED)
+                    and_(Payment.payment_method == PaymentMethod.CASH, Payment.status == PaymentStatus.COMPLETED, *org_filter)
                 )
             )
             cash_payments = cash_payments_result.scalar() or 0
 
             bank_transfer_payments_result = await self.db.execute(
                 select(func.count(Payment.id)).where(
-                    and_(Payment.payment_method == PaymentMethod.BANK_TRANSFER, Payment.status == PaymentStatus.COMPLETED)
+                    and_(Payment.payment_method == PaymentMethod.BANK_TRANSFER, Payment.status == PaymentStatus.COMPLETED, *org_filter)
                 )
             )
             bank_transfer_payments = bank_transfer_payments_result.scalar() or 0
@@ -1185,7 +1207,8 @@ class BillingService:
                 select(func.sum(Payment.amount)).where(
                     and_(
                         Payment.status == PaymentStatus.COMPLETED,
-                        Payment.created_at >= today_start
+                        Payment.created_at >= today_start,
+                        *org_filter,
                     )
                 )
             )
@@ -1196,7 +1219,8 @@ class BillingService:
                 select(func.sum(Payment.amount)).where(
                     and_(
                         Payment.status == PaymentStatus.COMPLETED,
-                        Payment.created_at >= week_start
+                        Payment.created_at >= week_start,
+                        *org_filter,
                     )
                 )
             )
@@ -1207,7 +1231,8 @@ class BillingService:
                 select(func.sum(Payment.amount)).where(
                     and_(
                         Payment.status == PaymentStatus.COMPLETED,
-                        Payment.created_at >= month_start
+                        Payment.created_at >= month_start,
+                        *org_filter,
                     )
                 )
             )

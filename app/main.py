@@ -16,8 +16,10 @@ from app.core.config import settings
 from app.core.database import init_db
 from app.core.errors import register_exception_handlers
 from app.core.logging import setup_logging
-from app.core.seed_middleware import SeedMiddleware
+from app.core.seed_service import run_startup_seeds
 from app.core.tenant_middleware import TenantMiddleware
+from app.core.licence_middleware import LicenceEnforcementMiddleware
+from app.core.database import AsyncSessionLocal
 from app.modules.system import initialization_service
 
 logger = logging.getLogger(__name__)
@@ -43,8 +45,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     logger.info(f"Environment: {settings.environment}")
 
-    # Initialize database
+    # Verify database connection (schema managed by Alembic)
     await init_db()
+
+    # Run idempotent seeds (RBAC roles/permissions, platform admin, settings, tiers)
+    await run_startup_seeds()
 
     # Get encryption key from settings (no more hardcoded fallback in production)
     encryption_key = settings.encryption_key or settings.master_password
@@ -57,7 +62,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Using development encryption key - NOT FOR PRODUCTION")
         encryption_key = "dev-only-key-do-not-use-in-production"
 
-    # Auto-initialize system (configurations, admin user)
+    # Auto-initialize system configurations
     await initialization_service.initialize_all(
         database_url=settings.database_url,
         encryption_key=encryption_key
@@ -168,6 +173,7 @@ def custom_openapi():
         "/api/v1/auth/login", "/api/v1/auth/register", "/api/v1/auth/refresh",
         "/api/v1/auth/verify", "/api/v1/auth/forgot-password", "/api/v1/auth/reset-password",
         "/api/v1/auth/verify-email", "/api/v1/auth/verify-phone",
+        "/api/v1/platform/tiers/public",
     }
 
     # Portal and onboarding endpoints are public (access without JWT)
@@ -274,11 +280,26 @@ app.openapi = custom_openapi
 # Register custom exception handlers
 register_exception_handlers(app)
 
-# Add request ID middleware for tracing
+# Middleware order: last added = outermost (runs first on request).
+# CORS must be outermost so it adds headers to ALL responses, including errors.
+
+# Add request ID middleware for tracing (innermost)
 app.add_middleware(RequestIDMiddleware)
 
-# Add CORS middleware
-# In development, allow all origins for easier testing
+# Add tenant middleware for multi-tenancy support (needs DB for slug/UUID/domain lookups)
+app.add_middleware(TenantMiddleware, db_session_factory=AsyncSessionLocal)
+
+# Add licence enforcement middleware (runs after tenant middleware resolves org)
+app.add_middleware(LicenceEnforcementMiddleware, db_session_factory=AsyncSessionLocal)
+
+# Add trusted host middleware for production
+if settings.is_production and settings.allowed_hosts:
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=settings.allowed_hosts.split(",")
+    )
+
+# Add CORS middleware (outermost - must wrap everything so headers are always present)
 cors_origins = settings.cors_origins if settings.is_production else ["*"]
 app.add_middleware(
     CORSMiddleware,
@@ -289,23 +310,19 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# Add trusted host middleware for production
-if settings.is_production and settings.allowed_hosts:
-    app.add_middleware(
-        TrustedHostMiddleware,
-        allowed_hosts=settings.allowed_hosts.split(",")
-    )
-
-# Add seed middleware to ensure RBAC initialization
-app.add_middleware(SeedMiddleware)
-
-# Add tenant middleware for multi-tenancy support
-app.add_middleware(TenantMiddleware)
-
 
 # Include API routers using the consolidated v1 router
 from app.api.v1 import api_router
 app.include_router(api_router, prefix="/api/v1")
+
+# Mount static files for uploaded content (logos, etc.)
+import os
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
+_static_dir = Path(__file__).resolve().parent.parent / "static" / "uploads"
+_static_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(_static_dir)), name="uploads")
 
 
 @app.get("/", include_in_schema=False)

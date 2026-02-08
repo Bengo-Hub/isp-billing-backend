@@ -545,6 +545,19 @@ async def renew_subscription(
     )
     gateway_config = gateway_result.scalar_one_or_none()
 
+    # Fallback to platform-level gateway if no org-level gateway found
+    if not gateway_config:
+        gateway_result = await db.execute(
+            select(PaymentGatewayConfig)
+            .where(
+                PaymentGatewayConfig.organization_id.is_(None),
+                PaymentGatewayConfig.is_active == True,
+            )
+            .order_by(PaymentGatewayConfig.is_primary.desc())
+            .limit(1)
+        )
+        gateway_config = gateway_result.scalar_one_or_none()
+
     if not gateway_config:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -572,12 +585,12 @@ async def renew_subscription(
     db.add(payment)
     await db.commit()
 
-    # Build callback URL for Paystack browser redirects
+    # Build callback URL for Paystack browser redirects with payment type context
     callback_url = None
     if gateway_config.gateway_type.value == "paystack":
         origin = request.headers.get("origin", "")
         if origin:
-            callback_url = f"{origin}/payment/callback"
+            callback_url = f"{origin}/payment/callback?payment_type=pppoe_renewal&org={org_slug}"
 
     result = await gateway.initiate_payment(
         amount=Decimal(str(plan.price)),

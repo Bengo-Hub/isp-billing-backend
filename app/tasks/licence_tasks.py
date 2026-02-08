@@ -12,6 +12,7 @@ from app.core.celery import celery_app
 from app.core.database import AsyncSessionLocal
 from app.core.logging import get_logger
 from app.models.licence import Licence, LicenceStatus, LicencePaymentStatus
+from app.models.organization import Organization, OrganizationStatus
 from app.models.router import Router
 from app.models.user import User
 from app.models.subscription import Subscription
@@ -145,7 +146,7 @@ def send_licence_expiry_notifications(self):
                             
                             subject = f"Licence Expiry Warning - {days} days remaining"
                             message = f"""
-                            Your Centipid licence ({licence.licence_key}) will expire in {days} days.
+                            Your CodeVertex licence ({licence.licence_key}) will expire in {days} days.
                             
                             Licence Details:
                             - Organisation: {licence.organization_name}
@@ -166,7 +167,7 @@ def send_licence_expiry_notifications(self):
                             if licence.contact_phone:
                                 from app.tasks.notification_tasks import send_sms_notification
                                 
-                                sms_message = f"Centipid licence {licence.licence_key} expires in {days} days. Renew at your dashboard."
+                                sms_message = f"CodeVertex licence {licence.licence_key} expires in {days} days. Renew at your dashboard."
                                 
                                 send_sms_notification.delay(
                                     user_id=None,
@@ -351,3 +352,103 @@ def generate_licence_reports(self):
     except Exception as exc:
         logger.error(f"Licence report generation failed: {exc}")
         raise self.retry(exc=exc, countdown=86400, max_retries=3)
+
+
+@celery_app.task(bind=True)
+def check_licence_grace_periods(self):
+    """
+    Check organization trial/subscription expiry and manage grace periods.
+
+    Run every hour:
+    - Expired within grace_period_days → status=PENDING_PAYMENT, set grace_period_ends_at
+    - Grace period ended → status=SUSPENDED
+    """
+    logger.info("Checking licence grace periods")
+
+    try:
+        async def _check_grace_periods():
+            async with AsyncSessionLocal() as db:
+                now = datetime.utcnow()
+                transitioned = {"to_pending_payment": 0, "to_suspended": 0}
+
+                # 1. Find TRIAL orgs whose trial has expired
+                result = await db.execute(
+                    select(Organization).where(
+                        and_(
+                            Organization.status == OrganizationStatus.TRIAL,
+                            Organization.trial_ends_at != None,
+                            Organization.trial_ends_at <= now,
+                            Organization.licence_bypass == False,
+                        )
+                    )
+                )
+                expired_trial_orgs = result.scalars().all()
+
+                for org in expired_trial_orgs:
+                    grace_end = org.trial_ends_at + timedelta(days=org.grace_period_days)
+                    if now < grace_end:
+                        org.status = OrganizationStatus.PENDING_PAYMENT
+                        org.grace_period_ends_at = grace_end
+                        transitioned["to_pending_payment"] += 1
+                        logger.info(f"Org {org.id} ({org.name}) trial expired → PENDING_PAYMENT (grace until {grace_end})")
+                    else:
+                        org.status = OrganizationStatus.SUSPENDED
+                        org.suspended_at = now
+                        transitioned["to_suspended"] += 1
+                        logger.info(f"Org {org.id} ({org.name}) trial + grace expired → SUSPENDED")
+
+                # 2. Find ACTIVE orgs whose subscription has expired
+                result = await db.execute(
+                    select(Organization).where(
+                        and_(
+                            Organization.status == OrganizationStatus.ACTIVE,
+                            Organization.subscription_ends_at != None,
+                            Organization.subscription_ends_at <= now,
+                            Organization.licence_bypass == False,
+                        )
+                    )
+                )
+                expired_sub_orgs = result.scalars().all()
+
+                for org in expired_sub_orgs:
+                    grace_end = org.subscription_ends_at + timedelta(days=org.grace_period_days)
+                    if now < grace_end:
+                        org.status = OrganizationStatus.PENDING_PAYMENT
+                        org.grace_period_ends_at = grace_end
+                        transitioned["to_pending_payment"] += 1
+                        logger.info(f"Org {org.id} ({org.name}) subscription expired → PENDING_PAYMENT (grace until {grace_end})")
+                    else:
+                        org.status = OrganizationStatus.SUSPENDED
+                        org.suspended_at = now
+                        transitioned["to_suspended"] += 1
+                        logger.info(f"Org {org.id} ({org.name}) subscription + grace expired → SUSPENDED")
+
+                # 3. Find PENDING_PAYMENT orgs whose grace period has ended
+                result = await db.execute(
+                    select(Organization).where(
+                        and_(
+                            Organization.status == OrganizationStatus.PENDING_PAYMENT,
+                            Organization.grace_period_ends_at != None,
+                            Organization.grace_period_ends_at <= now,
+                            Organization.licence_bypass == False,
+                        )
+                    )
+                )
+                grace_expired_orgs = result.scalars().all()
+
+                for org in grace_expired_orgs:
+                    org.status = OrganizationStatus.SUSPENDED
+                    org.suspended_at = now
+                    transitioned["to_suspended"] += 1
+                    logger.info(f"Org {org.id} ({org.name}) grace period ended → SUSPENDED")
+
+                await db.commit()
+                return transitioned
+
+        result = asyncio.run(_check_grace_periods())
+        logger.info(f"Grace period check completed: {result}")
+        return result
+
+    except Exception as exc:
+        logger.error(f"Grace period check failed: {exc}")
+        raise self.retry(exc=exc, countdown=3600, max_retries=3)

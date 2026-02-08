@@ -168,6 +168,14 @@ class TenantMiddleware(BaseHTTPMiddleware):
         """
         Resolve the tenant from the request.
 
+        Resolution order:
+        1. JWT token (organization_id claim)
+        2. X-Tenant-ID header (integer ID or UUID)
+        3. X-Org-Slug header (organization slug)
+        4. org_slug query parameter
+        5. Subdomain (slug-based)
+        6. Custom domain
+
         Returns:
             Organization ID if found, None otherwise
         """
@@ -187,12 +195,26 @@ class TenantMiddleware(BaseHTTPMiddleware):
                 if organization_id:
                     return organization_id
 
-        # 3. Try subdomain
+        # 3. Try X-Org-Slug header
+        slug_header = request.headers.get("X-Org-Slug")
+        if slug_header:
+            organization_id = await self._lookup_by_slug(slug_header)
+            if organization_id:
+                return organization_id
+
+        # 4. Try org_slug query parameter
+        slug_param = request.query_params.get("org_slug")
+        if slug_param:
+            organization_id = await self._lookup_by_slug(slug_param)
+            if organization_id:
+                return organization_id
+
+        # 5. Try subdomain
         organization_id = await self._resolve_from_subdomain(request)
         if organization_id:
             return organization_id
 
-        # 4. Try custom domain
+        # 6. Try custom domain
         organization_id = await self._resolve_from_custom_domain(request)
         if organization_id:
             return organization_id

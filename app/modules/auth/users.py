@@ -126,9 +126,14 @@ class UserService:
         role: Optional[UserRole] = None,
         status: Optional[UserStatus] = None,
         search: Optional[str] = None,
+        organization_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Get all users with pagination and filters."""
         query = select(User)
+
+        # Scope to organization if provided
+        if organization_id is not None:
+            query = query.where(User.organization_id == organization_id)
 
         # Apply filters
         if role:
@@ -155,7 +160,7 @@ class UserService:
         # Get users with pagination
         query = query.order_by(User.created_at.desc())
         query = query.offset(offset).limit(size)
-        
+
         result = await self.db.execute(query)
         users = result.scalars().all()
 
@@ -166,6 +171,100 @@ class UserService:
             "size": size,
             "pages": (total + size - 1) // size,
         }
+
+    async def _paginated_query(
+        self,
+        query,
+        page: int = 1,
+        size: int = 20,
+    ) -> Dict[str, Any]:
+        """Helper: apply pagination to a query and return standardized result."""
+        count_query = select(func.count()).select_from(query.subquery())
+        count_result = await self.db.execute(count_query)
+        total = count_result.scalar()
+
+        offset = (page - 1) * size
+        query = query.order_by(User.created_at.desc()).offset(offset).limit(size)
+
+        result = await self.db.execute(query)
+        users = result.scalars().all()
+
+        return {
+            "users": users,
+            "total": total,
+            "page": page,
+            "size": size,
+            "pages": (total + size - 1) // size,
+        }
+
+    def _apply_search(self, query, search: Optional[str]):
+        """Helper: add search filter to a query."""
+        if not search:
+            return query
+        term = f"%{search}%"
+        return query.where(
+            (User.username.ilike(term))
+            | (User.email.ilike(term))
+            | (User.first_name.ilike(term))
+            | (User.last_name.ilike(term))
+        )
+
+    async def get_platform_users(
+        self,
+        page: int = 1,
+        size: int = 20,
+        status: Optional[UserStatus] = None,
+        search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get platform-level users (PLATFORM_OWNER role, no organization)."""
+        query = select(User).where(
+            User.role == UserRole.PLATFORM_OWNER,
+            User.organization_id.is_(None),
+        )
+        if status:
+            query = query.where(User.status == status)
+        query = self._apply_search(query, search)
+        return await self._paginated_query(query, page, size)
+
+    async def get_staff_users(
+        self,
+        organization_id: Optional[int] = None,
+        page: int = 1,
+        size: int = 20,
+        role: Optional[UserRole] = None,
+        status: Optional[UserStatus] = None,
+        search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get ISP staff users (ISP_ADMIN + ISP_TECHNICIAN) for a tenant."""
+        staff_roles = [UserRole.ISP_ADMIN, UserRole.ISP_TECHNICIAN]
+        query = select(User).where(User.role.in_(staff_roles))
+
+        if organization_id is not None:
+            query = query.where(User.organization_id == organization_id)
+        if role and role in staff_roles:
+            query = query.where(User.role == role)
+        if status:
+            query = query.where(User.status == status)
+        query = self._apply_search(query, search)
+        return await self._paginated_query(query, page, size)
+
+    async def get_customer_users(
+        self,
+        organization_id: Optional[int] = None,
+        page: int = 1,
+        size: int = 20,
+        status: Optional[UserStatus] = None,
+        search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get ISP customer users (CUSTOMER role) for a tenant."""
+        query = select(User).where(User.role == UserRole.CUSTOMER)
+
+        if organization_id is not None:
+            query = query.where(User.organization_id == organization_id)
+        if status:
+            query = query.where(User.status == status)
+        query = self._apply_search(query, search)
+        return await self._paginated_query(query, page, size)
 
     async def update_user(self, user_id: int, user_data: UserUpdate) -> Optional[User]:
         """Update user information."""

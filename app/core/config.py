@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     encryption_key: Optional[str] = None
     master_password: Optional[str] = None
     encryption_salt: Optional[str] = None
+
+    # Platform Admin (picked from env / git secrets)
+    global_admin_email: str = "superuser@codevertexitsolutions.com"
+    global_admin_password: str = "superuser123"
     
     @model_validator(mode="after")
     def set_encryption_fallback(self) -> "Settings":
@@ -192,6 +196,12 @@ class Settings(BaseSettings):
             if not self.encryption_key and not self.master_password:
                 issues.append(
                     "ENCRYPTION_KEY or MASTER_PASSWORD required in production"
+                )
+
+            # Check admin credentials
+            if self.global_admin_password == "superuser123":
+                issues.append(
+                    "GLOBAL_ADMIN_PASSWORD must be changed from default in production"
                 )
 
             # Check database URL

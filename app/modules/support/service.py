@@ -7,20 +7,22 @@ from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.notification import (
-    SupportTicket, 
-    TicketMessage, 
-    TicketStatus, 
+    SupportTicket,
+    TicketMessage,
+    TicketStatus,
     TicketPriority
 )
 from app.models.user import User
 from app.api.deps import PaginationParams
+from app.core.tenant_middleware import get_current_organization_id
 
 
 class TicketService:
     """Support ticket management service."""
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, organization_id: Optional[int] = None):
         self.db = db
+        self.organization_id = organization_id or get_current_organization_id()
 
     async def get_ticket_by_id(self, ticket_id: int) -> Optional[SupportTicket]:
         """Get ticket by ID."""
@@ -28,8 +30,11 @@ class TicketService:
 
     async def get_ticket_by_number(self, ticket_number: str) -> Optional[SupportTicket]:
         """Get ticket by ticket number."""
+        filters = [SupportTicket.ticket_number == ticket_number]
+        if self.organization_id:
+            filters.append(SupportTicket.organization_id == self.organization_id)
         result = await self.db.execute(
-            select(SupportTicket).where(SupportTicket.ticket_number == ticket_number)
+            select(SupportTicket).where(and_(*filters))
         )
         return result.scalar_one_or_none()
 
@@ -45,6 +50,10 @@ class TicketService:
     ) -> Dict[str, Any]:
         """Get all tickets with pagination and filters."""
         query = select(SupportTicket)
+
+        # Enforce tenant isolation
+        if self.organization_id:
+            query = query.where(SupportTicket.organization_id == self.organization_id)
 
         # Apply filters
         if user_id:
@@ -100,6 +109,7 @@ class TicketService:
         ticket_number = await self._generate_ticket_number()
 
         ticket = SupportTicket(
+            organization_id=self.organization_id,
             user_id=user_id,
             ticket_number=ticket_number,
             subject=subject,
@@ -339,43 +349,58 @@ class TicketService:
 
     async def get_open_tickets(self) -> List[SupportTicket]:
         """Get all open tickets."""
+        filters = [
+            SupportTicket.status.in_([TicketStatus.OPEN, TicketStatus.IN_PROGRESS])
+        ]
+        if self.organization_id:
+            filters.append(SupportTicket.organization_id == self.organization_id)
         result = await self.db.execute(
-            select(SupportTicket).where(
-                SupportTicket.status.in_([
-                    TicketStatus.OPEN,
-                    TicketStatus.IN_PROGRESS
-                ])
-            ).order_by(SupportTicket.priority.desc(), SupportTicket.created_at.asc())
+            select(SupportTicket).where(and_(*filters))
+            .order_by(SupportTicket.priority.desc(), SupportTicket.created_at.asc())
         )
         return result.scalars().all()
 
     async def get_ticket_stats(self) -> Dict[str, Any]:
         """Get ticket statistics."""
+        org_filter = []
+        if self.organization_id:
+            org_filter.append(SupportTicket.organization_id == self.organization_id)
+
         # Total tickets
-        result = await self.db.execute(select(func.count(SupportTicket.id)))
+        result = await self.db.execute(
+            select(func.count(SupportTicket.id)).where(and_(True, *org_filter))
+        )
         total_tickets = result.scalar() or 0
 
         # Open tickets
         result = await self.db.execute(
-            select(func.count(SupportTicket.id)).where(SupportTicket.status == TicketStatus.OPEN)
+            select(func.count(SupportTicket.id)).where(
+                and_(SupportTicket.status == TicketStatus.OPEN, *org_filter)
+            )
         )
         open_tickets = result.scalar() or 0
 
         # In progress tickets
         result = await self.db.execute(
-            select(func.count(SupportTicket.id)).where(SupportTicket.status == TicketStatus.IN_PROGRESS)
+            select(func.count(SupportTicket.id)).where(
+                and_(SupportTicket.status == TicketStatus.IN_PROGRESS, *org_filter)
+            )
         )
         in_progress_tickets = result.scalar() or 0
 
         # Resolved tickets
         result = await self.db.execute(
-            select(func.count(SupportTicket.id)).where(SupportTicket.status == TicketStatus.RESOLVED)
+            select(func.count(SupportTicket.id)).where(
+                and_(SupportTicket.status == TicketStatus.RESOLVED, *org_filter)
+            )
         )
         resolved_tickets = result.scalar() or 0
 
         # Closed tickets
         result = await self.db.execute(
-            select(func.count(SupportTicket.id)).where(SupportTicket.status == TicketStatus.CLOSED)
+            select(func.count(SupportTicket.id)).where(
+                and_(SupportTicket.status == TicketStatus.CLOSED, *org_filter)
+            )
         )
         closed_tickets = result.scalar() or 0
 
@@ -383,7 +408,7 @@ class TicketService:
         result = await self.db.execute(
             select(func.avg(
                 func.extract('epoch', SupportTicket.resolved_at - SupportTicket.created_at) / 3600
-            )).where(SupportTicket.resolved_at.isnot(None))
+            )).where(and_(SupportTicket.resolved_at.isnot(None), *org_filter))
         )
         avg_resolution_time = result.scalar() or 0
 
@@ -399,46 +424,49 @@ class TicketService:
 
     async def get_ticket_stats_by_priority(self) -> Dict[str, int]:
         """Get ticket statistics by priority."""
-        result = await self.db.execute(
-            select(SupportTicket.priority, func.count(SupportTicket.id))
-            .group_by(SupportTicket.priority)
-        )
-        
+        query = select(SupportTicket.priority, func.count(SupportTicket.id))
+        if self.organization_id:
+            query = query.where(SupportTicket.organization_id == self.organization_id)
+        query = query.group_by(SupportTicket.priority)
+        result = await self.db.execute(query)
+
         stats = {}
         for priority, count in result:
             stats[priority.value] = count
-        
+
         return stats
 
     async def get_ticket_stats_by_category(self) -> Dict[str, int]:
         """Get ticket statistics by category."""
+        filters = [SupportTicket.category.isnot(None)]
+        if self.organization_id:
+            filters.append(SupportTicket.organization_id == self.organization_id)
         result = await self.db.execute(
             select(SupportTicket.category, func.count(SupportTicket.id))
-            .where(SupportTicket.category.isnot(None))
+            .where(and_(*filters))
             .group_by(SupportTicket.category)
         )
-        
+
         stats = {}
         for category, count in result:
             stats[category] = count
-        
+
         return stats
 
     async def _generate_ticket_number(self) -> str:
         """Generate unique ticket number."""
-        # Get current year and month
         now = datetime.utcnow()
         year_month = now.strftime("%Y%m")
-        
-        # Get count of tickets for this month
+
+        # Count tickets for this month within the organization
+        filters = [SupportTicket.ticket_number.like(f"TKT-{year_month}%")]
+        if self.organization_id:
+            filters.append(SupportTicket.organization_id == self.organization_id)
         result = await self.db.execute(
-            select(func.count(SupportTicket.id)).where(
-                SupportTicket.ticket_number.like(f"TKT-{year_month}%")
-            )
+            select(func.count(SupportTicket.id)).where(and_(*filters))
         )
         count = result.scalar() or 0
-        
-        # Generate ticket number
+
         ticket_number = f"TKT-{year_month}-{count + 1:04d}"
         return ticket_number
 

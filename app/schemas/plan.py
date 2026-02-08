@@ -1,9 +1,10 @@
 """Service plan-related Pydantic schemas."""
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, computed_field, validator
 
 from app.models.plan import PlanType, PlanStatus, BillingCycle
 
@@ -36,8 +37,6 @@ class PlanFeature(PlanFeatureBase):
 
     id: int
     plan_id: int
-    created_at: str
-    updated_at: str
 
     class Config:
         from_attributes = True
@@ -69,8 +68,6 @@ class PlanPricing(PlanPricingBase):
 
     id: int
     plan_id: int
-    created_at: str
-    updated_at: str
 
     class Config:
         from_attributes = True
@@ -193,9 +190,13 @@ class ServicePlanInDB(ServicePlanBase):
 
     id: int
     status: PlanStatus
-    is_active: bool
-    created_at: str
-    updated_at: str
+    created_at: datetime
+    updated_at: datetime
+
+    @computed_field
+    @property
+    def is_active(self) -> bool:
+        return self.status == PlanStatus.ACTIVE
 
     class Config:
         from_attributes = True

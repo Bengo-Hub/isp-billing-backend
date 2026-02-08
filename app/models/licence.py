@@ -1,4 +1,4 @@
-"""Centipid licence management models."""
+"""CodeVertex licence management models."""
 
 import json
 from datetime import datetime, timedelta
@@ -56,7 +56,7 @@ class LicencePaymentStatus(str, PyEnum):
 
 
 class Licence(Base):
-    """Centipid licence model for tracking software subscriptions."""
+    """CodeVertex licence model for tracking software subscriptions."""
 
     __tablename__ = "licences"
 

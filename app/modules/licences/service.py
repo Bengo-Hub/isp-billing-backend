@@ -1,4 +1,4 @@
-"""Centipid licence management service with production-ready features."""
+"""CodeVertex licence management service with production-ready features."""
 
 import secrets
 import string
@@ -729,7 +729,7 @@ class LicenceService:
             licence_id=licence_id,
             alert_type="welcome",
             severity="low",
-            title="Welcome to Centipid Billing",
+            title="Welcome to CodeVertex Billing",
             message="Your licence has been successfully created. Start by configuring your routers and setting up your first service plans.",
             action_required="setup_routers"
         )

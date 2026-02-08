@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.plan import ServicePlan, PlanFeature, PlanPricing, PlanType, PlanStatus, BillingCycle
 from app.api.deps import PaginationParams
@@ -18,7 +19,15 @@ class PlanService:
 
     async def get_by_id(self, plan_id: int) -> Optional[ServicePlan]:
         """Get plan by ID."""
-        return await self.db.get(ServicePlan, plan_id)
+        result = await self.db.execute(
+            select(ServicePlan)
+            .where(ServicePlan.id == plan_id)
+            .options(
+                selectinload(ServicePlan.features),
+                selectinload(ServicePlan.pricing_tiers),
+            )
+        )
+        return result.scalar_one_or_none()
 
     async def get_all(
         self,
@@ -52,10 +61,14 @@ class PlanService:
         count_result = await self.db.execute(count_query)
         total = count_result.scalar()
 
-        # Get plans with pagination
+        # Get plans with pagination, eagerly load relationships
         query = query.order_by(ServicePlan.sort_order.asc(), ServicePlan.created_at.desc())
         query = query.offset(pagination.offset).limit(pagination.size)
-        
+        query = query.options(
+            selectinload(ServicePlan.features),
+            selectinload(ServicePlan.pricing_tiers),
+        )
+
         result = await self.db.execute(query)
         plans = result.scalars().all()
 
@@ -211,25 +224,25 @@ class PlanService:
         )
         return result.scalars().all()
 
-    async def get_plan_stats(self) -> Dict[str, Any]:
-        """Get plan statistics."""
+    async def get_plan_stats_summary(self) -> Dict[str, Any]:
+        """Get plan statistics summary."""
         # Total plans
         result = await self.db.execute(select(func.count(ServicePlan.id)))
         total_plans = result.scalar() or 0
-        
+
         # Active plans
         result = await self.db.execute(
-            select(func.count(ServicePlan.id)).where(ServicePlan.is_active == True)
+            select(func.count(ServicePlan.id)).where(ServicePlan.status == PlanStatus.ACTIVE)
         )
         active_plans = result.scalar() or 0
-        
+
         # Plans by type
         result = await self.db.execute(
             select(ServicePlan.plan_type, func.count(ServicePlan.id))
             .group_by(ServicePlan.plan_type)
         )
         plans_by_type = dict(result.fetchall())
-        
+
         return {
             "total_plans": total_plans,
             "active_plans": active_plans,
@@ -301,25 +314,32 @@ class PlanService:
             select(ServicePlan)
             .where(ServicePlan.is_popular == True)
             .where(ServicePlan.status == PlanStatus.ACTIVE)
+            .options(
+                selectinload(ServicePlan.features),
+                selectinload(ServicePlan.pricing_tiers),
+            )
             .order_by(ServicePlan.sort_order.asc())
             .limit(limit)
         )
         return result.scalars().all()
 
     async def get_plans_by_type(
-        self, 
-        plan_type: PlanType, 
+        self,
+        plan_type: PlanType,
         limit: Optional[int] = None
     ) -> List[ServicePlan]:
         """Get plans by type."""
         query = select(ServicePlan).where(
             ServicePlan.plan_type == plan_type,
             ServicePlan.status == PlanStatus.ACTIVE
+        ).options(
+            selectinload(ServicePlan.features),
+            selectinload(ServicePlan.pricing_tiers),
         ).order_by(ServicePlan.sort_order.asc())
-        
+
         if limit:
             query = query.limit(limit)
-        
+
         result = await self.db.execute(query)
         return result.scalars().all()
 
