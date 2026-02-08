@@ -97,6 +97,19 @@ async def get_available_payment_gateways(
     )
     configured_gateways = list(gateways_result.scalars().all())
 
+    # Fallback to platform-level gateways if no org-level gateways found
+    if not configured_gateways:
+        gateways_result = await db.execute(
+            select(PaymentGatewayConfig).where(
+                PaymentGatewayConfig.organization_id.is_(None),
+                PaymentGatewayConfig.is_active == True,
+            ).order_by(
+                PaymentGatewayConfig.is_primary.desc(),
+                PaymentGatewayConfig.name.asc()
+            )
+        )
+        configured_gateways = list(gateways_result.scalars().all())
+
     # Build response with all active gateways
     available_gateways = []
 

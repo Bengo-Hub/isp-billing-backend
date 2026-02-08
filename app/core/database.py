@@ -53,15 +53,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """Initialize database tables."""
-    async with engine.begin() as conn:
-        # Import all models to ensure they are registered
-        from app.models import (  # noqa: F401
-            user,
-            router,
-            plan,
-            subscription,
-            billing,
-            notification,
-        )
-        await conn.run_sync(Base.metadata.create_all)
+    """Verify database connection. Tables are managed by Alembic migrations."""
+    from sqlalchemy import text
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))

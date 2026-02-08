@@ -59,6 +59,7 @@ from .rbac import (
     PermissionModule, PermissionAction, UserRole
 )
 from .configuration import Configuration, ConfigType
+from .platform_settings import PlatformSettings
 
 __all__ = [
     # Base
@@ -217,4 +218,7 @@ __all__ = [
     "PermissionAction",
     "UserRole",
     "Configuration",
+
+    # Platform Settings
+    "PlatformSettings",
 ]

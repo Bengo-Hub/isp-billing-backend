@@ -5,10 +5,12 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_admin, PaginationParams
 from app.core.database import get_db
+from app.models.organization import Organization
 from app.models.user import User
 from app.modules.analytics import ReportsService
 
@@ -99,12 +101,79 @@ async def get_dashboard_analytics(
     router_analytics = await service.get_router_analytics(start_date, end_date)
     ticket_analytics = await service.get_ticket_analytics(start_date, end_date)
     
+    # Fetch organization billing cycle info
+    billing_cycle = None
+    if current_user.organization_id:
+        org_result = await db.execute(
+            select(Organization).where(Organization.id == current_user.organization_id)
+        )
+        org = org_result.scalar_one_or_none()
+        if org:
+            billing_cycle = {
+                "is_trial": org.is_trial,
+                "trial_days_remaining": org.trial_days_remaining,
+                "is_subscription_active": org.is_subscription_active,
+                "subscription_days_remaining": org.subscription_days_remaining,
+                "subscription_ends_at": org.subscription_ends_at.isoformat() if org.subscription_ends_at else None,
+                "trial_ends_at": org.trial_ends_at.isoformat() if org.trial_ends_at else None,
+                "status": org.status.value if org.status else None,
+            }
+
     return {
         "subscriptions": subscription_analytics,
         "billing": billing_analytics,
         "routers": router_analytics,
         "tickets": ticket_analytics,
+        "billing_cycle": billing_cycle,
         "generated_at": datetime.utcnow().isoformat(),
+    }
+
+
+@router.get("/analytics/dashboard-charts")
+async def get_dashboard_charts(
+    current_user: User = Depends(require_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Get all chart data for the dashboard in a single call."""
+    service = ReportsService(db)
+    return await service.get_dashboard_charts()
+
+
+@router.get("/analytics/users")
+async def get_user_analytics(
+    start_date: Optional[datetime] = Query(None),
+    end_date: Optional[datetime] = Query(None),
+    current_user: User = Depends(require_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Get user analytics."""
+    if not start_date:
+        start_date = datetime.utcnow() - timedelta(days=30)
+    if not end_date:
+        end_date = datetime.utcnow()
+
+    from sqlalchemy import select, func, and_
+    from app.models.user import User as UserModel, UserRole
+
+    total_q = select(func.count()).select_from(UserModel).where(
+        and_(UserModel.created_at >= start_date, UserModel.created_at <= end_date)
+    )
+    active_q = select(func.count()).select_from(UserModel).where(
+        and_(UserModel.created_at >= start_date, UserModel.created_at <= end_date, UserModel.is_active == True)
+    )
+    customer_q = select(func.count()).select_from(UserModel).where(
+        and_(UserModel.created_at >= start_date, UserModel.created_at <= end_date, UserModel.role == UserRole.CUSTOMER)
+    )
+
+    total = (await db.execute(total_q)).scalar() or 0
+    active = (await db.execute(active_q)).scalar() or 0
+    customers = (await db.execute(customer_q)).scalar() or 0
+
+    return {
+        "total_users": total,
+        "active_users": active,
+        "total_customers": customers,
+        "inactive_users": total - active,
     }
 
 

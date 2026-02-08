@@ -178,12 +178,7 @@ async def list_organizations(
     organizations = list(result.scalars().all())
 
     return OrganizationListResponse(
-        items=[OrganizationResponse(
-            **org.to_dict(),
-            is_trial=org.is_trial,
-            trial_days_remaining=org.trial_days_remaining,
-            is_subscription_active=org.is_subscription_active,
-        ) for org in organizations],
+        items=[OrganizationResponse.model_validate(org) for org in organizations],
         total=total,
         page=page,
         page_size=page_size,
@@ -397,12 +392,7 @@ async def create_organization(
     db.add(org_settings)
     await db.commit()
 
-    return OrganizationResponse(
-        **organization.to_dict(),
-        is_trial=organization.is_trial,
-        trial_days_remaining=organization.trial_days_remaining,
-        is_subscription_active=organization.is_subscription_active,
-    )
+    return OrganizationResponse.model_validate(organization)
 
 
 @router.get("/{organization_id}", response_model=OrganizationResponse)
@@ -427,12 +417,7 @@ async def get_organization(
             detail="Organization not found"
         )
 
-    return OrganizationResponse(
-        **organization.to_dict(),
-        is_trial=organization.is_trial,
-        trial_days_remaining=organization.trial_days_remaining,
-        is_subscription_active=organization.is_subscription_active,
-    )
+    return OrganizationResponse.model_validate(organization)
 
 
 @router.patch("/{organization_id}", response_model=OrganizationResponse)
@@ -469,12 +454,7 @@ async def update_organization(
     await db.commit()
     await db.refresh(organization)
 
-    return OrganizationResponse(
-        **organization.to_dict(),
-        is_trial=organization.is_trial,
-        trial_days_remaining=organization.trial_days_remaining,
-        is_subscription_active=organization.is_subscription_active,
-    )
+    return OrganizationResponse.model_validate(organization)
 
 
 @router.post("/{organization_id}/suspend")
@@ -522,6 +502,144 @@ async def reactivate_organization(
         )
 
     return {"message": "Organization reactivated"}
+
+
+@router.post("/{organization_id}/extend")
+async def extend_organization_subscription(
+    organization_id: int,
+    days: int = Query(..., ge=1, le=365, description="Number of days to extend"),
+    reason: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_platform_owner),
+):
+    """
+    Extend an organization's subscription by a number of days.
+
+    Platform owner only.
+    """
+    from datetime import timedelta
+
+    result = await db.execute(
+        select(Organization).where(Organization.id == organization_id)
+    )
+    organization = result.scalar_one_or_none()
+
+    if not organization:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    now = datetime.utcnow()
+    extension = timedelta(days=days)
+
+    if organization.is_trial:
+        # Extend trial
+        base = organization.trial_ends_at or now
+        if base < now:
+            base = now
+        organization.trial_ends_at = base + extension
+    else:
+        # Extend subscription
+        base = organization.subscription_ends_at or now
+        if base < now:
+            base = now
+        organization.subscription_ends_at = base + extension
+
+    # If org was suspended or pending_payment, reactivate
+    if organization.status in (OrganizationStatus.SUSPENDED, OrganizationStatus.PENDING_PAYMENT):
+        organization.status = OrganizationStatus.ACTIVE if not organization.is_trial else OrganizationStatus.TRIAL
+        organization.grace_period_ends_at = None
+
+    organization.updated_by = current_user.id
+    await db.commit()
+
+    return {
+        "message": f"Subscription extended by {days} days",
+        "organization_id": organization_id,
+        "new_trial_ends_at": organization.trial_ends_at.isoformat() if organization.trial_ends_at else None,
+        "new_subscription_ends_at": organization.subscription_ends_at.isoformat() if organization.subscription_ends_at else None,
+        "status": organization.status.value,
+    }
+
+
+@router.post("/{organization_id}/bypass")
+async def toggle_licence_bypass(
+    organization_id: int,
+    enable: bool = Query(..., description="Enable or disable licence bypass"),
+    reason: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_platform_owner),
+):
+    """
+    Toggle licence enforcement bypass for an organization.
+
+    Platform owner only.
+    """
+    result = await db.execute(
+        select(Organization).where(Organization.id == organization_id)
+    )
+    organization = result.scalar_one_or_none()
+
+    if not organization:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    organization.licence_bypass = enable
+    organization.bypass_reason = reason if enable else None
+    organization.bypass_set_by = current_user.id if enable else None
+    organization.updated_by = current_user.id
+    await db.commit()
+
+    return {
+        "message": f"Licence bypass {'enabled' if enable else 'disabled'}",
+        "organization_id": organization_id,
+        "licence_bypass": organization.licence_bypass,
+        "bypass_reason": organization.bypass_reason,
+    }
+
+
+@router.post("/{organization_id}/activate")
+async def activate_organization(
+    organization_id: int,
+    subscription_months: int = Query(1, ge=1, le=12, description="Months of subscription to activate"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_platform_owner),
+):
+    """
+    Activate an organization subscription (convert from trial or reactivate).
+
+    Platform owner only.
+    """
+    from datetime import timedelta
+
+    result = await db.execute(
+        select(Organization).where(Organization.id == organization_id)
+    )
+    organization = result.scalar_one_or_none()
+
+    if not organization:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    now = datetime.utcnow()
+    organization.status = OrganizationStatus.ACTIVE
+    organization.subscription_ends_at = now + timedelta(days=30 * subscription_months)
+    organization.activated_at = now
+    organization.grace_period_ends_at = None
+    organization.updated_by = current_user.id
+    await db.commit()
+
+    return {
+        "message": f"Organization activated for {subscription_months} month(s)",
+        "organization_id": organization_id,
+        "status": organization.status.value,
+        "subscription_ends_at": organization.subscription_ends_at.isoformat(),
+    }
 
 
 @router.get("/{organization_id}/earnings")

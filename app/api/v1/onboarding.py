@@ -376,7 +376,8 @@ async def complete_registration(
         trial_ends_at=trial_ends_at,
         max_routers=default_tier.max_routers if default_tier else 5,
         max_customers=default_tier.max_customers if default_tier else 50,
-        max_staff_users=default_tier.max_staff_users if default_tier else 3,
+        max_users=default_tier.max_staff_users if default_tier else 3,
+        features=default_tier.trial_features if default_tier and default_tier.trial_features else {},
     )
     db.add(organization)
     await db.flush()  # Get organization ID
@@ -391,9 +392,50 @@ async def complete_registration(
         last_name=data.admin_last_name,
         role=UserRole.ISP_ADMIN,
         status=UserStatus.ACTIVE,
-        is_email_verified=True,
+        email_verified_at=datetime.utcnow(),
     )
     db.add(admin_user)
+
+    await db.flush()
+
+    # Create default organization settings
+    from app.models.organization import OrganizationSettings
+    org_settings = OrganizationSettings(
+        organization_id=organization.id,
+        enable_mikrotik_status_notifications=True,
+        send_hotspot_payment_confirmation=True,
+        hotspot_payment_confirmation_sms=(
+            "Hello @username! You've successfully subscribed to @package_name. "
+            "Username: @username, Password: @password, Expires: @expiry_date. Thank you!"
+        ),
+        send_pppoe_payment_confirmation=True,
+        pppoe_payment_confirmation_sms=(
+            "Hello @username! You've successfully subscribed to @package_name. "
+            "Username: @username, Password: @password, Expires: @expiry_date. Thank you!"
+        ),
+        send_hotspot_expiry_notification=True,
+        hotspot_expiry_notification_sms=(
+            "Hello @username! Your @package_name subscription expired on @expiry_date. "
+            "Renew now to continue enjoying our services."
+        ),
+        send_pppoe_expiry_notification=True,
+        pppoe_expiry_notification_sms=(
+            "Hello @username! Your @package_name subscription expired on @expiry_date. "
+            "Renew now to continue enjoying our services."
+        ),
+        send_hotspot_expiry_reminder=True,
+        hotspot_expiry_reminder_sms=(
+            "Hello @username! Your @package_name subscription expires in @days_left days on @expiry_date. "
+            "Renew now to avoid interruption."
+        ),
+        send_pppoe_expiry_reminder=True,
+        pppoe_expiry_reminder_sms=(
+            "Hello @username! Your @package_name subscription expires in @days_left days on @expiry_date. "
+            "Renew now to avoid interruption."
+        ),
+        whatsapp_enabled=False,
+    )
+    db.add(org_settings)
 
     await db.commit()
     await db.refresh(organization)

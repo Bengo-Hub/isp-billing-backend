@@ -23,7 +23,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db
 from app.api.deps_tenant import get_organization_by_slug
-from app.models.organization import Organization
+from app.models.organization import Organization, OrganizationSettings
 from app.models.plan import ServicePlan, PlanType, PlanStatus
 from app.models.customer_portal import VoucherCode, CustomerSession, CustomerPurchase, VoucherStatus, SessionStatus
 from app.models.subscription import Subscription, SubscriptionStatus
@@ -120,6 +120,7 @@ class PortalConfigResponse(BaseModel):
     portal_description: Optional[str]
     show_packages: bool
     allow_guest_purchases: bool
+    redirect_url: str = "https://www.google.com"
 
 
 class HotspotLoginRequest(BaseModel):
@@ -149,6 +150,7 @@ class HotspotLoginResponse(BaseModel):
 @router.get("/{org_slug}/config", response_model=PortalConfigResponse)
 async def get_portal_config(
     org_slug: str,
+    db: AsyncSession = Depends(get_db),
     organization: Organization = Depends(get_organization_by_slug),
 ):
     """
@@ -156,10 +158,17 @@ async def get_portal_config(
 
     Public endpoint - no authentication required.
     """
-    # Get organization settings (defaults to True for both)
-    # TODO: Add organization_settings table if custom portal settings are needed
-    show_packages = True
-    allow_guest = True
+    # Get organization settings
+    settings_result = await db.execute(
+        select(OrganizationSettings).where(
+            OrganizationSettings.organization_id == organization.id,
+        )
+    )
+    settings = settings_result.scalar_one_or_none()
+
+    redirect_url = settings.hotspot_redirect_url if settings else "https://www.google.com"
+    show_packages = settings.show_packages_on_portal if settings else True
+    allow_guest = settings.allow_guest_purchases if settings else True
 
     return PortalConfigResponse(
         organization_name=organization.name,
@@ -169,6 +178,7 @@ async def get_portal_config(
         portal_description=organization.portal_description,
         show_packages=show_packages,
         allow_guest_purchases=allow_guest,
+        redirect_url=redirect_url,
     )
 
 
@@ -544,7 +554,7 @@ async def purchase_package(
         )
         gateway_config = gateway_result.scalar_one_or_none()
 
-    # Try any active gateway as last resort
+    # Try any active gateway for this organization as last resort
     if not gateway_config:
         gateway_result = await db.execute(
             select(PaymentGatewayConfig)
@@ -552,6 +562,32 @@ async def purchase_package(
                 PaymentGatewayConfig.organization_id == organization.id,
                 PaymentGatewayConfig.is_active == True,
             )
+            .limit(1)
+        )
+        gateway_config = gateway_result.scalar_one_or_none()
+
+    # Fallback to platform-level gateway if no org-level gateway found
+    if not gateway_config and requested_gateway_type:
+        gateway_result = await db.execute(
+            select(PaymentGatewayConfig)
+            .where(
+                PaymentGatewayConfig.organization_id.is_(None),
+                PaymentGatewayConfig.gateway_type == requested_gateway_type,
+                PaymentGatewayConfig.is_active == True,
+            )
+            .limit(1)
+        )
+        gateway_config = gateway_result.scalar_one_or_none()
+
+    # Fallback to any active platform-level gateway
+    if not gateway_config:
+        gateway_result = await db.execute(
+            select(PaymentGatewayConfig)
+            .where(
+                PaymentGatewayConfig.organization_id.is_(None),
+                PaymentGatewayConfig.is_active == True,
+            )
+            .order_by(PaymentGatewayConfig.is_primary.desc())
             .limit(1)
         )
         gateway_config = gateway_result.scalar_one_or_none()
@@ -596,19 +632,18 @@ async def purchase_package(
     db.add(purchase)
     await db.commit()
 
-    # Build callback URL for Paystack
+    # Build callback URL for Paystack with payment type context
     callback_url = None
     if gateway_config.gateway_type == GatewayType.PAYSTACK:
         # Use the request origin for callback
         origin = request.headers.get("origin", "")
         if origin:
-            callback_url = f"{origin}/payment/callback"
+            callback_url = f"{origin}/payment/callback?payment_type=hotspot_purchase&org={org_slug}"
 
     # Initiate payment
     payment_result = await gateway.initiate_payment(
         amount=Decimal(str(plan.price)),
         phone_number=data.phone_number or "",
-        email=data.email,
         reference=reference,
         description=f"{plan.name} - {organization.name}",
         callback_url=callback_url,

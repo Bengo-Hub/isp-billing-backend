@@ -553,7 +553,7 @@ class PlanSeeder:
         return templates
 
     async def _create_standard_templates(self) -> List[PackageTemplate]:
-        """Create standard package templates matching Centipid screenshots."""
+        """Create standard package templates matching CodeVertex screenshots."""
         templates = []
         
         template_data = [

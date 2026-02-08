@@ -8,14 +8,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.system_log import SystemLog, LogLevel
 from app.api.deps import PaginationParams
+from app.core.tenant_middleware import get_current_organization_id
 
 
 class SystemLogService:
     """System logs service."""
 
-    def __init__(self, db: AsyncSession, organization_id: int):
+    def __init__(self, db: AsyncSession, organization_id: Optional[int] = None):
         self.db = db
-        self.organization_id = organization_id
+        # Use explicitly passed org_id, or fall back to centralized tenant context
+        self.organization_id = organization_id or get_current_organization_id()
 
     async def get_all(
         self,

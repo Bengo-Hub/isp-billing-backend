@@ -15,23 +15,28 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from jinja2 import Template
-from sqlalchemy import select, func, and_, text
+from sqlalchemy import select, func, and_, or_, text, case, extract
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.models.user import User
-from app.models.subscription import Subscription, SubscriptionStatus, SubscriptionUsageLog
+from app.models.user import User, UserRole
+from app.models.subscription import Subscription, SubscriptionStatus, SubscriptionType, SubscriptionUsageLog
 from app.models.billing import Invoice, Payment, InvoiceStatus, PaymentStatus
 from app.models.plan import ServicePlan, PlanType
 from app.models.router import Router, RouterStatus
-from app.models.notification import SupportTicket, TicketStatus, TicketPriority
+from app.models.notification import Notification, NotificationType, SupportTicket, TicketStatus, TicketPriority
+from app.models.expense import Expense
 from app.api.deps import PaginationParams
+from app.core.tenant_middleware import get_current_organization_id
 
 
 class ReportsService:
     """Reports and analytics service using Polars for data processing."""
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, organization_id: Optional[int] = None):
         self.db = db
+        # Use explicitly passed org_id, or fall back to centralized tenant context
+        self.organization_id = organization_id or get_current_organization_id()
 
     async def get_subscription_analytics(
         self,
@@ -47,12 +52,13 @@ class ReportsService:
             end_date = datetime.utcnow()
 
         # Build query
-        query = select(Subscription).where(
-            and_(
-                Subscription.created_at >= start_date,
-                Subscription.created_at <= end_date
-            )
-        )
+        filters = [
+            Subscription.created_at >= start_date,
+            Subscription.created_at <= end_date,
+        ]
+        if self.organization_id:
+            filters.append(Subscription.organization_id == self.organization_id)
+        query = select(Subscription).where(and_(*filters))
 
         if plan_id:
             query = query.where(Subscription.plan_id == plan_id)
@@ -153,22 +159,18 @@ class ReportsService:
             end_date = datetime.utcnow()
 
         # Get invoices
-        invoice_query = select(Invoice).where(
-            and_(
-                Invoice.created_at >= start_date,
-                Invoice.created_at <= end_date
-            )
-        )
+        inv_filters = [Invoice.created_at >= start_date, Invoice.created_at <= end_date]
+        if self.organization_id:
+            inv_filters.append(Invoice.organization_id == self.organization_id)
+        invoice_query = select(Invoice).where(and_(*inv_filters))
         invoice_result = await self.db.execute(invoice_query)
         invoices = invoice_result.scalars().all()
 
         # Get payments
-        payment_query = select(Payment).where(
-            and_(
-                Payment.created_at >= start_date,
-                Payment.created_at <= end_date
-            )
-        )
+        pay_filters = [Payment.created_at >= start_date, Payment.created_at <= end_date]
+        if self.organization_id:
+            pay_filters.append(Payment.organization_id == self.organization_id)
+        payment_query = select(Payment).where(and_(*pay_filters))
         payment_result = await self.db.execute(payment_query)
         payments = payment_result.scalars().all()
 
@@ -279,16 +281,19 @@ class ReportsService:
 
         # Get routers
         router_query = select(Router)
+        if self.organization_id:
+            router_query = router_query.where(Router.organization_id == self.organization_id)
         router_result = await self.db.execute(router_query)
         routers = router_result.scalars().all()
 
         # Get subscriptions for router usage
-        subscription_query = select(Subscription).where(
-            and_(
-                Subscription.created_at >= start_date,
-                Subscription.created_at <= end_date
-            )
-        )
+        sub_filters = [
+            Subscription.created_at >= start_date,
+            Subscription.created_at <= end_date,
+        ]
+        if self.organization_id:
+            sub_filters.append(Subscription.organization_id == self.organization_id)
+        subscription_query = select(Subscription).where(and_(*sub_filters))
         subscription_result = await self.db.execute(subscription_query)
         subscriptions = subscription_result.scalars().all()
 
@@ -376,12 +381,13 @@ class ReportsService:
             end_date = datetime.utcnow()
 
         # Get tickets
-        ticket_query = select(SupportTicket).where(
-            and_(
-                SupportTicket.created_at >= start_date,
-                SupportTicket.created_at <= end_date
-            )
-        )
+        ticket_filters = [
+            SupportTicket.created_at >= start_date,
+            SupportTicket.created_at <= end_date,
+        ]
+        if self.organization_id:
+            ticket_filters.append(SupportTicket.organization_id == self.organization_id)
+        ticket_query = select(SupportTicket).where(and_(*ticket_filters))
         ticket_result = await self.db.execute(ticket_query)
         tickets = ticket_result.scalars().all()
 
@@ -469,6 +475,374 @@ class ReportsService:
             "tickets_by_category": {item["category"]: item["count"] for item in tickets_by_category},
         }
 
+    async def get_dashboard_charts(self) -> Dict[str, Any]:
+        """Get all chart data for the dashboard in a single call."""
+        now = datetime.utcnow()
+        org_id = self.organization_id
+
+        # --- 1. Payments vs Expenses chart (last 10 months) ---
+        payments_start = now - timedelta(days=300)
+        inv_month_expr = func.to_char(Invoice.issue_date, 'YYYY-MM')
+        inv_filters = [Invoice.issue_date >= payments_start, Invoice.status == InvoiceStatus.PAID]
+        if org_id:
+            inv_filters.append(Invoice.organization_id == org_id)
+        inv_query = select(
+            inv_month_expr.label('month'),
+            func.sum(Invoice.paid_amount).label('payments'),
+        ).where(and_(*inv_filters)).group_by(inv_month_expr).order_by(text("month"))
+        inv_result = await self.db.execute(inv_query)
+        payments_by_month = {r.month: float(r.payments or 0) for r in inv_result.all()}
+
+        exp_filters = [Expense.date >= payments_start.date()]
+        if org_id:
+            exp_filters.append(Expense.organization_id == org_id)
+        exp_month_expr = func.to_char(Expense.date, 'YYYY-MM')
+        exp_query = select(
+            exp_month_expr.label('month'),
+            func.sum(Expense.amount).label('expenses'),
+        ).where(and_(*exp_filters)).group_by(
+            exp_month_expr
+        ).order_by(text("month"))
+        exp_result = await self.db.execute(exp_query)
+        expenses_by_month = {r.month: float(r.expenses or 0) for r in exp_result.all()}
+
+        # Build last 10 months list
+        month_labels = []
+        for i in range(9, -1, -1):
+            dt = now - timedelta(days=i * 30)
+            month_labels.append(dt.strftime('%Y-%m'))
+        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        payments_chart = []
+        for key in month_labels:
+            try:
+                m_idx = int(key.split('-')[1]) - 1
+                label = month_names[m_idx]
+            except (ValueError, IndexError):
+                label = key
+            payments_chart.append({
+                "month": label,
+                "payments": payments_by_month.get(key, 0),
+                "expenses": expenses_by_month.get(key, 0),
+            })
+
+        # --- 2. Active Users chart (last 7 days) ---
+        day_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+        active_users_chart = []
+        for i in range(6, -1, -1):
+            day = now - timedelta(days=i)
+            day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+
+            hotspot_filters = [
+                Subscription.subscription_type == SubscriptionType.HOTSPOT,
+                Subscription.status == SubscriptionStatus.ACTIVE,
+                or_(
+                    and_(Subscription.last_activity >= day_start, Subscription.last_activity < day_end),
+                    and_(Subscription.last_activity.is_(None),
+                         Subscription.start_date <= day_end, Subscription.end_date >= day_start)
+                ),
+            ]
+            if org_id:
+                hotspot_filters.append(Subscription.organization_id == org_id)
+            hotspot_q = select(func.count()).select_from(Subscription).where(and_(*hotspot_filters))
+
+            pppoe_filters = [
+                Subscription.subscription_type == SubscriptionType.PPPOE,
+                Subscription.status == SubscriptionStatus.ACTIVE,
+                or_(
+                    and_(Subscription.last_activity >= day_start, Subscription.last_activity < day_end),
+                    and_(Subscription.last_activity.is_(None),
+                         Subscription.start_date <= day_end, Subscription.end_date >= day_start)
+                ),
+            ]
+            if org_id:
+                pppoe_filters.append(Subscription.organization_id == org_id)
+            pppoe_q = select(func.count()).select_from(Subscription).where(and_(*pppoe_filters))
+            h_result = await self.db.execute(hotspot_q)
+            p_result = await self.db.execute(pppoe_q)
+            active_users_chart.append({
+                "day": day_names[day.weekday()],
+                "hotspot": h_result.scalar() or 0,
+                "pppoe": p_result.scalar() or 0,
+            })
+
+        # --- 3. Retention chart (last 6 months) ---
+        retention_chart = []
+        for i in range(5, -1, -1):
+            month_start = (now - timedelta(days=i * 30)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            if month_start.month == 12:
+                month_end = month_start.replace(year=month_start.year + 1, month=1)
+            else:
+                month_end = month_start.replace(month=month_start.month + 1)
+
+            new_filters = [Subscription.created_at >= month_start, Subscription.created_at < month_end]
+            churned_filters = [
+                Subscription.end_date >= month_start,
+                Subscription.end_date < month_end,
+                Subscription.status.in_([SubscriptionStatus.EXPIRED, SubscriptionStatus.CANCELLED]),
+            ]
+            returning_filters = [
+                Subscription.created_at >= month_start,
+                Subscription.created_at < month_end,
+                Subscription.is_auto_renewal == True,
+            ]
+            if org_id:
+                new_filters.append(Subscription.organization_id == org_id)
+                churned_filters.append(Subscription.organization_id == org_id)
+                returning_filters.append(Subscription.organization_id == org_id)
+            new_q = select(func.count()).select_from(Subscription).where(and_(*new_filters))
+            churned_q = select(func.count()).select_from(Subscription).where(and_(*churned_filters))
+            returning_q = select(func.count()).select_from(Subscription).where(and_(*returning_filters))
+
+            new_count = (await self.db.execute(new_q)).scalar() or 0
+            churned_count = (await self.db.execute(churned_q)).scalar() or 0
+            returning_count = (await self.db.execute(returning_q)).scalar() or 0
+
+            retention_chart.append({
+                "month": month_names[month_start.month - 1],
+                "newC": new_count,
+                "returning": returning_count,
+                "churned": churned_count,
+            })
+
+        # --- 4. Data Usage chart (last 14 days) ---
+        data_usage_chart = []
+        for i in range(13, -1, -1):
+            day = now - timedelta(days=i)
+            day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+
+            usage_filters = [SubscriptionUsageLog.log_date >= day_start, SubscriptionUsageLog.log_date < day_end]
+            if org_id:
+                usage_filters.append(Subscription.organization_id == org_id)
+            usage_q = select(
+                Subscription.subscription_type,
+                func.sum(SubscriptionUsageLog.bytes_downloaded + SubscriptionUsageLog.bytes_uploaded).label('total_bytes'),
+            ).join(
+                Subscription, SubscriptionUsageLog.subscription_id == Subscription.id
+            ).where(and_(*usage_filters)).group_by(Subscription.subscription_type)
+
+            usage_result = await self.db.execute(usage_q)
+            usage_by_type = {r.subscription_type: float(r.total_bytes or 0) for r in usage_result.all()}
+
+            data_usage_chart.append({
+                "date": day.strftime('%d %b'),
+                "hotspot": round(usage_by_type.get(SubscriptionType.HOTSPOT, 0) / (1024 ** 3), 2),
+                "pppoe": round(usage_by_type.get(SubscriptionType.PPPOE, 0) / (1024 ** 3), 2),
+            })
+
+        # --- 5. Package Utilization chart (active subscriptions by plan) ---
+        pkg_filters = [Subscription.status == SubscriptionStatus.ACTIVE]
+        if org_id:
+            pkg_filters.append(Subscription.organization_id == org_id)
+        pkg_q = select(
+            ServicePlan.name,
+            func.count(Subscription.id).label('count'),
+        ).join(
+            Subscription, Subscription.plan_id == ServicePlan.id
+        ).where(and_(*pkg_filters)).group_by(ServicePlan.name).order_by(func.count(Subscription.id).desc())
+        pkg_result = await self.db.execute(pkg_q)
+        package_utilization_chart = [
+            {"name": r.name, "value": r.count} for r in pkg_result.all()
+        ]
+
+        # --- 6. Revenue Forecast chart (last 12 months + 3 month forecast) ---
+        revenue_months = []
+        for i in range(11, -1, -1):
+            dt = now - timedelta(days=i * 30)
+            revenue_months.append(dt.strftime('%Y-%m'))
+
+        rev_month_expr = func.to_char(Invoice.issue_date, 'YYYY-MM')
+        rev_filters = [Invoice.issue_date >= now - timedelta(days=365), Invoice.status == InvoiceStatus.PAID]
+        if org_id:
+            rev_filters.append(Invoice.organization_id == org_id)
+        rev_q = select(
+            rev_month_expr.label('month'),
+            func.sum(Invoice.paid_amount).label('revenue'),
+        ).where(and_(*rev_filters)).group_by(rev_month_expr).order_by(text("month"))
+        rev_result = await self.db.execute(rev_q)
+        revenue_by_month = {r.month: float(r.revenue or 0) for r in rev_result.all()}
+
+        revenue_values = [revenue_by_month.get(m, 0) for m in revenue_months]
+        # Simple linear forecast based on last 3 months average growth
+        recent = revenue_values[-3:] if len(revenue_values) >= 3 else revenue_values
+        avg_recent = sum(recent) / len(recent) if recent else 0
+        if len(recent) >= 2 and recent[0] > 0:
+            growth = (recent[-1] - recent[0]) / max(len(recent) - 1, 1)
+        else:
+            growth = 0
+
+        revenue_forecast_chart = []
+        for idx, key in enumerate(revenue_months):
+            try:
+                m_idx = int(key.split('-')[1]) - 1
+                label = month_names[m_idx]
+            except (ValueError, IndexError):
+                label = key
+            revenue_forecast_chart.append({
+                "month": label,
+                "revenue": revenue_values[idx],
+            })
+        # Add 3 forecast months
+        last_val = revenue_values[-1] if revenue_values else 0
+        for i in range(1, 4):
+            forecast_dt = now + timedelta(days=i * 30)
+            try:
+                label = month_names[forecast_dt.month - 1]
+            except IndexError:
+                label = forecast_dt.strftime('%b')
+            revenue_forecast_chart.append({
+                "month": label,
+                "forecast": round(max(0, last_val + growth * i), 2),
+            })
+
+        # --- 7. SMS Sent chart (last 7 days) ---
+        sms_sent_chart = []
+        for i in range(6, -1, -1):
+            day = now - timedelta(days=i)
+            day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+
+            sms_filters = [
+                Notification.notification_type == NotificationType.SMS,
+                Notification.sent_at >= day_start,
+                Notification.sent_at < day_end,
+            ]
+            if org_id:
+                sms_filters.append(Notification.organization_id == org_id)
+            sms_q = select(func.count()).select_from(Notification).where(and_(*sms_filters))
+            sms_count = (await self.db.execute(sms_q)).scalar() or 0
+            sms_sent_chart.append({
+                "day": day_names[day.weekday()],
+                "sent": sms_count,
+            })
+
+        # --- 8. Network Usage chart (last 7 days - download/upload) ---
+        network_usage_chart = []
+        for i in range(6, -1, -1):
+            day = now - timedelta(days=i)
+            day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+
+            net_filters = [SubscriptionUsageLog.log_date >= day_start, SubscriptionUsageLog.log_date < day_end]
+            net_q = select(
+                func.sum(SubscriptionUsageLog.bytes_downloaded).label('dl'),
+                func.sum(SubscriptionUsageLog.bytes_uploaded).label('ul'),
+            )
+            if org_id:
+                net_q = net_q.join(Subscription, SubscriptionUsageLog.subscription_id == Subscription.id)
+                net_filters.append(Subscription.organization_id == org_id)
+            net_q = net_q.where(and_(*net_filters))
+            net_result = await self.db.execute(net_q)
+            row = net_result.one_or_none()
+            dl = float(row.dl or 0) if row else 0
+            ul = float(row.ul or 0) if row else 0
+
+            network_usage_chart.append({
+                "day": day_names[day.weekday()],
+                "download": round(dl / (1024 ** 3), 2),
+                "upload": round(ul / (1024 ** 3), 2),
+            })
+
+        # --- 9. Registrations chart (last 7 days) ---
+        registrations_chart = []
+        for i in range(6, -1, -1):
+            day = now - timedelta(days=i)
+            day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+
+            reg_filters = [
+                User.created_at >= day_start,
+                User.created_at < day_end,
+                User.role == UserRole.CUSTOMER,
+            ]
+            if org_id:
+                reg_filters.append(User.organization_id == org_id)
+            reg_q = select(func.count()).select_from(User).where(and_(*reg_filters))
+            reg_count = (await self.db.execute(reg_q)).scalar() or 0
+            registrations_chart.append({
+                "day": day_names[day.weekday()],
+                "users": reg_count,
+            })
+
+        # --- 10. Most Active Users (top 10 by data usage) ---
+        active_u_filters = [Subscription.status == SubscriptionStatus.ACTIVE]
+        if org_id:
+            active_u_filters.append(Subscription.organization_id == org_id)
+        active_users_q = select(
+            Subscription.username,
+            Subscription.total_bytes_used,
+            User.phone,
+        ).join(
+            User, Subscription.user_id == User.id
+        ).where(and_(*active_u_filters)).order_by(Subscription.total_bytes_used.desc()).limit(10)
+        active_users_result = await self.db.execute(active_users_q)
+
+        most_active_users = []
+        for r in active_users_result.all():
+            total_gb = (r.total_bytes_used or 0) / (1024 ** 3)
+            if total_gb >= 1:
+                data_str = f"{total_gb:.2f}GB"
+            else:
+                data_str = f"{total_gb * 1024:.0f}MB"
+            most_active_users.append({
+                "username": r.username or "N/A",
+                "data": data_str,
+                "phone": r.phone or "N/A",
+            })
+
+        # --- 11. Package Performance (per-plan metrics) ---
+        current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        perf_filters = [Subscription.status == SubscriptionStatus.ACTIVE]
+        if org_id:
+            perf_filters.append(Subscription.organization_id == org_id)
+        perf_q = select(
+            ServicePlan.id,
+            ServicePlan.name,
+            ServicePlan.price,
+            ServicePlan.currency,
+            func.count(Subscription.id).label('active_count'),
+            func.coalesce(func.avg(Subscription.total_bytes_used), 0).label('avg_bytes'),
+        ).join(
+            Subscription, Subscription.plan_id == ServicePlan.id
+        ).where(and_(*perf_filters)).group_by(
+            ServicePlan.id, ServicePlan.name, ServicePlan.price, ServicePlan.currency
+        ).order_by(func.count(Subscription.id).desc())
+
+        perf_result = await self.db.execute(perf_q)
+        package_performance = []
+        for r in perf_result.all():
+            # Monthly revenue: count active * plan price (approximate)
+            monthly_revenue = float(r.price or 0) * r.active_count
+            avg_gb = float(r.avg_bytes or 0) / (1024 ** 3)
+            arpu = monthly_revenue / r.active_count if r.active_count > 0 else 0
+            currency = r.currency or "KES"
+            package_performance.append({
+                "name": r.name,
+                "price": f"{currency} {float(r.price or 0):,.2f}",
+                "active": r.active_count,
+                "monthlyRevenue": f"{currency} {monthly_revenue:,.2f}",
+                "avgUsage": f"{avg_gb:.2f} GB",
+                "arpu": f"{currency} {arpu:,.2f}",
+            })
+
+        return {
+            "payments_chart": payments_chart,
+            "active_users_chart": active_users_chart,
+            "retention_chart": retention_chart,
+            "data_usage_chart": data_usage_chart,
+            "package_utilization_chart": package_utilization_chart,
+            "revenue_forecast_chart": revenue_forecast_chart,
+            "sms_sent_chart": sms_sent_chart,
+            "network_usage_chart": network_usage_chart,
+            "registrations_chart": registrations_chart,
+            "most_active_users": most_active_users,
+            "package_performance": package_performance,
+            "generated_at": now.isoformat(),
+        }
+
     async def generate_subscription_report_csv(
         self,
         start_date: Optional[datetime] = None,
@@ -483,18 +857,18 @@ class ReportsService:
             end_date = datetime.utcnow()
 
         # Get detailed subscription data
-        query = select(Subscription).where(
-            and_(
-                Subscription.created_at >= start_date,
-                Subscription.created_at <= end_date
-            )
-        )
-
+        filters = [
+            Subscription.created_at >= start_date,
+            Subscription.created_at <= end_date,
+        ]
+        if self.organization_id:
+            filters.append(Subscription.organization_id == self.organization_id)
         if plan_id:
-            query = query.where(Subscription.plan_id == plan_id)
+            filters.append(Subscription.plan_id == plan_id)
         if router_id:
-            query = query.where(Subscription.router_id == router_id)
+            filters.append(Subscription.router_id == router_id)
 
+        query = select(Subscription).where(and_(*filters))
         result = await self.db.execute(query)
         subscriptions = result.scalars().all()
 
@@ -532,12 +906,13 @@ class ReportsService:
             end_date = datetime.utcnow()
 
         # Get detailed billing data
-        invoice_query = select(Invoice).where(
-            and_(
-                Invoice.created_at >= start_date,
-                Invoice.created_at <= end_date
-            )
-        )
+        inv_filters = [
+            Invoice.created_at >= start_date,
+            Invoice.created_at <= end_date,
+        ]
+        if self.organization_id:
+            inv_filters.append(Invoice.organization_id == self.organization_id)
+        invoice_query = select(Invoice).where(and_(*inv_filters))
         invoice_result = await self.db.execute(invoice_query)
         invoices = invoice_result.scalars().all()
 
@@ -759,16 +1134,17 @@ class ReportsService:
     async def _add_subscription_excel_content(self, writer, start_date, end_date, **kwargs):
         """Add subscription content to Excel."""
         # Get detailed data
-        query = select(Subscription).where(
-            and_(
-                Subscription.created_at >= start_date,
-                Subscription.created_at <= end_date
-            )
-        )
+        filters = [
+            Subscription.created_at >= start_date,
+            Subscription.created_at <= end_date,
+        ]
+        if self.organization_id:
+            filters.append(Subscription.organization_id == self.organization_id)
         if kwargs.get('plan_id'):
-            query = query.where(Subscription.plan_id == kwargs['plan_id'])
+            filters.append(Subscription.plan_id == kwargs['plan_id'])
         if kwargs.get('router_id'):
-            query = query.where(Subscription.router_id == kwargs['router_id'])
+            filters.append(Subscription.router_id == kwargs['router_id'])
+        query = select(Subscription).where(and_(*filters))
 
         result = await self.db.execute(query)
         subscriptions = result.scalars().all()
@@ -809,12 +1185,13 @@ class ReportsService:
     async def _add_billing_excel_content(self, writer, start_date, end_date, **kwargs):
         """Add billing content to Excel."""
         # Get detailed data
-        query = select(Invoice).where(
-            and_(
-                Invoice.created_at >= start_date,
-                Invoice.created_at <= end_date
-            )
-        )
+        inv_filters = [
+            Invoice.created_at >= start_date,
+            Invoice.created_at <= end_date,
+        ]
+        if self.organization_id:
+            inv_filters.append(Invoice.organization_id == self.organization_id)
+        query = select(Invoice).where(and_(*inv_filters))
         result = await self.db.execute(query)
         invoices = result.scalars().all()
 
@@ -860,7 +1237,10 @@ class ReportsService:
     async def _add_router_excel_content(self, writer, start_date, end_date, **kwargs):
         """Add router content to Excel."""
         # Get detailed data
-        query = select(Router)
+        if self.organization_id:
+            query = select(Router).where(Router.organization_id == self.organization_id)
+        else:
+            query = select(Router)
         result = await self.db.execute(query)
         routers = result.scalars().all()
 
@@ -899,12 +1279,13 @@ class ReportsService:
     async def _add_ticket_excel_content(self, writer, start_date, end_date, **kwargs):
         """Add ticket content to Excel."""
         # Get detailed data
-        query = select(SupportTicket).where(
-            and_(
-                SupportTicket.created_at >= start_date,
-                SupportTicket.created_at <= end_date
-            )
-        )
+        ticket_filters = [
+            SupportTicket.created_at >= start_date,
+            SupportTicket.created_at <= end_date,
+        ]
+        if self.organization_id:
+            ticket_filters.append(SupportTicket.organization_id == self.organization_id)
+        query = select(SupportTicket).where(and_(*ticket_filters))
         result = await self.db.execute(query)
         tickets = result.scalars().all()
 

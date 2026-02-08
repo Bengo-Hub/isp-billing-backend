@@ -14,7 +14,8 @@ from app.api.deps import (
 )
 from app.core.database import get_db
 from app.models.user import User, UserRole, UserStatus
-from app.schemas.user import User as UserSchema, UserUpdate, UserProfile
+from app.core.security import get_password_hash, create_access_token
+from app.schemas.user import User as UserSchema, UserUpdate, UserProfile, AdminSetPassword
 from app.modules.auth import UserService
 
 router = APIRouter()
@@ -64,20 +65,30 @@ async def get_users(
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Get all users (admin only)."""
+    """Get all users (admin only).
+
+    Platform owners see all users. ISP admins are scoped to their organization.
+    """
     user_service = UserService(db)
+
+    # ISP admins are scoped to their own org
+    organization_id = None
+    if current_user.role != UserRole.PLATFORM_OWNER:
+        organization_id = current_user.organization_id
+
     result = await user_service.get_all(
         page=pagination.page,
         size=pagination.size,
         role=role,
         status=status,
         search=search,
+        organization_id=organization_id,
     )
-    
+
     # Convert SQLAlchemy models to Pydantic schemas
     users_data = [UserSchema.model_validate(user) for user in result["users"]]
     result["users"] = users_data
-    
+
     return result
 
 
@@ -215,3 +226,70 @@ async def delete_user(
         )
     
     return {"message": "User deleted successfully"}
+
+
+@router.post("/{user_id}/set-password")
+async def admin_set_password(
+    user_id: int,
+    password_data: AdminSetPassword,
+    current_user: User = Depends(require_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """Set a user's password (admin only). Does not require the current password."""
+    user_service = UserService(db)
+    user = await user_service.get_by_id(user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    # Prevent non-platform-owners from changing platform owner passwords
+    if user.role == UserRole.PLATFORM_OWNER and current_user.role != UserRole.PLATFORM_OWNER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot change platform owner password",
+        )
+
+    user.hashed_password = get_password_hash(password_data.new_password)
+    await db.commit()
+
+    return {"message": "Password updated successfully"}
+
+
+@router.post("/{user_id}/generate-api-token")
+async def generate_api_token(
+    user_id: int,
+    current_user: User = Depends(require_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Generate a long-lived API token for a user (admin only)."""
+    from datetime import timedelta
+
+    user_service = UserService(db)
+    user = await user_service.get_by_id(user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    token = create_access_token(
+        data={
+            "sub": str(user.id),
+            "username": user.username,
+            "role": user.role.value if hasattr(user.role, "value") else str(user.role),
+            "organization_id": user.organization_id,
+            "token_purpose": "api",
+        },
+        expires_delta=timedelta(days=365),
+    )
+
+    return {
+        "token": token,
+        "user_id": user.id,
+        "username": user.username,
+        "expires_in_days": 365,
+    }
