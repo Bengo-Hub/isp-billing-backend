@@ -25,171 +25,85 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PROPAGATE_PAT || secrets.GH_PAT || secrets.GIT_TOKEN || github.token }}
         run: |
-          echo "======================================"
-          echo "🔍 DIAGNOSTIC: Secret Sync Analysis"
-          echo "======================================"
-          echo ""
-          
-          # Verify GH_TOKEN is available
-          if [ -z "$GH_TOKEN" ]; then
-            echo "❌ FATAL: GH_TOKEN is not available"
-            echo "Cannot authenticate with GitHub API"
-            exit 1
-          fi
-          echo "✅ GH_TOKEN available (${#GH_TOKEN} chars)"
-          echo ""
-          
-          # Define all required secrets with expected lengths
-          declare -A REQUIRED_SECRETS=(
-            ["REGISTRY_USERNAME"]=10
-            ["REGISTRY_PASSWORD"]=36
-            ["REGISTRY_EMAIL"]=20
-            ["GIT_TOKEN"]=40
-            ["POSTGRES_PASSWORD"]=11
-            ["REDIS_PASSWORD"]=11
-            ["RABBITMQ_PASSWORD"]=11
-            ["KUBE_CONFIG"]=7540
+          # Define all required secrets
+          REQUIRED_SECRETS=(
+            "REGISTRY_USERNAME"
+            "REGISTRY_PASSWORD"
+            "REGISTRY_EMAIL"
+            "GIT_TOKEN"
+            "POSTGRES_PASSWORD"
+            "REDIS_PASSWORD"
+            "RABBITMQ_PASSWORD"
+            "KUBE_CONFIG"
           )
           
-          echo "📋 Required secrets (${#REQUIRED_SECRETS[@]} total):"
-          for secret in "${!REQUIRED_SECRETS[@]}"; do
-            echo "  - $secret (expected ~${REQUIRED_SECRETS[$secret]} chars)"
-          done
+          echo "� Checking which secrets are missing..."
           echo ""
           
-          echo "🔍 Checking current state in repo..."
+          # Get current secrets in repo
           EXISTING_SECRETS=$(gh secret list --repo ${{ github.repository }} 2>/dev/null || echo "")
-          
-          if [ -z "$EXISTING_SECRETS" ]; then
-            echo "📦 No secrets found in repository"
-          else
-            echo "📦 Current secrets in repository:"
-            echo "$EXISTING_SECRETS" | while read -r line; do
-              echo "  ✓ $line"
-            done
-          fi
-          echo ""
           
           # Build list of missing secrets
           MISSING_SECRETS=()
-          for secret in "${!REQUIRED_SECRETS[@]}"; do
+          for secret in "${REQUIRED_SECRETS[@]}"; do
             if echo "$EXISTING_SECRETS" | grep -q "^${secret}[[:space:]]"; then
-              # Get last updated time
-              UPDATED=$(echo "$EXISTING_SECRETS" | grep "^${secret}[[:space:]]" | awk '{print $2, $3, $4, $5}')
-              echo "✅ $secret exists (updated: $UPDATED)"
+              echo "✅ $secret already exists"
             else
-              echo "❌ $secret is MISSING"
+              echo "❌ $secret is missing"
               MISSING_SECRETS+=("$secret")
             fi
           done
-          echo ""
           
+          echo ""
           if [ ${#MISSING_SECRETS[@]} -eq 0 ]; then
             echo "✅ All ${#REQUIRED_SECRETS[@]} secrets already exist - no sync needed"
             echo "synced=skipped" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          echo "======================================"
-          echo "📊 Sync Decision"
-          echo "======================================"
-          echo "Total required: ${#REQUIRED_SECRETS[@]}"
-          echo "Already exist: $((${#REQUIRED_SECRETS[@]} - ${#MISSING_SECRETS[@]}))"
-          echo "Need to sync: ${#MISSING_SECRETS[@]}"
+          echo "📊 Summary: ${#MISSING_SECRETS[@]} of ${#REQUIRED_SECRETS[@]} secrets need to be synced"
           echo ""
           
           # Build space-separated list for sync workflow
           SECRETS_TO_SYNC="${MISSING_SECRETS[*]}"
           
-          echo "======================================"
-          echo "🔄 Triggering devops-k8s/sync-secrets"
-          echo "======================================"
-          echo "Target repo: ${{ github.repository }}"
-          echo "Secrets to sync: $SECRETS_TO_SYNC"
+          echo "🔄 Triggering secret sync from devops-k8s..."
+          echo "   Syncing: $SECRETS_TO_SYNC"
           echo ""
           
-          # Trigger the sync workflow
-          TRIGGER_OUTPUT=$(mktemp)
-          if gh workflow run sync-secrets.yml \
+          gh workflow run sync-secrets.yml \
             --repo Bengo-Hub/devops-k8s \
             -f target_repo=${{ github.repository }} \
-            -f secrets="$SECRETS_TO_SYNC" 2>&1 | tee "$TRIGGER_OUTPUT"; then
-            echo ""
-            echo "✅ Sync workflow triggered successfully"
-          else
-            echo ""
-            echo "❌ Failed to trigger sync workflow"
-            cat "$TRIGGER_OUTPUT"
-            exit 1
-          fi
-          rm -f "$TRIGGER_OUTPUT"
-          echo ""
+            -f secrets="$SECRETS_TO_SYNC"
           
-          echo "======================================"
-          echo "⏳ Waiting for Sync Completion"
-          echo "======================================"
-          echo "Max wait time: 5 minutes"
-          echo "Checking every 10 seconds..."
-          echo ""
-          
+          echo "⏳ Waiting for secrets to be synced (max 5 minutes)..."
           ELAPSED=0
           MAX_WAIT=300
-          CHECK_COUNT=0
           
           while [ $ELAPSED -lt $MAX_WAIT ]; do
             sleep 10
             ELAPSED=$((ELAPSED + 10))
-            CHECK_COUNT=$((CHECK_COUNT + 1))
             
-            echo "⏱️  Check $CHECK_COUNT (${ELAPSED}s elapsed)..."
-            
-            # Get fresh secret list
+            # Check if all required secrets now exist
             CURRENT_SECRETS=$(gh secret list --repo ${{ github.repository }} 2>/dev/null || echo "")
-            
-            # Count how many are still missing
             STILL_MISSING=0
-            STILL_MISSING_NAMES=()
             
-            for secret in "${!REQUIRED_SECRETS[@]}"; do
+            for secret in "${REQUIRED_SECRETS[@]}"; do
               if ! echo "$CURRENT_SECRETS" | grep -q "^${secret}[[:space:]]"; then
                 STILL_MISSING=$((STILL_MISSING + 1))
-                STILL_MISSING_NAMES+=("$secret")
               fi
             done
             
             if [ $STILL_MISSING -eq 0 ]; then
-              echo ""
-              echo "======================================"
-              echo "✅ SYNC COMPLETE"
-              echo "======================================"
-              echo "All ${#REQUIRED_SECRETS[@]} secrets now exist in repo"
-              echo "Time taken: ${ELAPSED}s"
-              echo "Secrets synced: ${#MISSING_SECRETS[@]}"
-              echo ""
-              echo "📦 Final secret list:"
-              gh secret list --repo ${{ github.repository }} | while read -r line; do
-                SECRET_NAME=$(echo "$line" | awk '{print $1}')
-                if [[ -n "${REQUIRED_SECRETS[$SECRET_NAME]}" ]]; then
-                  echo "  ✅ $line (expected ~${REQUIRED_SECRETS[$SECRET_NAME]} chars)"
-                fi
-              done
-              echo ""
+              echo "✅ All ${#REQUIRED_SECRETS[@]} secrets now exist (${#MISSING_SECRETS[@]} synced in ${ELAPSED}s)"
               echo "synced=true" >> $GITHUB_OUTPUT
               exit 0
             fi
             
-            echo "   ⏳ Still missing $STILL_MISSING: ${STILL_MISSING_NAMES[*]}"
+            echo "⏳ ${STILL_MISSING} secrets still syncing (${ELAPSED}s elapsed)..."
           done
           
-          echo ""
-          echo "======================================"
-          echo "⚠️  TIMEOUT"
-          echo "======================================"
-          echo "Waited ${MAX_WAIT}s but ${STILL_MISSING} secrets still missing:"
-          for missing in "${STILL_MISSING_NAMES[@]}"; do
-            echo "  ❌ $missing"
-          done
-          echo ""
+          echo "⚠️ Timeout after ${MAX_WAIT}s - secrets may still be syncing"
           echo "synced=partial" >> $GITHUB_OUTPUT
 
   deploy:
@@ -230,35 +144,18 @@ jobs:
           
           if [[ "${{ needs.sync-secrets.outputs.synced }}" == "skipped" ]]; then
             echo "✅ All secrets already existed - no sync was needed"
-            echo ""
-            echo "⚠️  IMPORTANT: GitHub Actions limitation:"
-            echo "Secrets are loaded when the WORKFLOW starts, not when jobs start."
-            echo ""
-            echo "If you just manually created/updated secrets:"
-            echo "  → Re-run this workflow to load the new values"
-            echo ""
-            echo "If secrets existed before this workflow started:"
-            echo "  → They should be loaded correctly below"
-            echo ""
+            echo "Secrets loaded at workflow start should have correct values."
           elif [[ "${{ needs.sync-secrets.outputs.synced }}" == "true" ]]; then
             echo "✅ Missing secrets were synced in previous job"
             echo ""
-            echo "⚠️  CRITICAL: GitHub Actions limitation:"
-            echo "Secrets are loaded when the WORKFLOW STARTS, not during execution."
-            echo ""
-            echo "The sync-secrets job just CREATED secrets in the repo,"
-            echo "but THIS workflow run loaded secrets BEFORE they existed."
-            echo ""
-            echo "Result: New secrets will show as empty/1-char in this run."
-            echo ""
-            echo "✅ SOLUTION: Re-run this workflow now that secrets exist"
-            echo "   The next run will load the correct values (36 chars for REGISTRY_PASSWORD)"
-            echo ""
+            echo "⚠️  NOTE: GitHub Actions loads secrets at workflow start."
+            echo "If secrets were just created, this run may need a re-trigger."
+            echo "The verification step below will confirm."
           else
             echo "⚠️  Secret sync may be incomplete"
             echo "If verification fails below, check secrets manually or re-run"
-            echo ""
           fi
+          echo ""
 
       - name: Verify secrets exist
         run: |
@@ -334,17 +231,22 @@ jobs:
           
           if [[ $MISSING -eq 1 ]] || [[ $INVALID -eq 1 ]]; then
             echo ""
-            echo "❌ ERROR: Secrets are missing or have invalid values!"
+            echo "❌ ERROR: Secrets have invalid values (likely stored as 1-char '-')!"
             echo ""
-            echo "This happens because GitHub Actions loads secrets at WORKFLOW START."
-            echo "The sync-secrets job created them, but this workflow started before they existed."
+            echo "ROOT CAUSE: devops-k8s sync used 'gh secret set --body -' which"
+            echo "stored the literal character '-' instead of the actual secret value."
             echo ""
-            echo "✅ SOLUTION: Re-run this workflow now that secrets exist"
-            echo "   gh workflow run deploy.yml --repo ${{ github.repository }}"
+            echo "FIX: The sync-secrets.yml in devops-k8s has been patched."
+            echo "Delete corrupted secrets and re-sync:"
             echo ""
-            echo "   OR click 'Re-run all jobs' in the GitHub Actions UI"
+            echo "  1. Delete corrupted secrets (they contain '-' not real values):"
+            echo "     for s in REGISTRY_USERNAME REGISTRY_PASSWORD REGISTRY_EMAIL GIT_TOKEN POSTGRES_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD KUBE_CONFIG; do"
+            echo "       gh secret delete \$s --repo ${{ github.repository }} 2>/dev/null"
+            echo "     done"
             echo ""
-            echo "The next run will load the correct secret values (36 chars for REGISTRY_PASSWORD)."
+            echo "  2. Re-run this workflow (sync-secrets job will re-sync correctly)"
+            echo "     gh workflow run deploy.yml --repo ${{ github.repository }}"
+            echo "     OR click 'Re-run all jobs' in the GitHub Actions UI"
             echo ""
             exit 1
           fi
