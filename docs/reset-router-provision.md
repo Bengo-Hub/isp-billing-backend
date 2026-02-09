@@ -48,6 +48,18 @@
   :put "  Removed DNS static entry for captive portal detection"
 }
 
+# Remove DNS redirect NAT rules
+:foreach i in=[/ip/firewall/nat/find comment~"codevertex-dns-redirect"] do={
+  /ip/firewall/nat/remove $i
+  :put "  Removed DNS redirect NAT rule"
+}
+
+# Remove SSL certificates for captive portal
+:foreach i in=[/certificate/find name~"codevertex"] do={
+  /certificate/remove $i
+  :put "  Removed SSL certificate"
+}
+
 # ============================================================================
 # STEP 2: Remove DHCP Configuration
 # ============================================================================
@@ -231,6 +243,16 @@
   :set found true
 }
 
+:if ([:len [/ip/firewall/nat/find comment~"codevertex-dns-redirect"]] > 0) do={
+  :put "WARNING: DNS redirect NAT rules still exist"
+  :set found true
+}
+
+:if ([:len [/certificate/find name~"codevertex"]] > 0) do={
+  :put "WARNING: SSL certificates still exist"
+  :set found true
+}
+
 :if ([:len [/queue/tree/find comment~"codevertex"]] > 0) do={
   :put "WARNING: Queue trees still exist"
   :set found true
@@ -302,6 +324,8 @@
 :put "/ip/hotspot/walled-garden/ip/remove [find comment~\"codevertex\"]"
 :put "/ip/hotspot/user/remove [find comment~\"codevertex\"]"
 :put "/ip/dns/static/remove [find comment~\"codevertex-captive-portal-detection\"]"
+:put "/ip/firewall/nat/remove [find comment~\"codevertex-dns-redirect\"]"
+:put "/certificate/remove [find name~\"codevertex\"]"
 :put ""
 :put "# Remove DHCP"
 :put "/ip/dhcp-server/remove [find name~\"codevertex\"]"

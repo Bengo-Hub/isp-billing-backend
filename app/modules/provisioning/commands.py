@@ -298,10 +298,14 @@ def generate_configuration_commands(
     )
 
     # DHCP Network configuration
+    # IMPORTANT: Use gateway IP as DNS server for DHCP clients (NOT external DNS like 8.8.8.8)
+    # This ensures clients query the router first, which serves DNS static entries for
+    # captive portal detection. The router then forwards non-static queries to upstream DNS.
+    # Without this, clients query external DNS directly, bypassing captive portal detection.
     commands.append(
         {
             "type": "api_call",
-            "command": f"/ip/dhcp-server/network/add address={subnet_address}/{cidr} gateway={gateway} dns-server={dns_list}",
+            "command": f"/ip/dhcp-server/network/add address={subnet_address}/{cidr} gateway={gateway} dns-server={gateway}",
             "description": "Configuring DHCP network parameters",
             "critical": True,
         }
@@ -378,23 +382,56 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
         }
     )
 
+    # =========================================================================
+    # RFC 7710/8910 CAPTIVE PORTAL API SUPPORT (Modern devices: Android 11+, iOS 14+)
+    # =========================================================================
+    # Modern devices detect captive portals via DHCP Option 114 (RFC 7710/8910).
+    # MikroTik sends this option AUTOMATICALLY when BOTH conditions are met:
+    #   1. A dns-name is set on the hotspot profile (e.g., "hotspot.local")
+    #   2. A valid SSL certificate is assigned to the hotspot profile
+    # Without the SSL cert, DHCP Option 114 is NOT sent and modern devices
+    # won't show the "Sign in to Wi-Fi network" popup via the modern API path.
+    #
+    # This is a non-critical step: if certificate creation fails, the hotspot
+    # still works via legacy HTTP interception + DNS static entries.
+    # =========================================================================
+    cert_name = config.get("hotspot_cert_name", "codevertex-hotspot-cert")
+    commands.append(
+        {
+            "type": "api_call",
+            "command": f"/certificate/add name={cert_name} common-name={dns_name} key-size=2048 days-valid=3650",
+            "description": "Creating self-signed SSL certificate for RFC 7710 captive portal API",
+            "critical": False,
+        }
+    )
+    commands.append(
+        {
+            "type": "api_call",
+            "command": f"/certificate/sign {cert_name}",
+            "description": "Signing SSL certificate for captive portal",
+            "critical": False,
+        }
+    )
+
     # Create hotspot profile for external captive portal
-    # MikroTik hotspot will redirect HTTP requests to the login page
-    # For external captive portal: use walled garden + customize login.html
-    # login-by=http-chap allows API-based user authorization after purchase
-    # html-directory=hotspot tells MikroTik to use custom templates from /hotspot/ directory
-    # use-radius=no: Don't use RADIUS server, authenticate locally/via API
-    # http-pap,http-chap: Support both PAP and CHAP authentication methods
-    # http-cookie-lifetime: Keep users logged in for 1 day
-    # split-user-domain=no: Don't split username@domain
+    # login-by methods (dual legacy + modern support):
+    #   - http-chap: Challenge-response auth over HTTP (legacy devices)
+    #   - http-pap: Plain-text auth over HTTP (legacy fallback)
+    #   - https: TLS-encrypted auth + enables RFC 7710 DHCP Option 114 (modern devices)
+    #   - mac-cookie: Server-side MAC-to-credential mapping for auto-re-login (all devices)
+    # html-directory=hotspot: Use custom templates from /hotspot/ directory on router
+    # use-radius=no: Authenticate locally/via API, not RADIUS
+    # http-cookie-lifetime=1d: Browser cookie keeps users logged in for 1 day
+    # mac-cookie-timeout=1d: MAC-based auto-re-login for 1 day (works across browsers)
     # Note: HTTP proxy/interception is enabled automatically by MikroTik hotspot
     profile_cmd = (
         f"/ip/hotspot/profile/add name={profile_name} "
         f"hotspot-address={gateway} dns-name={dns_name} "
         f"html-directory=hotspot "
         f"use-radius=no "
-        f"login-by=http-chap,http-pap "
+        f"login-by=http-chap,http-pap,https,mac-cookie "
         f"http-cookie-lifetime=1d "
+        f"mac-cookie-timeout=1d "
         f"split-user-domain=no"
     )
 
@@ -409,6 +446,18 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
             "command": profile_cmd,
             "description": f"Creating hotspot profile {profile_name}",
             "critical": True,
+        }
+    )
+
+    # Assign SSL certificate to hotspot profile for RFC 7710/8910 support
+    # This is done as a separate SET command so profile creation succeeds even if
+    # certificate creation failed. When cert IS available, this enables DHCP Option 114.
+    commands.append(
+        {
+            "type": "api_call",
+            "command": f"/ip/hotspot/profile/set {profile_name} ssl-certificate={cert_name}",
+            "description": "Assigning SSL certificate to hotspot profile for RFC 7710",
+            "critical": False,
         }
     )
 
@@ -463,52 +512,101 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
     walled_garden_hosts.extend(payment_hosts)
 
-    # CRITICAL: Configure DNS static entries for captive portal detection
-    # Modern devices (Android/iOS/Windows) use HTTPS for connectivity checks,
-    # which MikroTik hotspot can't intercept. By adding DNS static entries
-    # that point these domains to the hotspot address, we force HTTP requests
-    # that the hotspot can intercept, triggering "Tap to Connect" notification.
+    # =========================================================================
+    # CAPTIVE PORTAL DETECTION - DNS STATIC ENTRIES
+    # =========================================================================
+    # Each OS probes specific URLs over HTTP to detect captive portals.
+    # If the probe gets the expected response (e.g., HTTP 204), the device
+    # thinks it has internet access and WON'T show the captive portal popup.
     #
-    # Android connectivity check URLs:
-    # - connectivitycheck.gstatic.com/generate_204
-    # - www.google.com/generate_204
-    # - clients3.google.com/generate_204
+    # By resolving these probe domains to the hotspot gateway IP, the device's
+    # probe request reaches the MikroTik, which intercepts it (since the user
+    # is unauthenticated) and returns an HTTP 302 redirect to the login page.
+    # The device sees "I didn't get the expected 204 - I'm behind a captive
+    # portal" and shows the "Sign in to Wi-Fi" / "Tap to Connect" popup.
     #
-    # iOS connectivity check URLs:
-    # - captive.apple.com/hotspot-detect.html
-    # - *.apple.com
+    # IMPORTANT: TTL=5m ensures that after authentication, the client's DNS
+    # cache expires quickly so it can resolve these domains normally again.
+    # Without TTL, MikroTik uses default 1-day TTL which causes post-auth
+    # connectivity issues (devices cache the fake DNS for 24 hours).
     #
-    # Windows connectivity check URLs:
-    # - www.msftconnecttest.com/connecttest.txt
-    #
-    # These DNS entries make devices think the captive portal is active,
-    # showing the "Tap to Connect" notification.
+    # IMPORTANT: Do NOT add these domains to the walled garden! If walled
+    # garden allows access to probe domains, the device gets the expected
+    # response and concludes it has full internet - popup NEVER appears.
+    # =========================================================================
 
     captive_portal_detection_domains = [
-        # Android
+        # --- Android / Google (probes /generate_204, expects HTTP 204) ---
         "connectivitycheck.gstatic.com",
+        "connectivitycheck.android.com",
         "www.google.com",
         "clients3.google.com",
-        "android.clients.google.com",
         "clients4.google.com",
-        # iOS
+        "android.clients.google.com",
+        "www.gstatic.com",
+
+        # --- Apple iOS / macOS (probes /hotspot-detect.html, expects "Success") ---
         "captive.apple.com",
-        # Windows
+        "www.apple.com",
+        "www.appleiphonecell.com",
+        "www.airport.us",
+        "www.ibook.info",
+        "www.itools.info",
+        "www.thinkdifferent.us",
+
+        # --- Windows NCSI (probes /connecttest.txt, expects "Microsoft Connect Test") ---
         "www.msftconnecttest.com",
+        "www.msftncsi.com",
         "ipv6.msftconnecttest.com",
+
+        # --- Firefox (probes /canonical.html) ---
+        "detectportal.firefox.com",
+
+        # --- Linux / GNOME NetworkManager ---
+        "nmcheck.gnome.org",
+
+        # --- Amazon Kindle ---
+        "spectrum.s3.amazonaws.com",
     ]
 
-    # Add DNS static entries pointing to hotspot address
-    # This forces connectivity checks to go through the hotspot
+    # Add DNS static entries pointing to hotspot gateway with short TTL
     for domain in captive_portal_detection_domains:
         commands.append(
             {
                 "type": "api_call",
-                "command": f'/ip/dns/static/add name="{domain}" address={gateway} comment=codevertex-captive-portal-detection',
+                "command": f'/ip/dns/static/add name="{domain}" address={gateway} ttl=5m comment=codevertex-captive-portal-detection',
                 "description": f"DNS static entry for captive portal detection: {domain}",
                 "critical": False,
             }
         )
+
+    # =========================================================================
+    # DNS REDIRECT NAT RULES - Force ALL DNS traffic through the router
+    # =========================================================================
+    # Some devices use hardcoded DNS servers (e.g., 8.8.8.8, 1.1.1.1) or
+    # DNS-over-HTTPS, bypassing the router's DNS static entries entirely.
+    # These NAT rules redirect ANY DNS traffic on the bridge interface to
+    # the router's own DNS server, ensuring captive portal detection domains
+    # are always resolved via our static entries.
+    #
+    # Scoped to bridge interface only to avoid affecting WAN traffic.
+    # =========================================================================
+    commands.append(
+        {
+            "type": "api_call",
+            "command": f"/ip/firewall/nat/add chain=dstnat action=redirect to-ports=53 protocol=udp dst-port=53 in-interface={bridge_name} comment=codevertex-dns-redirect",
+            "description": "DNS redirect NAT rule (UDP) to force DNS through router",
+            "critical": False,
+        }
+    )
+    commands.append(
+        {
+            "type": "api_call",
+            "command": f"/ip/firewall/nat/add chain=dstnat action=redirect to-ports=53 protocol=tcp dst-port=53 in-interface={bridge_name} comment=codevertex-dns-redirect",
+            "description": "DNS redirect NAT rule (TCP) to force DNS through router",
+            "critical": False,
+        }
+    )
 
     # Add each walled garden entry
     for host in walled_garden_hosts:
@@ -910,6 +1008,23 @@ async def cleanup_existing_provisioning(client, connection, logger, session_id: 
             return False
 
     # Cleanup in order of dependencies (remove dependents first)
+
+    # 0a. DNS static entries for captive portal detection (independent, clean early)
+    if await remove_by_filter('/ip/dns/static', 'comment', 'codevertex', 'DNS static entries'):
+        cleaned_items.append('DNS static entries')
+
+    # 0b. NAT redirect rules for DNS forcing (by comment)
+    if await remove_by_filter('/ip/firewall/nat', 'comment', 'codevertex', 'NAT rules'):
+        cleaned_items.append('NAT rules')
+
+    # 0c. Walled garden entries (must be removed before hotspot)
+    if await remove_by_filter('/ip/hotspot/walled-garden', 'comment', 'codevertex', 'walled garden'):
+        cleaned_items.append('walled garden entries')
+
+    # 0d. Walled garden IP entries
+    if await remove_by_filter('/ip/hotspot/walled-garden/ip', 'comment', 'codevertex', 'walled garden IP'):
+        cleaned_items.append('walled garden IP entries')
+
     # 1. Firewall rules (by comment)
     if await remove_by_filter('/ip/firewall/filter', 'comment', 'codevertex', 'firewall rules'):
         cleaned_items.append('firewall rules')
@@ -925,6 +1040,10 @@ async def cleanup_existing_provisioning(client, connection, logger, session_id: 
     # 4. Hotspot profile (by name)
     if await remove_by_filter('/ip/hotspot/profile', 'name', 'codevertex', 'hotspot profile'):
         cleaned_items.append('hotspot profile')
+
+    # 4b. SSL certificates (clean up after hotspot profile that references them)
+    if await remove_by_filter('/certificate', 'name', 'codevertex', 'SSL certificates'):
+        cleaned_items.append('SSL certificates')
 
     # 5. PPPoE server (by service-name)
     if await remove_by_filter('/interface/pppoe-server/server', 'service-name', 'codevertex', 'PPPoE server'):
