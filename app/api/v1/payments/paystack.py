@@ -181,17 +181,18 @@ async def paystack_webhook(
         logger.info(f"Paystack webhook received: {event}")
 
         async with get_db_session() as db:
-            # Find active Paystack gateway
+            # Find platform-level Paystack gateway (organization_id IS NULL)
             result = await db.execute(
                 select(PaymentGatewayConfig).where(
                     PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
+                    PaymentGatewayConfig.organization_id.is_(None),
                     PaymentGatewayConfig.is_active == True,
                 ).limit(1)
             )
             gateway_config = result.scalar_one_or_none()
 
             if not gateway_config:
-                logger.warning("No active Paystack gateway for webhook")
+                logger.warning("No active platform Paystack gateway for webhook")
                 return WebhookResponse(success=True, message="No gateway configured")
 
             # Verify webhook signature if provided
@@ -244,9 +245,11 @@ async def list_banks(country: str = "kenya"):
 
     try:
         async with get_db_session() as db:
+            # Use platform-level gateway (organization_id IS NULL)
             result = await db.execute(
                 select(PaymentGatewayConfig).where(
                     PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
+                    PaymentGatewayConfig.organization_id.is_(None),
                     PaymentGatewayConfig.is_active == True,
                 ).limit(1)
             )
@@ -255,7 +258,7 @@ async def list_banks(country: str = "kenya"):
             if not gateway_config:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Paystack gateway not configured",
+                    detail="Platform Paystack gateway not configured",
                 )
 
             gateway = PaymentGatewayFactory.create(gateway_config)

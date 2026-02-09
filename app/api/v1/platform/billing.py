@@ -10,7 +10,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
@@ -863,6 +863,7 @@ async def initiate_invoice_payment(
         result = await billing_service.initiate_payment(
             invoice_id=invoice_id,
             email=request_data.email,
+            callback_url=request_data.callback_url,
         )
 
         return PlatformPaymentInitiationResponse(
@@ -900,48 +901,109 @@ async def verify_payment_by_reference(
 
     This endpoint is called after a customer completes payment on Paystack
     to confirm the payment status and update the invoice.
+
+    It first checks for an existing payment record. If none exists (e.g.
+    webhook hasn't fired), it verifies directly with Paystack and processes
+    the payment if successful.
     """
     try:
         billing_service = PlatformBillingService(db)
 
-        # Find payment by Paystack reference
+        # 1. Check for existing payment record by our reference format
         result = await db.execute(
-            select(PlatformPayment).where(PlatformPayment.paystack_reference == reference)
+            select(PlatformPayment).where(
+                or_(
+                    PlatformPayment.payment_reference == f"PAY-{reference}",
+                    PlatformPayment.paystack_reference == reference,
+                )
+            )
         )
         payment = result.scalar_one_or_none()
 
-        if not payment:
+        if payment:
+            if payment.status == PaymentStatus.COMPLETED:
+                return PaymentVerificationResponse(
+                    success=True,
+                    status="success",
+                    message="Payment completed successfully",
+                    invoice_id=payment.invoice_id,
+                    payment_id=payment.id,
+                )
+            elif payment.status == PaymentStatus.FAILED:
+                return PaymentVerificationResponse(
+                    success=False,
+                    status="failed",
+                    message=payment.status_message or "Payment failed",
+                    invoice_id=payment.invoice_id,
+                    payment_id=payment.id,
+                )
+            else:
+                return PaymentVerificationResponse(
+                    success=False,
+                    status="pending",
+                    message="Payment is still pending verification",
+                    invoice_id=payment.invoice_id,
+                    payment_id=payment.id,
+                )
+
+        # 2. No payment record yet - look up the invoice by paystack_reference
+        #    and verify directly with Paystack (webhook may not have fired)
+        invoice_result = await db.execute(
+            select(PlatformInvoice).where(
+                PlatformInvoice.paystack_reference == reference
+            )
+        )
+        invoice = invoice_result.scalar_one_or_none()
+
+        if not invoice:
             return PaymentVerificationResponse(
                 success=False,
                 status="not_found",
-                message="Payment not found"
+                message="No invoice found for this payment reference",
             )
 
-        # Check payment status
-        if payment.status == PaymentStatus.COMPLETED:
+        # Already paid via another path
+        if invoice.status == InvoiceStatus.PAID:
             return PaymentVerificationResponse(
                 success=True,
                 status="success",
-                message="Payment completed successfully",
-                invoice_id=payment.invoice_id,
-                payment_id=payment.id,
+                message="Invoice already paid",
+                invoice_id=invoice.id,
             )
-        elif payment.status == PaymentStatus.FAILED:
-            return PaymentVerificationResponse(
-                success=False,
-                status="failed",
-                message=payment.status_message or "Payment failed",
-                invoice_id=payment.invoice_id,
-                payment_id=payment.id,
-            )
-        else:
+
+        # 3. Verify directly with Paystack API
+        try:
+            paystack = await billing_service._get_payment_gateway(invoice.organization_id)
+            verification = await paystack.verify_payment(reference)
+        except Exception as e:
+            logger.error(f"Paystack verification failed: {e}")
             return PaymentVerificationResponse(
                 success=False,
                 status="pending",
-                message="Payment is still pending verification",
-                invoice_id=payment.invoice_id,
-                payment_id=payment.id,
+                message="Unable to verify with payment gateway. Please try again shortly.",
             )
+
+        if not verification.success:
+            return PaymentVerificationResponse(
+                success=False,
+                status=verification.status.value if hasattr(verification.status, 'value') else str(verification.status),
+                message=verification.message or "Payment was not successful",
+            )
+
+        # 4. Payment confirmed by Paystack - process it
+        payment = await billing_service.verify_and_complete_payment(
+            invoice=invoice,
+            reference=reference,
+            verification=verification,
+        )
+
+        return PaymentVerificationResponse(
+            success=True,
+            status="success",
+            message="Payment verified and processed successfully",
+            invoice_id=invoice.id,
+            payment_id=payment.id if payment else None,
+        )
 
     except Exception as e:
         logger.error(f"Payment verification error: {e}")

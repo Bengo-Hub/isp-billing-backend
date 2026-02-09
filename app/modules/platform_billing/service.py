@@ -14,7 +14,8 @@ from decimal import Decimal
 from typing import List, Optional, Tuple
 import uuid
 
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -53,22 +54,27 @@ class PlatformBillingService:
         """Initialize the service with database session."""
         self.db = db
 
-    async def _get_payment_gateway(self, organization_id: int):
-        """Get payment gateway for the organization."""
-        # Load the organization's Paystack configuration from database
+    async def _get_payment_gateway(self, organization_id: int = None):
+        """
+        Get the platform-level Paystack payment gateway.
+
+        All payments (subscriptions, SMS, customer packages) are processed
+        through the platform admin's configured Paystack gateway
+        (organization_id IS NULL), not per-organization gateways.
+        """
         result = await self.db.execute(
             select(PaymentGatewayConfig).where(
                 and_(
-                    PaymentGatewayConfig.organization_id == organization_id,
+                    PaymentGatewayConfig.organization_id.is_(None),
                     PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
                     PaymentGatewayConfig.is_active == True
                 )
-            )
+            ).limit(1)
         )
         gateway_config = result.scalar_one_or_none()
 
         if not gateway_config:
-            raise ValueError("Paystack payment gateway not configured for this organization")
+            raise ValueError("Platform Paystack payment gateway not configured. Please contact the platform administrator.")
 
         return PaymentGatewayFactory.create(gateway_config)
 
@@ -524,6 +530,7 @@ class PlatformBillingService:
         self,
         invoice_id: int,
         email: str,
+        callback_url: str = None,
     ) -> dict:
         """
         Initiate payment for an invoice via Paystack.
@@ -546,13 +553,14 @@ class PlatformBillingService:
                 "error": str(e),
             }
 
-        reference = f"PLAT-{invoice.invoice_number}-{uuid.uuid4().hex[:8].upper()}"
+        reference = f"{invoice.invoice_number}-{uuid.uuid4().hex[:8].upper()}"
 
         result = await paystack.initiate_payment(
             amount=invoice.total_amount,
             phone_number="",  # Not needed for Paystack
             reference=reference,
             description=f"Platform Subscription - Invoice {invoice.invoice_number}",
+            callback_url=callback_url,
             metadata={
                 "email": email,
                 "invoice_id": invoice.id,
@@ -613,57 +621,170 @@ class PlatformBillingService:
             logger.warning(f"Payment callback failed: {result.message}")
             return None
 
-        # Create payment record
-        payment = PlatformPayment(
-            invoice_id=invoice.id,
-            organization_id=invoice.organization_id,
-            payment_reference=f"PAY-{reference}",
-            amount=result.amount or invoice.total_amount,
-            currency=result.currency or "KES",
-            paystack_reference=result.gateway_reference,
-            status=PaymentStatus.COMPLETED,
-            callback_data=result.raw_data,
-            completed_at=result.paid_at or datetime.utcnow(),
+        payment_ref = f"PAY-{reference}"
+
+        # Check if payment already exists (idempotency for duplicate webhooks)
+        existing = await self.db.execute(
+            select(PlatformPayment).where(
+                or_(
+                    PlatformPayment.payment_reference == payment_ref,
+                    PlatformPayment.paystack_reference == result.gateway_reference,
+                )
+            )
         )
+        existing_payment = existing.scalar_one_or_none()
+        if existing_payment:
+            logger.info(f"Payment already exists for invoice {invoice.invoice_number}, skipping duplicate callback")
+            return existing_payment
 
-        self.db.add(payment)
+        try:
+            # Create payment record
+            payment = PlatformPayment(
+                invoice_id=invoice.id,
+                organization_id=invoice.organization_id,
+                payment_reference=payment_ref,
+                amount=result.amount or invoice.total_amount,
+                currency=result.currency or "KES",
+                paystack_reference=result.gateway_reference,
+                status=PaymentStatus.COMPLETED,
+                callback_data=result.raw_data,
+                completed_at=result.paid_at or datetime.utcnow(),
+            )
 
-        # Update invoice
-        invoice.status = InvoiceStatus.PAID
-        invoice.paid_at = result.paid_at or datetime.utcnow()
+            self.db.add(payment)
 
-        # Update organization subscription
-        org = await self.db.execute(
+            # Update invoice
+            invoice.status = InvoiceStatus.PAID
+            invoice.paid_at = result.paid_at or datetime.utcnow()
+
+            # Update organization subscription (extend dates + activate)
+            await self._activate_subscription(invoice)
+
+            await self.db.commit()
+            await self.db.refresh(payment)
+
+            logger.info(f"Processed payment for invoice {invoice.invoice_number}")
+
+            return payment
+
+        except IntegrityError:
+            await self.db.rollback()
+            logger.info(f"Concurrent payment insert for {payment_ref}, fetching existing record")
+            result = await self.db.execute(
+                select(PlatformPayment).where(
+                    PlatformPayment.payment_reference == payment_ref
+                )
+            )
+            return result.scalar_one()
+
+    async def verify_and_complete_payment(
+        self,
+        invoice: PlatformInvoice,
+        reference: str,
+        verification,
+    ) -> PlatformPayment:
+        """
+        Complete a payment after direct Paystack verification.
+
+        Called by the verify endpoint when no webhook has been received
+        but Paystack confirms the payment was successful.
+        """
+        payment_ref = f"PAY-{reference}"
+
+        # Check if payment already exists (race condition: webhook or duplicate verify)
+        existing = await self.db.execute(
+            select(PlatformPayment).where(
+                or_(
+                    PlatformPayment.payment_reference == payment_ref,
+                    PlatformPayment.paystack_reference == verification.gateway_reference,
+                )
+            )
+        )
+        existing_payment = existing.scalar_one_or_none()
+        if existing_payment:
+            logger.info(f"Payment already exists for invoice {invoice.invoice_number}, skipping duplicate")
+            return existing_payment
+
+        # Strip timezone info from paid_at (DB uses TIMESTAMP WITHOUT TIME ZONE)
+        paid_at = verification.paid_at or datetime.utcnow()
+        if hasattr(paid_at, 'tzinfo') and paid_at.tzinfo is not None:
+            paid_at = paid_at.replace(tzinfo=None)
+
+        try:
+            # Create payment record
+            payment = PlatformPayment(
+                invoice_id=invoice.id,
+                organization_id=invoice.organization_id,
+                payment_reference=payment_ref,
+                amount=verification.amount or invoice.total_amount,
+                currency=verification.currency or "KES",
+                paystack_reference=verification.gateway_reference,
+                status=PaymentStatus.COMPLETED,
+                completed_at=paid_at,
+            )
+            self.db.add(payment)
+
+            # Update invoice
+            invoice.status = InvoiceStatus.PAID
+            invoice.paid_at = paid_at
+
+            # Update organization subscription
+            await self._activate_subscription(invoice)
+
+            await self.db.commit()
+            await self.db.refresh(payment)
+
+            logger.info(f"Verified and completed payment for invoice {invoice.invoice_number}")
+            return payment
+
+        except IntegrityError:
+            await self.db.rollback()
+            logger.info(f"Concurrent payment insert for {payment_ref}, fetching existing record")
+            result = await self.db.execute(
+                select(PlatformPayment).where(
+                    PlatformPayment.payment_reference == payment_ref
+                )
+            )
+            return result.scalar_one()
+
+    async def _activate_subscription(self, invoice: PlatformInvoice):
+        """Extend subscription and activate organization after successful payment."""
+        org_result = await self.db.execute(
             select(Organization).where(Organization.id == invoice.organization_id)
         )
-        organization = org.scalar_one_or_none()
+        organization = org_result.scalar_one_or_none()
 
-        if organization:
-            # Extend subscription based on billing cycle
-            if invoice.billing_cycle == BillingCycle.MONTHLY:
-                extension = timedelta(days=30)
-            elif invoice.billing_cycle == BillingCycle.QUARTERLY:
-                extension = timedelta(days=90)
-            else:
-                extension = timedelta(days=365)
+        if not organization:
+            return
 
-            if organization.subscription_ends_at:
-                organization.subscription_ends_at = max(
-                    organization.subscription_ends_at,
-                    datetime.utcnow()
-                ) + extension
-            else:
-                organization.subscription_ends_at = datetime.utcnow() + extension
+        # Calculate extension based on billing cycle
+        if invoice.billing_cycle == BillingCycle.MONTHLY:
+            extension = timedelta(days=30)
+        elif invoice.billing_cycle == BillingCycle.QUARTERLY:
+            extension = timedelta(days=90)
+        else:
+            extension = timedelta(days=365)
 
-            if organization.status == OrganizationStatus.PENDING_PAYMENT:
-                organization.status = OrganizationStatus.ACTIVE
+        if organization.subscription_ends_at:
+            organization.subscription_ends_at = max(
+                organization.subscription_ends_at,
+                datetime.utcnow()
+            ) + extension
+        else:
+            organization.subscription_ends_at = datetime.utcnow() + extension
 
-        await self.db.commit()
-        await self.db.refresh(payment)
+        # Activate organization on payment (from trial, pending_payment, etc.)
+        if organization.status in (
+            OrganizationStatus.TRIAL,
+            OrganizationStatus.PENDING_PAYMENT,
+        ):
+            organization.status = OrganizationStatus.ACTIVE
 
-        logger.info(f"Processed payment for invoice {invoice.invoice_number}")
-
-        return payment
+        logger.info(
+            f"Subscription activated for org {organization.id}: "
+            f"status={organization.status.value}, "
+            f"ends_at={organization.subscription_ends_at}"
+        )
 
     async def record_manual_payment(
         self,
@@ -692,6 +813,9 @@ class PlatformBillingService:
         if amount >= invoice.total_amount:
             invoice.status = InvoiceStatus.PAID
             invoice.paid_at = datetime.utcnow()
+
+            # Also update subscription on full payment
+            await self._activate_subscription(invoice)
 
         await self.db.commit()
         await self.db.refresh(payment)

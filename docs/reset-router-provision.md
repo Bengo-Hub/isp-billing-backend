@@ -211,69 +211,23 @@
 :put "Checking for remaining codevertex configurations..."
 :put ""
 
-:local found false
+# Verification checks — each runs independently (no shared variable needed)
+:if ([:len [/ip/hotspot/find name~"codevertex"]] > 0) do={ :put "WARNING: Hotspot instances still exist" }
+:if ([:len [/ip/dhcp-server/find name~"codevertex"]] > 0) do={ :put "WARNING: DHCP servers still exist" }
+:if ([:len [/ip/pool/find name~"codevertex"]] > 0) do={ :put "WARNING: IP pools still exist" }
+:if ([:len [/interface/bridge/find name~"codevertex"]] > 0) do={ :put "WARNING: Bridges still exist" }
+:if ([:len [/ip/firewall/filter/find comment~"codevertex"]] > 0) do={ :put "WARNING: Firewall filter rules still exist" }
+:if ([:len [/ip/dns/static/find comment~"codevertex"]] > 0) do={ :put "WARNING: DNS static entries still exist" }
+:if ([:len [/ip/firewall/nat/find comment~"codevertex"]] > 0) do={ :put "WARNING: NAT rules still exist" }
+:if ([:len [/certificate/find name~"codevertex"]] > 0) do={ :put "WARNING: SSL certificates still exist" }
+:if ([:len [/queue/tree/find comment~"codevertex"]] > 0) do={ :put "WARNING: Queue trees still exist" }
+:if ([:len [/system/scheduler/find comment~"codevertex"]] > 0) do={ :put "WARNING: System scheduler entries still exist" }
+:if ([:len [/system/logging/action/find name~"codevertex"]] > 0) do={ :put "WARNING: System logging actions still exist" }
 
-:if ([:len [/ip/hotspot/find name~"codevertex"]] > 0) do={
-  :put "WARNING: Hotspot instances still exist"
-  :set found true
-}
-
-:if ([:len [/ip/dhcp-server/find name~"codevertex"]] > 0) do={
-  :put "WARNING: DHCP servers still exist"
-  :set found true
-}
-
-:if ([:len [/ip/pool/find name~"codevertex"]] > 0) do={
-  :put "WARNING: IP pools still exist"
-  :set found true
-}
-
-:if ([:len [/interface/bridge/find name~"codevertex"]] > 0) do={
-  :put "WARNING: Bridges still exist"
-  :set found true
-}
-
-:if ([:len [/ip/firewall/filter/find comment~"codevertex"]] > 0) do={
-  :put "WARNING: Firewall filter rules still exist"
-  :set found true
-}
-
-:if ([:len [/ip/dns/static/find comment~"codevertex-captive-portal-detection"]] > 0) do={
-  :put "WARNING: DNS static entries still exist"
-  :set found true
-}
-
-:if ([:len [/ip/firewall/nat/find comment~"codevertex-dns-redirect"]] > 0) do={
-  :put "WARNING: DNS redirect NAT rules still exist"
-  :set found true
-}
-
-:if ([:len [/certificate/find name~"codevertex"]] > 0) do={
-  :put "WARNING: SSL certificates still exist"
-  :set found true
-}
-
-:if ([:len [/queue/tree/find comment~"codevertex"]] > 0) do={
-  :put "WARNING: Queue trees still exist"
-  :set found true
-}
-
-:if ([:len [/system/scheduler/find comment~"codevertex"]] > 0) do={
-  :put "WARNING: System scheduler entries still exist"
-  :set found true
-}
-
-:if ([:len [/system/logging/action/find name~"codevertex"]] > 0) do={
-  :put "WARNING: System logging actions still exist"
-  :set found true
-}
-
-:if ($found = false) do={
-  :put "SUCCESS: All codevertex configurations removed!"
-  :put ""
-  :put "You can now provision the router fresh through the web UI"
-  :put "Make sure ether1 (WAN) has internet access before provisioning"
-}
+:put ""
+:put "If no warnings above, all codevertex configurations have been removed."
+:put "You can now provision the router fresh through the web UI."
+:put "Make sure ether1 (WAN) has internet access before provisioning."
 
 :put ""
 :put "============================================================================"
