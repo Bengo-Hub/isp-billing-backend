@@ -26,7 +26,7 @@ from app.api.deps_tenant import get_organization_by_slug
 from app.models.organization import Organization, OrganizationSettings
 from app.models.plan import ServicePlan, PlanType, PlanStatus
 from app.models.customer_portal import VoucherCode, CustomerSession, CustomerPurchase, VoucherStatus, SessionStatus
-from app.models.subscription import Subscription, SubscriptionStatus
+from app.models.subscription import Subscription, SubscriptionStatus, SubscriptionType
 from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
 from app.models.router import Router
 from app.integrations.payment_gateways import PaymentGatewayFactory
@@ -189,15 +189,19 @@ async def get_packages(
     organization: Organization = Depends(get_organization_by_slug),
 ):
     """
-    Get available hotspot packages.
+    Get available ISP packages (hotspot, PPPoE, data/internet plans).
+
+    Returns organization-specific packages only (ISP-level plans).
+    Platform-level plans are for licenses/subscriptions, not shown here.
 
     Public endpoint - no authentication required.
     """
+    # Get organization-specific packages (all ISP plan types)
     result = await db.execute(
         select(ServicePlan)
         .where(
             ServicePlan.organization_id == organization.id,
-            ServicePlan.plan_type.in_([PlanType.HOTSPOT, PlanType.BOTH]),
+            ServicePlan.plan_type.in_([PlanType.HOTSPOT, PlanType.PPPOE, PlanType.INTERNET, PlanType.BOTH]),
             ServicePlan.status == PlanStatus.ACTIVE,
         )
         .order_by(ServicePlan.sort_order, ServicePlan.price)
@@ -352,7 +356,7 @@ async def hotspot_login(
             Subscription.organization_id == organization.id,
             Subscription.username == data.username,
             Subscription.password == data.password,
-            Subscription.subscription_type == "hotspot",
+            Subscription.subscription_type == SubscriptionType.HOTSPOT,
         )
         .order_by(Subscription.created_at.desc())
         .limit(1)
@@ -990,103 +994,11 @@ async def payment_webhook(
         return {"status": "received", "message": "Purchase not found"}
 
     # Update purchase status
-    purchase.payment_status = payment_status
-
     if payment_status == "completed":
-        purchase.completed_at = datetime.utcnow()
-
-        # Get the plan
-        plan_result = await db.execute(
-            select(ServicePlan).where(ServicePlan.id == purchase.plan_id)
-        )
-        plan = plan_result.scalar_one_or_none()
-
-        if plan:
-            # Generate a voucher code for the customer
-            voucher_code = VoucherCode.generate_code(format_pattern="XXXX-XXXX-XXXX")
-
-            # Generate hotspot credentials (username like C029, password like 865)
-            hotspot_username, hotspot_password = await generate_hotspot_credentials(
-                db=db,
-                organization_id=organization.id,
-                password_length=3
-            )
-
-            # Create voucher with hotspot credentials
-            voucher = VoucherCode(
-                organization_id=organization.id,
-                code=voucher_code,
-                plan_id=plan.id,
-                status=VoucherStatus.ACTIVE,
-                value=purchase.amount,
-                expires_at=datetime.utcnow() + timedelta(days=30),  # Voucher valid for 30 days
-                hotspot_username=hotspot_username,
-                hotspot_password=hotspot_password,
-            )
-            db.add(voucher)
-            await db.flush()
-
-            # Link voucher to purchase
-            purchase.voucher_code_id = voucher.id
-
-            logger.info(f"Generated voucher {voucher_code} with hotspot credentials {hotspot_username} for purchase {purchase.id}")
-
-            # Create MikroTik hotspot user on the router
-            # Get organization's primary hotspot router
-            router_result = await db.execute(
-                select(Router).where(
-                    Router.organization_id == organization.id,
-                    Router.is_active == True,
-                ).limit(1)
-            )
-            router = router_result.scalar_one_or_none()
-
-            if router:
-                try:
-                    # Connect to router and create hotspot user
-                    client = get_mikrotik_client()
-                    connection = await client.connect(
-                        ip_address=router.ip_address,
-                        username=router.username,
-                        password=router.password,
-                        port=router.port,
-                    )
-
-                    # Calculate time limit in seconds (validity_days * 24 hours * 3600 seconds)
-                    time_limit_seconds = plan.validity_days * 24 * 3600 if plan.validity_days > 0 else 0
-
-                    # Create hotspot user with bandwidth and time limits
-                    await client.create_hotspot_user(
-                        connection=connection,
-                        username=hotspot_username,
-                        password=hotspot_password,
-                        profile="default",
-                        **{
-                            "limit-uptime": f"{time_limit_seconds}s" if time_limit_seconds > 0 else None,
-                            "limit-bytes-total": plan.data_limit * 1024 * 1024 * 1024 if plan.data_limit > 0 and not plan.is_unlimited_data else None,
-                            "comment": f"Purchased {plan.name} - Voucher {voucher_code}",
-                        }
-                    )
-
-                    await client.disconnect(router.ip_address, router.port)
-
-                    logger.info(
-                        f"Created MikroTik hotspot user {hotspot_username} on router {router.name} "
-                        f"for purchase {purchase.id}"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"Failed to create hotspot user {hotspot_username} on router {router.name}: {e}. "
-                        f"User can still redeem voucher manually."
-                    )
-                    # Don't fail the whole purchase if router sync fails
-            else:
-                logger.warning(
-                    f"No active router found for organization {organization.id}. "
-                    f"Hotspot user {hotspot_username} not created on router."
-                )
-
-    await db.commit()
+        await _process_successful_payment(db, purchase, organization)
+    elif payment_status == "failed":
+        purchase.payment_status = "failed"
+        await db.commit()
 
     logger.info(f"Processed webhook for reference {reference}: status={payment_status}")
     return {"status": "received", "payment_status": payment_status}
@@ -1103,6 +1015,9 @@ async def get_payment_status(
     Check payment status and get voucher code if payment is complete.
 
     Used by frontend to poll for payment completion.
+
+    If payment is still processing, this will attempt to verify with the payment
+    gateway in case the webhook was not received.
     """
     # Find the purchase record
     result = await db.execute(
@@ -1120,6 +1035,35 @@ async def get_payment_status(
             "is_completed": False,
             "message": "Payment reference not found",
         }
+
+    # If payment is still processing, try to verify with gateway (webhook fallback)
+    if purchase.payment_status == "processing":
+        try:
+            # Get the gateway that was used for this purchase
+            gateway_result = await db.execute(
+                select(PaymentGatewayConfig).where(
+                    PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
+                    PaymentGatewayConfig.is_active == True,
+                )
+            )
+            gateway_config = gateway_result.scalar_one_or_none()
+
+            if gateway_config:
+                gateway = PaymentGatewayFactory.create(gateway_config)
+                verification = await gateway.verify_payment(reference)
+
+                if verification.success and verification.status == "success":
+                    # Payment was successful! Process it now
+                    logger.info(f"Manual verification successful for reference {reference}, processing payment")
+                    await _process_successful_payment(db, purchase, organization)
+
+                elif verification.status in ["failed", "abandoned"]:
+                    purchase.payment_status = "failed"
+                    await db.commit()
+
+        except Exception as e:
+            logger.error(f"Error verifying payment {reference}: {e}")
+            # Continue with current status if verification fails
 
     # Check if payment is completed
     is_completed = purchase.payment_status in ["completed", "failed"]
@@ -1141,12 +1085,136 @@ async def get_payment_status(
         voucher = voucher_result.scalar_one_or_none()
         if voucher:
             response["voucher_code"] = voucher.code
+            response["username"] = voucher.hotspot_username
+            response["password"] = voucher.hotspot_password
             # Include hotspot credentials for login
             if voucher.hotspot_username:
                 response["hotspot_username"] = voucher.hotspot_username
                 response["hotspot_password"] = voucher.hotspot_password
 
     return response
+
+
+async def _process_successful_payment(
+    db: AsyncSession,
+    purchase: CustomerPurchase,
+    organization: Organization,
+):
+    """
+    Process a successful payment by creating voucher and hotspot user.
+
+    This is extracted from the webhook handler to be reused by manual verification.
+    """
+    try:
+        purchase.payment_status = "completed"
+        purchase.completed_at = datetime.utcnow()
+
+        # Get the plan
+        plan_result = await db.execute(
+            select(ServicePlan).where(ServicePlan.id == purchase.plan_id)
+        )
+        plan = plan_result.scalar_one_or_none()
+
+        if not plan:
+            logger.error(f"Plan {purchase.plan_id} not found for purchase {purchase.id}")
+            await db.commit()  # Still commit the payment status
+            return
+
+        # Generate a voucher code for the customer
+        voucher_code = VoucherCode.generate_code(format_pattern="XXXX-XXXX-XXXX")
+
+        # Generate hotspot credentials (username like C029, password like 865)
+        hotspot_username, hotspot_password = await generate_hotspot_credentials(
+            db=db,
+            organization_id=organization.id,
+            password_length=3
+        )
+
+        # Create voucher with hotspot credentials
+        voucher = VoucherCode(
+            organization_id=organization.id,
+            code=voucher_code,
+            plan_id=plan.id,
+            status=VoucherStatus.ACTIVE,
+            value=purchase.amount,
+            expires_at=datetime.utcnow() + timedelta(days=30),  # Voucher valid for 30 days
+            hotspot_username=hotspot_username,
+            hotspot_password=hotspot_password,
+        )
+        db.add(voucher)
+        await db.flush()
+
+        # Link voucher to purchase
+        purchase.voucher_code_id = voucher.id
+
+        # Commit payment status and voucher first (critical data)
+        await db.commit()
+
+        logger.info(f"Generated voucher {voucher_code} with hotspot credentials {hotspot_username} for purchase {purchase.id}")
+
+        # Create MikroTik hotspot user on the router (non-critical, best effort)
+        try:
+            router_result = await db.execute(
+                select(Router).where(
+                    Router.organization_id == organization.id,
+                    Router.is_active == True,
+                ).limit(1)
+            )
+            router = router_result.scalar_one_or_none()
+
+            if router:
+                # Connect to router and create hotspot user
+                client = get_mikrotik_client()
+                connection = await client.connect(
+                    ip_address=router.ip_address,
+                    username=router.username,
+                    password=router.password,
+                    port=router.port,
+                )
+
+                # Calculate time limit in seconds (validity_days * 24 hours * 3600 seconds)
+                time_limit_seconds = plan.validity_days * 24 * 3600 if plan.validity_days > 0 else 0
+
+                # Create hotspot user with bandwidth and time limits
+                await client.create_hotspot_user(
+                    connection=connection,
+                    username=hotspot_username,
+                    password=hotspot_password,
+                    profile="default",
+                    **{
+                        "limit-uptime": f"{time_limit_seconds}s" if time_limit_seconds > 0 else None,
+                        "limit-bytes-total": plan.data_limit * 1024 * 1024 * 1024 if plan.data_limit > 0 and not plan.is_unlimited_data else None,
+                        "comment": f"Purchased {plan.name} - Voucher {voucher_code}",
+                    }
+                )
+
+                await client.disconnect(router.ip_address, router.port)
+
+                logger.info(
+                    f"Created MikroTik hotspot user {hotspot_username} on router {router.name} "
+                    f"for purchase {purchase.id}"
+                )
+            else:
+                logger.warning(
+                    f"No active router found for organization {organization.id}. "
+                    f"Hotspot user {hotspot_username} not created on router."
+                )
+        except Exception as e:
+            logger.error(
+                f"Failed to create hotspot user {hotspot_username} on router: {e}. "
+                f"User can still redeem voucher manually."
+            )
+
+    except Exception as e:
+        logger.error(f"Error processing successful payment for purchase {purchase.id}: {e}")
+        # Still try to mark as completed so frontend stops polling
+        try:
+            purchase.payment_status = "completed"
+            purchase.completed_at = datetime.utcnow()
+            await db.commit()
+        except Exception as commit_error:
+            logger.error(f"Failed to commit payment status: {commit_error}")
+            raise
 
 
 @router.get("/{org_slug}/terms")

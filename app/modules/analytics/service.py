@@ -151,26 +151,39 @@ class ReportsService:
         self,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        router_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Get billing analytics data."""
+        """Get billing analytics data with optional router filtering."""
         if not start_date:
             start_date = datetime.utcnow() - timedelta(days=30)
         if not end_date:
             end_date = datetime.utcnow()
 
-        # Get invoices
+        # Get invoices (filter by router via subscription if router_id provided)
         inv_filters = [Invoice.created_at >= start_date, Invoice.created_at <= end_date]
         if self.organization_id:
             inv_filters.append(Invoice.organization_id == self.organization_id)
+
         invoice_query = select(Invoice).where(and_(*inv_filters))
+
+        # If router_id provided, join with subscription to filter
+        if router_id:
+            invoice_query = invoice_query.join(Subscription, Invoice.subscription_id == Subscription.id).where(Subscription.router_id == router_id)
+
         invoice_result = await self.db.execute(invoice_query)
         invoices = invoice_result.scalars().all()
 
-        # Get payments
+        # Get payments (filter by router via invoice->subscription if router_id provided)
         pay_filters = [Payment.created_at >= start_date, Payment.created_at <= end_date]
         if self.organization_id:
             pay_filters.append(Payment.organization_id == self.organization_id)
+
         payment_query = select(Payment).where(and_(*pay_filters))
+
+        # If router_id provided, join with invoice and subscription to filter
+        if router_id:
+            payment_query = payment_query.join(Invoice, Payment.invoice_id == Invoice.id).join(Subscription, Invoice.subscription_id == Subscription.id).where(Subscription.router_id == router_id)
+
         payment_result = await self.db.execute(payment_query)
         payments = payment_result.scalars().all()
 

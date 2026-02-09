@@ -1,23 +1,29 @@
 """Billing API endpoints."""
 
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_admin, PaginationParams
+from app.api.deps_org import get_org_id_for_query
 from app.core.database import get_db
 from app.core.exceptions import ValidationError
 from app.models.user import User
 from app.models.billing import InvoiceStatus, PaymentStatus, PaymentMethod
+from app.models.platform_billing import BillingCycle
 from app.schemas.billing import (
     Invoice, InvoiceCreate, InvoiceUpdate, InvoiceList, InvoiceFilter,
-    InvoiceItem, InvoiceItemCreate, InvoiceItemUpdate, Payment, PaymentCreate, 
+    InvoiceItem, InvoiceItemCreate, InvoiceItemUpdate, Payment, PaymentCreate,
     PaymentUpdate, PaymentList, PaymentFilter, MpesaPaymentRequest, MpesaPaymentResponse,
     MpesaCallbackRequest, MpesaCallbackResponse, BillingStats, PaymentStats,
     InvoiceGenerationRequest, BulkInvoiceGenerationRequest
 )
 from app.modules.billing import BillingService
+from app.modules.platform_billing.schemas import PlatformInvoiceResponse
+from app.modules.platform_billing.service import PlatformBillingService
 
 router = APIRouter()
 
@@ -29,6 +35,7 @@ async def get_invoices(
     user_id: Optional[int] = Query(None),
     status: Optional[InvoiceStatus] = Query(None),
     search: Optional[str] = Query(None),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InvoiceList:
@@ -57,6 +64,7 @@ async def get_invoices(
 @router.post("/invoices", response_model=Invoice, status_code=status.HTTP_201_CREATED)
 async def create_invoice(
     invoice_data: InvoiceCreate,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Invoice:
@@ -81,72 +89,77 @@ async def create_invoice(
 @router.get("/invoices/overdue", response_model=InvoiceList)
 async def get_overdue_invoices(
     pagination: PaginationParams = Depends(),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InvoiceList:
     """Get overdue invoices."""
     service = BillingService(db)
-    
+
     # For non-admin users, only show their own overdue invoices
     user_id = None if current_user.role == "admin" else current_user.id
-    
+
     result = await service.get_invoices(
         pagination=pagination,
         user_id=user_id,
-        status=InvoiceStatus.OVERDUE
-    )
+        status=InvoiceStatus.OVERDUE,
+            )
     return InvoiceList(**result)
 
 
 @router.get("/invoices/pending", response_model=InvoiceList)
 async def get_pending_invoices(
     pagination: PaginationParams = Depends(),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InvoiceList:
     """Get pending invoices."""
     service = BillingService(db)
-    
+
     # For non-admin users, only show their own pending invoices
     user_id = None if current_user.role == "admin" else current_user.id
-    
+
     result = await service.get_invoices(
         pagination=pagination,
         user_id=user_id,
-        status=InvoiceStatus.PENDING
-    )
+        status=InvoiceStatus.PENDING,
+            )
     return InvoiceList(**result)
 
 
 @router.get("/invoices/paid", response_model=InvoiceList)
 async def get_paid_invoices(
     pagination: PaginationParams = Depends(),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InvoiceList:
     """Get paid invoices."""
     service = BillingService(db)
-    
+
     # For non-admin users, only show their own paid invoices
     user_id = None if current_user.role == "admin" else current_user.id
-    
+
     result = await service.get_invoices(
         pagination=pagination,
         user_id=user_id,
-        status=InvoiceStatus.PAID
-    )
+        status=InvoiceStatus.PAID,
+            )
     return InvoiceList(**result)
 
 
 @router.get("/invoices/{invoice_id}", response_model=Invoice)
 async def get_invoice(
     invoice_id: int,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Invoice:
     """Get invoice by ID."""
     service = BillingService(db)
-    invoice = await service.get_invoice_by_id(invoice_id)
+    # TODO: Service method needs updating to support organization_id parameter
+    invoice = await service.get_invoice_by_id(invoice_id, organization_id=org_id)
     if not invoice:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -167,6 +180,7 @@ async def get_invoice(
 async def update_invoice(
     invoice_id: int,
     invoice_data: InvoiceUpdate,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Invoice:
@@ -185,6 +199,7 @@ async def update_invoice(
 async def update_invoice_status(
     invoice_id: int,
     status: InvoiceStatus,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Invoice:
@@ -201,6 +216,7 @@ async def update_invoice_status(
 
 @router.post("/invoices/generate", response_model=Dict[str, Any])
 async def generate_invoices(
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -213,6 +229,7 @@ async def generate_invoices(
 @router.post("/invoices/generate/subscription/{subscription_id}", response_model=Invoice)
 async def generate_subscription_invoice(
     subscription_id: int,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Invoice:
@@ -232,6 +249,7 @@ async def generate_subscription_invoice(
 async def add_invoice_item(
     invoice_id: int,
     item_data: InvoiceItemCreate,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> InvoiceItem:
@@ -251,6 +269,7 @@ async def add_invoice_item(
 async def update_invoice_item(
     item_id: int,
     item_data: InvoiceItemUpdate,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> InvoiceItem:
@@ -276,6 +295,7 @@ async def update_invoice_item(
 @router.delete("/invoice-items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_invoice_item(
     item_id: int,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> None:
@@ -303,6 +323,7 @@ async def get_payments(
     user_id: Optional[int] = Query(None),
     invoice_id: Optional[int] = Query(None),
     status: Optional[PaymentStatus] = Query(None),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> PaymentList:
@@ -331,6 +352,7 @@ async def get_payments(
 @router.post("/payments", response_model=Payment, status_code=status.HTTP_201_CREATED)
 async def create_payment(
     payment_data: PaymentCreate,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Payment:
@@ -344,13 +366,14 @@ async def create_payment(
         transaction_id=payment_data.transaction_id,
         reference_number=payment_data.reference_number,
         notes=payment_data.notes,
-    )
+            )
     return payment
 
 
 @router.get("/payments/{payment_id}", response_model=Payment)
 async def get_payment(
     payment_id: int,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Payment:
@@ -376,6 +399,7 @@ async def get_payment(
 @router.get("/payments/history", response_model=List[Payment])
 async def get_payment_history(
     limit: int = Query(50, ge=1, le=1000),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> List[Payment]:
@@ -389,6 +413,7 @@ async def get_payment_history(
 @router.post("/payments/mpesa/stk", response_model=MpesaPaymentResponse)
 async def initiate_mpesa_stk(
     payment_request: MpesaPaymentRequest,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> MpesaPaymentResponse:
@@ -418,6 +443,7 @@ async def mpesa_callback(
 # Statistics endpoints
 @router.get("/stats", response_model=BillingStats)
 async def get_billing_stats(
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> BillingStats:
@@ -429,6 +455,7 @@ async def get_billing_stats(
 
 @router.get("/payments/stats", response_model=PaymentStats)
 async def get_payment_stats(
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> PaymentStats:
@@ -446,6 +473,7 @@ async def get_payment_stats(
 
 @router.get("/invoices/overdue", response_model=List[Invoice])
 async def get_overdue_invoices(
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> List[Invoice]:
@@ -453,3 +481,71 @@ async def get_overdue_invoices(
     service = BillingService(db)
     invoices = await service.get_overdue_invoices()
     return invoices
+
+
+# Platform Subscription Renewal for ISP Admins
+class SubscriptionRenewalRequest(BaseModel):
+    """Request schema for subscription renewal."""
+    billing_cycle: BillingCycle = BillingCycle.MONTHLY
+
+
+@router.post("/subscription/renew", response_model=PlatformInvoiceResponse, status_code=status.HTTP_201_CREATED)
+async def renew_subscription(
+    renewal_request: SubscriptionRenewalRequest,
+    current_user: User = Depends(require_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> PlatformInvoiceResponse:
+    """
+    Create a renewal invoice for the ISP admin's organization subscription.
+
+    This endpoint allows ISP admins to generate their own platform subscription
+    renewal invoice before initiating payment via Paystack.
+    """
+    if not current_user.organization_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User is not associated with an organization"
+        )
+
+    platform_billing_service = PlatformBillingService(db)
+
+    # Calculate the billing period for renewal
+    now = datetime.utcnow()
+
+    # Calculate period based on billing cycle
+    if renewal_request.billing_cycle == BillingCycle.MONTHLY:
+        billing_period_start = now
+        billing_period_end = now + timedelta(days=30)
+    elif renewal_request.billing_cycle == BillingCycle.QUARTERLY:
+        billing_period_start = now
+        billing_period_end = now + timedelta(days=90)
+    elif renewal_request.billing_cycle == BillingCycle.YEARLY:
+        billing_period_start = now
+        billing_period_end = now + timedelta(days=365)
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid billing cycle: {renewal_request.billing_cycle}"
+        )
+
+    try:
+        # Generate the platform invoice
+        invoice = await platform_billing_service.generate_invoice(
+            organization_id=current_user.organization_id,
+            billing_period_start=billing_period_start,
+            billing_period_end=billing_period_end,
+            billing_cycle=renewal_request.billing_cycle,
+        )
+
+        return PlatformInvoiceResponse.model_validate(invoice)
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate renewal invoice: {str(e)}"
+        )

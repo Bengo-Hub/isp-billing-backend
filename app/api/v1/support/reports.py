@@ -89,15 +89,16 @@ async def get_ticket_analytics(
 async def get_dashboard_analytics(
     start_date: Optional[datetime] = Query(None),
     end_date: Optional[datetime] = Query(None),
+    router_id: Optional[int] = Query(None),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Get comprehensive dashboard analytics."""
+    """Get comprehensive dashboard analytics with optional router filtering."""
     service = ReportsService(db)
-    
-    # Get all analytics
-    subscription_analytics = await service.get_subscription_analytics(start_date, end_date)
-    billing_analytics = await service.get_billing_analytics(start_date, end_date)
+
+    # Get all analytics with optional router filtering
+    subscription_analytics = await service.get_subscription_analytics(start_date, end_date, router_id=router_id)
+    billing_analytics = await service.get_billing_analytics(start_date, end_date, router_id=router_id)
     router_analytics = await service.get_router_analytics(start_date, end_date)
     ticket_analytics = await service.get_ticket_analytics(start_date, end_date)
     

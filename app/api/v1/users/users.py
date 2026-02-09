@@ -12,6 +12,7 @@ from app.api.deps import (
     require_admin,
     require_technician_or_admin,
 )
+from app.api.deps_org import get_org_id_for_query, get_org_from_header
 from app.core.database import get_db
 from app.models.user import User, UserRole, UserStatus
 from app.core.security import get_password_hash, create_access_token
@@ -62,19 +63,16 @@ async def get_users(
     role: Optional[UserRole] = Query(None, description="Filter by user role"),
     status: Optional[UserStatus] = Query(None, description="Filter by user status"),
     search: Optional[str] = Query(None, description="Search in username, email, or name"),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Get all users (admin only).
+    """Get all users (admin only) with organization context.
 
-    Platform owners see all users. ISP admins are scoped to their organization.
+    Platform owners must provide org_slug header to query specific organization.
+    ISP admins are automatically scoped to their organization.
     """
     user_service = UserService(db)
-
-    # ISP admins are scoped to their own org
-    organization_id = None
-    if current_user.role != UserRole.PLATFORM_OWNER:
-        organization_id = current_user.organization_id
 
     result = await user_service.get_all(
         page=pagination.page,
@@ -82,7 +80,7 @@ async def get_users(
         role=role,
         status=status,
         search=search,
-        organization_id=organization_id,
+        organization_id=org_id,
     )
 
     # Convert SQLAlchemy models to Pydantic schemas

@@ -90,6 +90,7 @@ async def get_licence_status(
     return {
         "organization_id": org.id,
         "organization_name": org.name,
+        "organization_type": org.organization_type.value if org.organization_type else "hotspot",
         "status": org.status.value,
         "is_trial": org.is_trial,
         "is_subscription_active": org.is_subscription_active,

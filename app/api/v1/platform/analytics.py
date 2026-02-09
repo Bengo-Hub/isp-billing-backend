@@ -116,9 +116,10 @@ async def get_dashboard_stats(
     first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     first_of_last_month = (first_of_month - timedelta(days=1)).replace(day=1)
 
-    # Organization counts by status
+    # Organization counts by status (exclude platform org)
     org_result = await db.execute(
         select(Organization.status, func.count(Organization.id))
+        .where(Organization.subscription_tier_id.isnot(None))
         .group_by(Organization.status)
     )
     org_counts = {row[0]: row[1] for row in org_result.all()}
@@ -166,19 +167,23 @@ async def get_dashboard_stats(
     )
     active_end_customers = int(active_subs.scalar() or 0)
 
-    # New signups this month
+    # New signups this month (exclude platform org)
     new_signups = await db.execute(
         select(func.count(Organization.id))
-        .where(Organization.created_at >= first_of_month)
+        .where(
+            Organization.created_at >= first_of_month,
+            Organization.subscription_tier_id.isnot(None)
+        )
     )
     new_signups_count = new_signups.scalar() or 0
 
-    # Churn this month (organizations that became suspended)
+    # Churn this month (organizations that became suspended, exclude platform org)
     churned = await db.execute(
         select(func.count(Organization.id))
         .where(
             Organization.status == OrganizationStatus.SUSPENDED,
             Organization.suspended_at >= first_of_month,
+            Organization.subscription_tier_id.isnot(None)
         )
     )
     churn_count = churned.scalar() or 0
@@ -305,32 +310,33 @@ async def get_organization_growth(
     now = datetime.utcnow()
     start_date = now - timedelta(days=months * 30)
 
-    # Get monthly signups
+    # Get monthly signups (database-agnostic approach, exclude platform org)
     signups_result = await db.execute(
-        select(
-            func.date_trunc('month', Organization.created_at),
-            func.count(Organization.id),
+        select(Organization.created_at)
+        .where(
+            Organization.created_at >= start_date,
+            Organization.subscription_tier_id.isnot(None)
         )
-        .where(Organization.created_at >= start_date)
-        .group_by(func.date_trunc('month', Organization.created_at))
-        .order_by(func.date_trunc('month', Organization.created_at))
     )
-    signups_by_month = {row[0]: row[1] for row in signups_result.all()}
+    signups_by_month = {}
+    for row in signups_result.all():
+        month_key = row[0].replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        signups_by_month[month_key] = signups_by_month.get(month_key, 0) + 1
 
-    # Get monthly churn
+    # Get monthly churn (database-agnostic approach, exclude platform org)
     churn_result = await db.execute(
-        select(
-            func.date_trunc('month', Organization.suspended_at),
-            func.count(Organization.id),
-        )
+        select(Organization.suspended_at)
         .where(
             Organization.suspended_at >= start_date,
             Organization.suspended_at.isnot(None),
+            Organization.subscription_tier_id.isnot(None)
         )
-        .group_by(func.date_trunc('month', Organization.suspended_at))
-        .order_by(func.date_trunc('month', Organization.suspended_at))
     )
-    churn_by_month = {row[0]: row[1] for row in churn_result.all()}
+    churn_by_month = {}
+    for row in churn_result.all():
+        if row[0]:
+            month_key = row[0].replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            churn_by_month[month_key] = churn_by_month.get(month_key, 0) + 1
 
     # Generate chart data
     chart_data = []
@@ -373,7 +379,10 @@ async def get_top_organizations(
     """
     result = await db.execute(
         select(Organization)
-        .where(Organization.status.in_([OrganizationStatus.ACTIVE, OrganizationStatus.TRIAL]))
+        .where(
+            Organization.status.in_([OrganizationStatus.ACTIVE, OrganizationStatus.TRIAL]),
+            Organization.subscription_tier_id.isnot(None)  # Exclude platform org
+        )
         .order_by(Organization.total_revenue.desc())
         .limit(limit)
     )

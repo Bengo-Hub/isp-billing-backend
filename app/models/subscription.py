@@ -118,6 +118,16 @@ class Subscription(Base):
         """Get total data used in GB."""
         return self.total_bytes_used / (1024 ** 3)
 
+    @property
+    def plan_name(self) -> str:
+        """Get plan name from loaded relationship."""
+        return self.plan.name if self.plan else None
+
+    @property
+    def router_name(self) -> str:
+        """Get router name from loaded relationship."""
+        return self.router.name if self.router else None
+
     def __repr__(self) -> str:
         """String representation."""
         return f"<Subscription(id={self.id}, user_id={self.user_id}, type='{self.subscription_type}')>"

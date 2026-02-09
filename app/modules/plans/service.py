@@ -36,11 +36,14 @@ class PlanService:
         status: Optional[PlanStatus] = None,
         search: Optional[str] = None,
         is_active: Optional[bool] = None,
+        organization_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Get all service plans with pagination and filters."""
         query = select(ServicePlan)
 
         # Apply filters
+        if organization_id is not None:
+            query = query.where(ServicePlan.organization_id == organization_id)
         if plan_type:
             query = query.where(ServicePlan.plan_type == plan_type)
         if status:
@@ -90,6 +93,7 @@ class PlanService:
         billing_cycle: BillingCycle,
         download_speed: int,
         upload_speed: int,
+        organization_id: Optional[int] = None,
         data_limit: int = -1,
         time_limit: int = -1,
         validity_days: int = 30,
@@ -114,6 +118,7 @@ class PlanService:
     ) -> ServicePlan:
         """Create a new service plan."""
         plan = ServicePlan(
+            organization_id=organization_id,
             name=name,
             description=description,
             plan_type=plan_type,
@@ -150,7 +155,18 @@ class PlanService:
         await self.db.commit()
         await self.db.refresh(plan)
 
-        return plan
+        # Eagerly load relationships for response serialization
+        result = await self.db.execute(
+            select(ServicePlan)
+            .where(ServicePlan.id == plan.id)
+            .options(
+                selectinload(ServicePlan.features),
+                selectinload(ServicePlan.pricing_tiers),
+            )
+        )
+        plan_with_relations = result.scalar_one()
+
+        return plan_with_relations
 
     async def update_plan(
         self, 

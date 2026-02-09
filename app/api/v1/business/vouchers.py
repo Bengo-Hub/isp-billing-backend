@@ -12,6 +12,7 @@ from app.models.customer_portal import VoucherCode, VoucherStatus
 from app.models.plan import ServicePlan
 from app.models.organization import Organization
 from app.api.deps import get_current_user, require_technician_or_admin
+from app.api.deps_org import get_org_id_for_query
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ async def list_vouchers(
     status: Optional[VoucherStatusFilter] = None,
     search: Optional[str] = None,
     plan_id: Optional[int] = None,
+    org_id: int = Depends(get_org_id_for_query),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -96,7 +98,7 @@ async def list_vouchers(
     count_query = select(func.count(VoucherCode.id))
 
     # Apply filters
-    filters = []
+    filters = [VoucherCode.organization_id == org_id]
     if status:
         filters.append(VoucherCode.status == status.value)
     if plan_id:
@@ -164,25 +166,34 @@ async def list_vouchers(
 
 @router.get("/stats", response_model=VoucherStatsResponse)
 async def get_voucher_stats(
+    org_id: int = Depends(get_org_id_for_query),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """Get voucher statistics."""
-    total_result = await db.execute(select(func.count(VoucherCode.id)))
+    total_result = await db.execute(
+        select(func.count(VoucherCode.id)).where(VoucherCode.organization_id == org_id)
+    )
     total = total_result.scalar() or 0
 
     active_result = await db.execute(
-        select(func.count(VoucherCode.id)).where(VoucherCode.status == VoucherStatus.ACTIVE)
+        select(func.count(VoucherCode.id)).where(
+            and_(VoucherCode.organization_id == org_id, VoucherCode.status == VoucherStatus.ACTIVE)
+        )
     )
     active = active_result.scalar() or 0
 
     used_result = await db.execute(
-        select(func.count(VoucherCode.id)).where(VoucherCode.status == VoucherStatus.USED)
+        select(func.count(VoucherCode.id)).where(
+            and_(VoucherCode.organization_id == org_id, VoucherCode.status == VoucherStatus.USED)
+        )
     )
     used = used_result.scalar() or 0
 
     expired_result = await db.execute(
-        select(func.count(VoucherCode.id)).where(VoucherCode.status == VoucherStatus.EXPIRED)
+        select(func.count(VoucherCode.id)).where(
+            and_(VoucherCode.organization_id == org_id, VoucherCode.status == VoucherStatus.EXPIRED)
+        )
     )
     expired = expired_result.scalar() or 0
 
@@ -197,12 +208,15 @@ async def get_voucher_stats(
 @router.get("/{voucher_id}", response_model=VoucherListItem)
 async def get_voucher(
     voucher_id: int,
+    org_id: int = Depends(get_org_id_for_query),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """Get a single voucher by ID."""
     result = await db.execute(
-        select(VoucherCode).where(VoucherCode.id == voucher_id)
+        select(VoucherCode).where(
+            and_(VoucherCode.id == voucher_id, VoucherCode.organization_id == org_id)
+        )
     )
     voucher = result.scalar_one_or_none()
     if not voucher:
@@ -237,6 +251,7 @@ async def get_voucher(
 @router.post("/generate", status_code=status.HTTP_201_CREATED)
 async def generate_vouchers(
     data: VoucherCreateRequest,
+    org_id: int = Depends(get_org_id_for_query),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_technician_or_admin),
 ):
@@ -255,7 +270,7 @@ async def generate_vouchers(
         voucher = VoucherCode(
             code=code,
             plan_id=plan.id,
-            organization_id=getattr(current_user, 'organization_id', None),
+            organization_id=org_id,
             status=VoucherStatus.ACTIVE,
             data_limit_bytes=plan.data_limit * 1024 * 1024 if plan.data_limit else None,
             time_limit_seconds=plan.time_limit * 60 if plan.time_limit else None,
@@ -274,12 +289,15 @@ async def generate_vouchers(
 async def update_voucher(
     voucher_id: int,
     data: VoucherUpdateRequest,
+    org_id: int = Depends(get_org_id_for_query),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_technician_or_admin),
 ):
     """Update a voucher (status/expiry)."""
     result = await db.execute(
-        select(VoucherCode).where(VoucherCode.id == voucher_id)
+        select(VoucherCode).where(
+            and_(VoucherCode.id == voucher_id, VoucherCode.organization_id == org_id)
+        )
     )
     voucher = result.scalar_one_or_none()
     if not voucher:
@@ -298,12 +316,15 @@ async def update_voucher(
 @router.delete("/{voucher_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_voucher(
     voucher_id: int,
+    org_id: int = Depends(get_org_id_for_query),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_technician_or_admin),
 ):
     """Delete a voucher."""
     result = await db.execute(
-        select(VoucherCode).where(VoucherCode.id == voucher_id)
+        select(VoucherCode).where(
+            and_(VoucherCode.id == voucher_id, VoucherCode.organization_id == org_id)
+        )
     )
     voucher = result.scalar_one_or_none()
     if not voucher:

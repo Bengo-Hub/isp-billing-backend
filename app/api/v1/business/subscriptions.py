@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_technician_or_admin, PaginationParams
+from app.api.deps_org import get_org_id_for_query
 from app.core.database import get_db
 from app.models.user import User
 from app.models.subscription import SubscriptionStatus, SubscriptionType
@@ -30,6 +31,7 @@ async def get_subscriptions(
     status: Optional[SubscriptionStatus] = Query(None),
     subscription_type: Optional[SubscriptionType] = Query(None),
     search: Optional[str] = Query(None),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SubscriptionList:
@@ -43,6 +45,7 @@ async def get_subscriptions(
         status=status,
         subscription_type=subscription_type,
         search=search,
+        organization_id=org_id,
     )
     return SubscriptionList(**result)
 
@@ -50,6 +53,7 @@ async def get_subscriptions(
 @router.post("/", response_model=Subscription, status_code=status.HTTP_201_CREATED)
 async def create_subscription(
     subscription_data: SubscriptionCreate,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Subscription:
@@ -77,6 +81,7 @@ async def create_subscription(
 @router.get("/{subscription_id}", response_model=Subscription)
 async def get_subscription(
     subscription_id: int,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Subscription:
@@ -95,6 +100,7 @@ async def get_subscription(
 async def update_subscription(
     subscription_id: int,
     subscription_data: SubscriptionUpdate,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Subscription:
@@ -116,6 +122,7 @@ async def update_subscription(
 @router.delete("/{subscription_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_subscription(
     subscription_id: int,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> None:
@@ -132,6 +139,7 @@ async def delete_subscription(
 @router.patch("/{subscription_id}/activate", response_model=Subscription)
 async def activate_subscription(
     subscription_id: int,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Subscription:
@@ -150,6 +158,7 @@ async def activate_subscription(
 async def suspend_subscription(
     subscription_id: int,
     suspend_data: SubscriptionSuspendRequest,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Subscription:
@@ -172,6 +181,7 @@ async def suspend_subscription(
 async def cancel_subscription(
     subscription_id: int,
     cancel_data: SubscriptionCancelRequest,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Subscription:
@@ -194,6 +204,7 @@ async def cancel_subscription(
 async def renew_subscription(
     subscription_id: int,
     renewal_data: SubscriptionRenewalRequest,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Subscription:
@@ -216,6 +227,7 @@ async def renew_subscription(
 async def get_user_subscriptions(
     user_id: int,
     active_only: bool = Query(False),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> List[Subscription]:
@@ -235,6 +247,7 @@ async def get_user_subscriptions(
 @router.get("/{subscription_id}/stats", response_model=SubscriptionStats)
 async def get_subscription_stats(
     subscription_id: int,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SubscriptionStats:
@@ -253,6 +266,7 @@ async def get_subscription_stats(
 async def get_subscription_usage(
     subscription_id: int,
     limit: int = Query(100, ge=1, le=1000),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> List[SubscriptionUsageLog]:
@@ -266,6 +280,7 @@ async def get_subscription_usage(
 async def update_subscription_usage(
     subscription_id: int,
     usage_data: SubscriptionUsageUpdate,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Dict[str, str]:
@@ -292,6 +307,7 @@ async def update_subscription_usage(
 @router.get("/{subscription_id}/history", response_model=List[SubscriptionHistory])
 async def get_subscription_history(
     subscription_id: int,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> List[SubscriptionHistory]:
@@ -303,6 +319,7 @@ async def get_subscription_history(
 
 @router.get("/expired/", response_model=List[Subscription])
 async def get_expired_subscriptions(
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> List[Subscription]:
@@ -315,6 +332,7 @@ async def get_expired_subscriptions(
 @router.get("/expiring/", response_model=List[Subscription])
 async def get_expiring_subscriptions(
     days: int = Query(7, ge=1, le=30),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> List[Subscription]:

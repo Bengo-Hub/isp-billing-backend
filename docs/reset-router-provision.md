@@ -122,7 +122,47 @@
 }
 
 # ============================================================================
-# STEP 6: Remove Bridge Configuration (LAST - has dependencies)
+# STEP 6: Remove Queue Trees (Bandwidth Management)
+# ============================================================================
+:put "Removing queue trees..."
+
+# Remove queue trees
+:foreach i in=[/queue/tree/find comment~"codevertex"] do={
+  /queue/tree/remove $i
+  :put "  Removed queue tree"
+}
+
+# Remove simple queues
+:foreach i in=[/queue/simple/find comment~"codevertex"] do={
+  /queue/simple/remove $i
+  :put "  Removed simple queue"
+}
+
+# Remove queue types
+:foreach i in=[/queue/type/find name~"codevertex"] do={
+  /queue/type/remove $i
+  :put "  Removed queue type"
+}
+
+# ============================================================================
+# STEP 7: Remove System Configurations
+# ============================================================================
+:put "Removing system configurations..."
+
+# Remove system scheduler entries
+:foreach i in=[/system/scheduler/find comment~"codevertex"] do={
+  /system/scheduler/remove $i
+  :put "  Removed scheduler entry"
+}
+
+# Remove remote logging actions
+:foreach i in=[/system/logging/action/find name~"codevertex"] do={
+  /system/logging/action/remove $i
+  :put "  Removed logging action"
+}
+
+# ============================================================================
+# STEP 8: Remove Bridge Configuration (LAST - has dependencies)
 # ============================================================================
 :put "Removing bridge configurations..."
 
@@ -148,7 +188,7 @@
 }
 
 # ============================================================================
-# STEP 7: Verification - Show What Remains
+# STEP 9: Verification - Show What Remains
 # ============================================================================
 :put ""
 :put "============================================================================"
@@ -191,6 +231,21 @@
   :set found true
 }
 
+:if ([:len [/queue/tree/find comment~"codevertex"]] > 0) do={
+  :put "WARNING: Queue trees still exist"
+  :set found true
+}
+
+:if ([:len [/system/scheduler/find comment~"codevertex"]] > 0) do={
+  :put "WARNING: System scheduler entries still exist"
+  :set found true
+}
+
+:if ([:len [/system/logging/action/find name~"codevertex"]] > 0) do={
+  :put "WARNING: System logging actions still exist"
+  :set found true
+}
+
 :if ($found = false) do={
   :put "SUCCESS: All codevertex configurations removed!"
   :put ""
@@ -224,6 +279,59 @@
 /ip/hotspot/print brief
 
 :put ""
+:put "Queue Trees:"
+/queue/tree/print brief
+
+:put ""
+:put "System Scheduler:"
+/system/scheduler/print brief
+
+:put ""
 :put "============================================================================"
 :put "CLEANUP SCRIPT FINISHED"
+:put "============================================================================"
+:put ""
+:put "MANUAL CLEANUP COMMANDS (if script fails)"
+:put "============================================================================"
+:put "If the script fails, you can run these commands manually step by step:"
+:put ""
+:put "# Remove Hotspot"
+:put "/ip/hotspot/remove [find name~\"codevertex\"]"
+:put "/ip/hotspot/profile/remove [find name~\"codevertex\"]"
+:put "/ip/hotspot/walled-garden/remove [find comment~\"codevertex\"]"
+:put "/ip/hotspot/walled-garden/ip/remove [find comment~\"codevertex\"]"
+:put "/ip/hotspot/user/remove [find comment~\"codevertex\"]"
+:put "/ip/dns/static/remove [find comment~\"codevertex-captive-portal-detection\"]"
+:put ""
+:put "# Remove DHCP"
+:put "/ip/dhcp-server/remove [find name~\"codevertex\"]"
+:put "/ip/dhcp-server/network/remove [find comment~\"codevertex\"]"
+:put ""
+:put "# Remove IP Pool"
+:put "/ip/pool/remove [find name~\"codevertex\"]"
+:put ""
+:put "# Remove PPPoE"
+:put "/interface/pppoe-server/server/remove [find service-name~\"codevertex\"]"
+:put "/ppp/profile/remove [find name~\"codevertex\"]"
+:put "/ppp/secret/remove [find comment~\"codevertex\"]"
+:put ""
+:put "# Remove Firewall Rules"
+:put "/ip/firewall/filter/remove [find comment~\"codevertex\"]"
+:put "/ip/firewall/mangle/remove [find comment~\"codevertex\"]"
+:put "/ip/firewall/nat/remove [find comment~\"codevertex\"]"
+:put ""
+:put "# Remove Queue Trees"
+:put "/queue/tree/remove [find comment~\"codevertex\"]"
+:put "/queue/simple/remove [find comment~\"codevertex\"]"
+:put "/queue/type/remove [find name~\"codevertex\"]"
+:put ""
+:put "# Remove System Configs"
+:put "/system/scheduler/remove [find comment~\"codevertex\"]"
+:put "/system/logging/action/remove [find name~\"codevertex\"]"
+:put ""
+:put "# Remove Bridge (LAST)"
+:put "/interface/bridge/port/remove [find bridge~\"codevertex\"]"
+:put "/ip/address/remove [find interface~\"codevertex\"]"
+:put "/interface/bridge/remove [find name~\"codevertex\"]"
+:put ""
 :put "============================================================================"

@@ -146,6 +146,8 @@ class Subscription(SubscriptionInDB):
 
     usage_logs: List[SubscriptionUsageLog] = []
     history: List[SubscriptionHistory] = []
+    plan_name: Optional[str] = None
+    router_name: Optional[str] = None
 
 
 class SubscriptionStats(BaseModel):

@@ -79,14 +79,19 @@ class SubscriptionService:
         status: Optional[SubscriptionStatus] = None,
         subscription_type: Optional[SubscriptionType] = None,
         search: Optional[str] = None,
+        organization_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Get all subscriptions with pagination and filters."""
         query = select(Subscription).options(
             selectinload(Subscription.usage_logs),
-            selectinload(Subscription.history)
+            selectinload(Subscription.history),
+            selectinload(Subscription.plan),
+            selectinload(Subscription.router)
         )
 
         # Apply filters
+        if organization_id:
+            query = query.join(Subscription.user).where(User.organization_id == organization_id)
         if user_id:
             query = query.where(Subscription.user_id == user_id)
         if plan_id:

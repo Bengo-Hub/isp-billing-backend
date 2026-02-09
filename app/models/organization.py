@@ -318,10 +318,10 @@ class OrganizationSettings(Base):
 
     # Payment Confirmation SMS Templates
     send_hotspot_payment_confirmation = Column(Boolean, default=True, nullable=False)
-    hotspot_payment_confirmation_sms = Column(Text, nullable=True, default="Dear @username, you have successfully subscribed to GoFiNet @package_name. Your subscription will expire on @expiry_date. Your username is @username and password is @password.")
+    hotspot_payment_confirmation_sms = Column(Text, nullable=True, default="Dear @username, you have successfully subscribed to @package_name. Your subscription will expire on @expiry_date. Your username is @username and password is @password. To login visit @portal_url/buy/@org_slug and click connect.")
 
     send_pppoe_payment_confirmation = Column(Boolean, default=True, nullable=False)
-    pppoe_payment_confirmation_sms = Column(Text, nullable=True, default="Dear customer, you have successfully subscribed to GoFiNet @package_name. Your subscription will expire on @expiry_date.")
+    pppoe_payment_confirmation_sms = Column(Text, nullable=True, default="Hello @first_name, Your PPPoE account has been created. You can use account number: @account_number to pay. Login to your account at @portal_url/portal/pppoe/@org_slug/login using username: @username and password: @password")
 
     # Expiry Notification SMS Templates
     send_hotspot_expiry_notification = Column(Boolean, default=True, nullable=False)
@@ -349,10 +349,10 @@ class OrganizationSettings(Base):
 
     # WhatsApp Payment Confirmation Templates
     send_hotspot_payment_confirmation_whatsapp = Column(Boolean, default=False, nullable=False)
-    hotspot_payment_confirmation_whatsapp = Column(Text, nullable=True, default="Hello @username! 👋\n\nYou've successfully subscribed to *@package_name*\n\n✅ Username: @username\n🔑 Password: @password\n📅 Expires: @expiry_date\n\nThank you for choosing us!")
+    hotspot_payment_confirmation_whatsapp = Column(Text, nullable=True, default="Hello @username! 👋\n\nYou've successfully subscribed to *@package_name*\n\n✅ Username: @username\n🔑 Password: @password\n📅 Expires: @expiry_date\n\n🌐 Login: @portal_url/buy/@org_slug\n(Click connect and login with your details)\n\nThank you for choosing us!")
 
     send_pppoe_payment_confirmation_whatsapp = Column(Boolean, default=False, nullable=False)
-    pppoe_payment_confirmation_whatsapp = Column(Text, nullable=True, default="Hello! 👋\n\nYour subscription to *@package_name* is now active!\n\n📅 Expires: @expiry_date\n\nThank you for choosing us!")
+    pppoe_payment_confirmation_whatsapp = Column(Text, nullable=True, default="Hello @first_name! 👋\n\nYour PPPoE account is ready!\n\n*@package_name*\n\n✅ Username: @username\n🔑 Password: @password\n📅 Expires: @expiry_date\n💳 Account Number: @account_number\n\n🌐 Login: @portal_url/portal/pppoe/@org_slug/login\n\nThank you for choosing us!")
 
     # WhatsApp Expiry Notification Templates
     send_hotspot_expiry_notification_whatsapp = Column(Boolean, default=False, nullable=False)
