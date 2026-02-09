@@ -532,46 +532,11 @@ async def purchase_package(
     elif data.payment_method == "mpesa":
         requested_gateway_type = GatewayType.MPESA
 
-    # Get payment gateway based on requested method
+    # All payments go through the platform-level gateway (organization_id IS NULL).
+    # ISPs don't configure their own gateways - the platform admin configures
+    # the Paystack account and payouts are disbursed to ISPs separately.
     gateway_config = None
     if requested_gateway_type:
-        gateway_result = await db.execute(
-            select(PaymentGatewayConfig)
-            .where(
-                PaymentGatewayConfig.organization_id == organization.id,
-                PaymentGatewayConfig.gateway_type == requested_gateway_type,
-                PaymentGatewayConfig.is_active == True,
-            )
-            .limit(1)
-        )
-        gateway_config = gateway_result.scalar_one_or_none()
-
-    # Fallback to primary gateway if requested gateway not found
-    if not gateway_config:
-        gateway_result = await db.execute(
-            select(PaymentGatewayConfig)
-            .where(
-                PaymentGatewayConfig.organization_id == organization.id,
-                PaymentGatewayConfig.is_active == True,
-                PaymentGatewayConfig.is_primary == True,
-            )
-        )
-        gateway_config = gateway_result.scalar_one_or_none()
-
-    # Try any active gateway for this organization as last resort
-    if not gateway_config:
-        gateway_result = await db.execute(
-            select(PaymentGatewayConfig)
-            .where(
-                PaymentGatewayConfig.organization_id == organization.id,
-                PaymentGatewayConfig.is_active == True,
-            )
-            .limit(1)
-        )
-        gateway_config = gateway_result.scalar_one_or_none()
-
-    # Fallback to platform-level gateway if no org-level gateway found
-    if not gateway_config and requested_gateway_type:
         gateway_result = await db.execute(
             select(PaymentGatewayConfig)
             .where(
@@ -583,7 +548,7 @@ async def purchase_package(
         )
         gateway_config = gateway_result.scalar_one_or_none()
 
-    # Fallback to any active platform-level gateway
+    # Fallback to any active platform-level gateway (primary first)
     if not gateway_config:
         gateway_result = await db.execute(
             select(PaymentGatewayConfig)
@@ -1039,12 +1004,13 @@ async def get_payment_status(
     # If payment is still processing, try to verify with gateway (webhook fallback)
     if purchase.payment_status == "processing":
         try:
-            # Get the gateway that was used for this purchase
+            # Get the platform-level Paystack gateway for verification
             gateway_result = await db.execute(
                 select(PaymentGatewayConfig).where(
                     PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
+                    PaymentGatewayConfig.organization_id.is_(None),
                     PaymentGatewayConfig.is_active == True,
-                )
+                ).limit(1)
             )
             gateway_config = gateway_result.scalar_one_or_none()
 
@@ -1052,12 +1018,12 @@ async def get_payment_status(
                 gateway = PaymentGatewayFactory.create(gateway_config)
                 verification = await gateway.verify_payment(reference)
 
-                if verification.success and verification.status == "success":
+                if verification.success:
                     # Payment was successful! Process it now
-                    logger.info(f"Manual verification successful for reference {reference}, processing payment")
+                    logger.info(f"Paystack verification successful for reference {reference}, processing payment")
                     await _process_successful_payment(db, purchase, organization)
 
-                elif verification.status in ["failed", "abandoned"]:
+                elif verification.status in ["failed", "cancelled"]:
                     purchase.payment_status = "failed"
                     await db.commit()
 

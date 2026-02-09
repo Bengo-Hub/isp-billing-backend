@@ -84,31 +84,18 @@ async def get_available_payment_gateways(
     if not organization:
         return []
 
-    # Get all active payment gateways for this organization
+    # All payments go through the platform-level gateway (organization_id IS NULL).
+    # ISPs don't configure their own payment collection gateways.
     gateways_result = await db.execute(
         select(PaymentGatewayConfig).where(
-            PaymentGatewayConfig.organization_id == organization.id,
+            PaymentGatewayConfig.organization_id.is_(None),
             PaymentGatewayConfig.is_active == True,
-            PaymentGatewayConfig.status == GatewayStatus.ACTIVE,
         ).order_by(
-            PaymentGatewayConfig.is_primary.desc(),  # Primary gateways first
+            PaymentGatewayConfig.is_primary.desc(),
             PaymentGatewayConfig.name.asc()
         )
     )
     configured_gateways = list(gateways_result.scalars().all())
-
-    # Fallback to platform-level gateways if no org-level gateways found
-    if not configured_gateways:
-        gateways_result = await db.execute(
-            select(PaymentGatewayConfig).where(
-                PaymentGatewayConfig.organization_id.is_(None),
-                PaymentGatewayConfig.is_active == True,
-            ).order_by(
-                PaymentGatewayConfig.is_primary.desc(),
-                PaymentGatewayConfig.name.asc()
-            )
-        )
-        configured_gateways = list(gateways_result.scalars().all())
 
     # Build response with all active gateways
     available_gateways = []

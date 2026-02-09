@@ -502,32 +502,48 @@ class ProvisioningService:
                 if not success and command_data.get('critical', True):
                     raise ConfigurationError(f"Service configuration failed: {command_data['description']}")
 
-            # Apply security configurations
-            await self._update_step_progress(step_log, 90.0, "Applying security configurations...", session)
-            await apply_security_configuration(client, connection, config, self.command_templates, self.logger, session.session_id)
-
-            # Upload hotspot templates via FTP (only for hotspot services)
+            # Upload hotspot templates via FTP BEFORE security config
+            # IMPORTANT: Must happen before apply_security_configuration() because
+            # security config disables FTP (/ip/service/set ftp disabled=yes).
+            # The hotspot commands above already enabled FTP as their first command.
             if session.service_type in [ServiceType.HOTSPOT, ServiceType.BOTH]:
-                await self._update_step_progress(step_log, 92.0, "Uploading hotspot templates...", session)
+                await self._update_step_progress(step_log, 90.0, "Uploading hotspot templates...", session)
+
+                # Brief delay to allow FTP service to fully start after being enabled
+                import asyncio
+                await asyncio.sleep(3)
+
                 try:
                     await self._upload_hotspot_templates(router, config, session)
-                    # Send success notification via WebSocket
+                    # Templates uploaded — point hotspot profile to custom templates
+                    profile_name = config.get("hotspot_profile", "codevertex-hsprof")
+                    try:
+                        await client.execute_command(
+                            connection,
+                            f"/ip/hotspot/profile/set {profile_name} html-directory=hotspot"
+                        )
+                        self.logger.info("Set hotspot html-directory=hotspot for custom templates")
+                    except Exception as dir_err:
+                        self.logger.warning(f"Could not set html-directory: {dir_err}")
                     await streaming_manager.log_provisioning_step(
                         session.session_id,
                         "template_upload",
-                        "[OK] Hotspot templates uploaded successfully",
+                        "[OK] Hotspot templates uploaded and activated",
                         "success"
                     )
                 except Exception as e:
-                    self.logger.warning(f"Failed to upload hotspot templates: {e}. Continuing anyway...")
-                    # Send warning notification via WebSocket
+                    self.logger.warning(f"Failed to upload hotspot templates: {e}. Using default MikroTik templates.")
                     await streaming_manager.log_provisioning_step(
                         session.session_id,
                         "template_upload",
-                        f"[WARN] Failed to upload hotspot templates: {str(e)}. Continuing with default templates.",
+                        f"[WARN] Template upload failed: {str(e)}. Captive portal will use default MikroTik login page.",
                         "warning"
                     )
-                    # Non-critical error, continue provisioning
+                    # html-directory is NOT set, so MikroTik uses built-in defaults
+
+            # Apply security configurations (this disables FTP among other things)
+            await self._update_step_progress(step_log, 93.0, "Applying security configurations...", session)
+            await apply_security_configuration(client, connection, config, self.command_templates, self.logger, session.session_id)
 
             # Final verification
             await self._update_step_progress(step_log, 95.0, "Performing final verification...", session)
@@ -651,30 +667,61 @@ class ProvisioningService:
                     "name": template_info["target"]
                 })
 
-            # Delete old templates first to ensure fresh upload
-            try:
-                for template_info in template_files:
-                    target_name = template_info["target"]
-                    self.logger.info(f"Deleting old template: {target_name}")
-                    await ftp_client.delete_hotspot_file(
+            # Upload with retry — FTP service may need time to start listening
+            import asyncio as _asyncio
+            max_ftp_retries = 3
+            results = {}
+            last_error = None
+
+            for attempt in range(max_ftp_retries):
+                try:
+                    # Delete old templates first to ensure fresh upload
+                    try:
+                        for template_info in template_files:
+                            target_name = template_info["target"]
+                            self.logger.info(f"Deleting old template: {target_name}")
+                            await ftp_client.delete_hotspot_file(
+                                router_ip=router.ip_address,
+                                username=router.username,
+                                password=router.password,
+                                filename=target_name,
+                                port=21
+                            )
+                    except Exception as e:
+                        # It's okay if deletion fails (files might not exist)
+                        self.logger.info(f"Could not delete old templates (might not exist): {e}")
+
+                    # Upload processed templates
+                    results = await ftp_client.upload_hotspot_templates_batch(
                         router_ip=router.ip_address,
                         username=router.username,
                         password=router.password,
-                        filename=target_name,
+                        templates=processed_templates,
                         port=21
                     )
-            except Exception as e:
-                # It's okay if deletion fails (files might not exist)
-                self.logger.info(f"Could not delete old templates (might not exist): {e}")
 
-            # Upload processed templates
-            results = await ftp_client.upload_hotspot_templates_batch(
-                router_ip=router.ip_address,
-                username=router.username,
-                password=router.password,
-                templates=processed_templates,
-                port=21  # Standard FTP port
-            )
+                    # If we got results and all succeeded, break out
+                    if results and all(results.values()):
+                        break
+
+                    # If some failed, treat as error for retry
+                    failed = [n for n, ok in results.items() if not ok]
+                    if failed:
+                        last_error = f"Failed templates: {', '.join(failed)}"
+                        raise Exception(last_error)
+
+                except Exception as e:
+                    last_error = e
+                    if attempt < max_ftp_retries - 1:
+                        wait_secs = 3 * (attempt + 1)
+                        self.logger.warning(
+                            f"FTP upload attempt {attempt + 1}/{max_ftp_retries} failed: {e}. "
+                            f"Retrying in {wait_secs}s..."
+                        )
+                        await _asyncio.sleep(wait_secs)
+                    else:
+                        self.logger.error(f"FTP upload failed after {max_ftp_retries} attempts: {e}")
+                        raise
 
             # Clean up temporary files
             for template in processed_templates:

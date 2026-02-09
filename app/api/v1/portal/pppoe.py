@@ -531,32 +531,20 @@ async def renew_subscription(
             detail="Package not found"
         )
 
-    # Get payment gateway
+    # All payments go through the platform-level gateway (organization_id IS NULL).
+    # The platform admin configures the Paystack account; payouts are disbursed to ISPs separately.
     from app.models.payment_gateway import PaymentGatewayConfig
 
     gateway_result = await db.execute(
         select(PaymentGatewayConfig)
         .where(
-            PaymentGatewayConfig.organization_id == organization.id,
+            PaymentGatewayConfig.organization_id.is_(None),
             PaymentGatewayConfig.is_active == True,
         )
         .order_by(PaymentGatewayConfig.is_primary.desc())
         .limit(1)
     )
     gateway_config = gateway_result.scalar_one_or_none()
-
-    # Fallback to platform-level gateway if no org-level gateway found
-    if not gateway_config:
-        gateway_result = await db.execute(
-            select(PaymentGatewayConfig)
-            .where(
-                PaymentGatewayConfig.organization_id.is_(None),
-                PaymentGatewayConfig.is_active == True,
-            )
-            .order_by(PaymentGatewayConfig.is_primary.desc())
-            .limit(1)
-        )
-        gateway_config = gateway_result.scalar_one_or_none()
 
     if not gateway_config:
         raise HTTPException(
@@ -613,6 +601,259 @@ async def renew_subscription(
         message=result.message or ("Payment request sent" if result.success else "Payment failed"),
         checkout_url=result.checkout_url,
     )
+
+
+# =========================================================================
+# Payment Verification (Paystack direct API verification - no webhook needed)
+# =========================================================================
+
+
+@router.get("/{org_slug}/payment/verify")
+async def verify_pppoe_payment(
+    org_slug: str,
+    reference: str = Query(..., description="Payment reference"),
+    db: AsyncSession = Depends(get_db),
+    organization: Organization = Depends(get_organization_by_slug),
+):
+    """
+    Verify a PPPoE payment by checking directly with Paystack API.
+
+    Called by the frontend callback page after Paystack redirects back.
+    This bypasses webhooks entirely, verifying payment status directly
+    with Paystack API and processing the subscription if successful.
+    """
+    import logging
+    from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
+    from app.integrations.payment_gateways import PaymentGatewayFactory
+
+    logger = logging.getLogger(__name__)
+
+    # 1. Find the payment record
+    result = await db.execute(
+        select(Payment).where(
+            Payment.payment_reference == reference,
+            Payment.organization_id == organization.id,
+        )
+    )
+    payment = result.scalar_one_or_none()
+
+    if not payment:
+        return {
+            "success": False,
+            "status": "not_found",
+            "message": "Payment not found for this reference",
+        }
+
+    # 2. Already completed - return success
+    if payment.status == PaymentStatus.COMPLETED:
+        return {
+            "success": True,
+            "status": "success",
+            "message": "Payment already processed",
+            "data": {
+                "reference": reference,
+                "amount": float(payment.amount),
+                "currency": payment.currency,
+                "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
+            },
+        }
+
+    # 3. Get platform-level Paystack gateway
+    gateway_result = await db.execute(
+        select(PaymentGatewayConfig).where(
+            PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
+            PaymentGatewayConfig.organization_id.is_(None),
+            PaymentGatewayConfig.is_active == True,
+        ).limit(1)
+    )
+    gateway_config = gateway_result.scalar_one_or_none()
+
+    if not gateway_config:
+        return {
+            "success": False,
+            "status": "error",
+            "message": "Payment gateway not configured",
+        }
+
+    # 4. Verify directly with Paystack API
+    try:
+        gateway = PaymentGatewayFactory.create(gateway_config)
+        verification = await gateway.verify_payment(reference)
+
+        if not verification.success:
+            if verification.status in ["failed", "cancelled"]:
+                payment.status = PaymentStatus.FAILED
+                await db.commit()
+            return {
+                "success": False,
+                "status": str(verification.status.value) if hasattr(verification.status, 'value') else str(verification.status),
+                "message": verification.message or "Payment verification failed",
+            }
+
+        # 5. Payment confirmed! Update payment record
+        paid_at = verification.paid_at or datetime.utcnow()
+        if hasattr(paid_at, 'tzinfo') and paid_at.tzinfo is not None:
+            paid_at = paid_at.replace(tzinfo=None)
+        payment.status = PaymentStatus.COMPLETED
+        payment.paid_at = paid_at
+        await db.flush()
+
+        # 6. Process subscription renewal
+        await _process_pppoe_subscription_renewal(db, payment, organization, logger)
+
+        await db.commit()
+
+        return {
+            "success": True,
+            "status": "success",
+            "message": "Payment verified and subscription renewed",
+            "data": {
+                "reference": reference,
+                "amount": float(verification.amount) if verification.amount else float(payment.amount),
+                "currency": verification.currency or payment.currency,
+                "paid_at": (verification.paid_at or payment.paid_at).isoformat() if (verification.paid_at or payment.paid_at) else None,
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"Error verifying PPPoE payment {reference}: {e}")
+        return {
+            "success": False,
+            "status": "error",
+            "message": f"Payment verification error: {str(e)}",
+        }
+
+
+async def _process_pppoe_subscription_renewal(
+    db: AsyncSession,
+    payment: Payment,
+    organization: Organization,
+    logger,
+):
+    """
+    Process subscription renewal after successful PPPoE payment.
+
+    Shared logic used by both the verify endpoint and the webhook handler.
+    """
+    # Get user
+    user_result = await db.execute(
+        select(User).where(User.id == payment.user_id)
+    )
+    user = user_result.scalar_one_or_none()
+
+    if not user:
+        logger.error(f"User not found for payment {payment.id}")
+        return
+
+    # Get user's most recent subscription to determine the plan
+    sub_result = await db.execute(
+        select(Subscription)
+        .options(selectinload(Subscription.plan))
+        .where(
+            Subscription.user_id == user.id,
+            Subscription.organization_id == organization.id,
+        )
+        .order_by(Subscription.created_at.desc())
+        .limit(1)
+    )
+    existing_subscription = sub_result.scalar_one_or_none()
+
+    if existing_subscription and existing_subscription.plan:
+        plan = existing_subscription.plan
+    else:
+        logger.error(f"Cannot determine plan for payment {payment.id}")
+        return
+
+    # Create new subscription or extend existing one
+    if existing_subscription and existing_subscription.status == SubscriptionStatus.ACTIVE:
+        # Extend existing subscription
+        if existing_subscription.end_date:
+            new_end_date = existing_subscription.end_date + timedelta(days=plan.validity_days)
+        else:
+            new_end_date = datetime.utcnow() + timedelta(days=plan.validity_days)
+
+        existing_subscription.end_date = new_end_date
+        existing_subscription.updated_at = datetime.utcnow()
+
+        logger.info(f"Extended subscription {existing_subscription.id} until {new_end_date}")
+        subscription = existing_subscription
+    else:
+        # Create new subscription
+        start_date = datetime.utcnow()
+        end_date = start_date + timedelta(days=plan.validity_days)
+
+        subscription = Subscription(
+            organization_id=organization.id,
+            user_id=user.id,
+            plan_id=plan.id,
+            subscription_type=SubscriptionType.PPPOE,
+            start_date=start_date,
+            end_date=end_date,
+            status=SubscriptionStatus.ACTIVE,
+            username=user.username,
+            password=user.hashed_password,
+        )
+        db.add(subscription)
+        await db.flush()
+
+        logger.info(f"Created new subscription {subscription.id} for user {user.username}")
+
+    # Sync user to MikroTik router
+    from app.models.router import Router
+    from app.modules.routers.mikrotik import get_mikrotik_client
+
+    router_result = await db.execute(
+        select(Router).where(
+            Router.organization_id == organization.id,
+            Router.is_active == True,
+        ).limit(1)
+    )
+    router_obj = router_result.scalar_one_or_none()
+
+    if router_obj:
+        try:
+            client = get_mikrotik_client()
+            connection = await client.connect(
+                ip_address=router_obj.ip_address,
+                username=router_obj.username,
+                password=router_obj.password,
+                port=router_obj.port,
+            )
+
+            time_limit_seconds = plan.time_limit if plan.time_limit > 0 else None
+            data_limit_bytes = None
+            if plan.data_limit > 0 and not plan.is_unlimited_data:
+                data_limit_bytes = plan.data_limit * 1024 * 1024
+
+            await client.create_pppoe_user(
+                connection=connection,
+                username=user.username,
+                password=user.hashed_password,
+                profile="default",
+                service="pppoe",
+                **{
+                    "limit-bytes-total": data_limit_bytes if data_limit_bytes else None,
+                    "limit-uptime": f"{time_limit_seconds}s" if time_limit_seconds else None,
+                    "comment": f"PPPoE subscription - {plan.name} - Valid until {subscription.end_date.date()}",
+                }
+            )
+
+            await client.disconnect(router_obj.ip_address, router_obj.port)
+
+            logger.info(
+                f"Synced PPPoE user {user.username} to router {router_obj.name} "
+                f"for subscription {subscription.id}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to sync PPPoE user {user.username} to router {router_obj.name}: {e}. "
+                f"User may need to reconnect manually."
+            )
+    else:
+        logger.warning(
+            f"No active router found for organization {organization.id}. "
+            f"PPPoE user {user.username} not synced to router."
+        )
 
 
 @router.post("/{org_slug}/webhooks/payment")
@@ -696,144 +937,7 @@ async def pppoe_payment_webhook(
     await db.flush()
 
     if payment_status_str == "completed":
-        # Get user
-        user_result = await db.execute(
-            select(User).where(User.id == payment.user_id)
-        )
-        user = user_result.scalar_one_or_none()
-
-        if not user:
-            logger.error(f"User not found for payment {payment.id}")
-            await db.commit()
-            return {"status": "received", "message": "User not found"}
-
-        # Extract plan_id from payment description or metadata
-        # The description format is "PPPoE Subscription Renewal - {plan.name}"
-        # We need to get the plan_id from somewhere - let's check if we can parse it from the description
-        # or better yet, add it to metadata when creating the payment
-
-        # For now, let's try to extract plan info from the description
-        # Better approach: get the user's current subscription and renew it
-        # Or get the plan_id from payment metadata if we stored it
-
-        # Get user's most recent subscription to determine the plan
-        sub_result = await db.execute(
-            select(Subscription)
-            .options(selectinload(Subscription.plan))
-            .where(
-                Subscription.user_id == user.id,
-                Subscription.organization_id == organization.id,
-            )
-            .order_by(Subscription.created_at.desc())
-            .limit(1)
-        )
-        existing_subscription = sub_result.scalar_one_or_none()
-
-        # We need to get the plan_id - let's add it to the payment metadata
-        # For now, assume we're renewing the current plan
-        if existing_subscription and existing_subscription.plan:
-            plan = existing_subscription.plan
-        else:
-            logger.error(f"Cannot determine plan for payment {payment.id}")
-            await db.commit()
-            return {"status": "received", "message": "Plan not found"}
-
-        # Create new subscription or extend existing one
-        if existing_subscription and existing_subscription.status == SubscriptionStatus.ACTIVE:
-            # Extend existing subscription
-            if existing_subscription.end_date:
-                new_end_date = existing_subscription.end_date + timedelta(days=plan.validity_days)
-            else:
-                new_end_date = datetime.utcnow() + timedelta(days=plan.validity_days)
-
-            existing_subscription.end_date = new_end_date
-            existing_subscription.updated_at = datetime.utcnow()
-
-            logger.info(f"Extended subscription {existing_subscription.id} until {new_end_date}")
-            subscription = existing_subscription
-        else:
-            # Create new subscription
-            start_date = datetime.utcnow()
-            end_date = start_date + timedelta(days=plan.validity_days)
-
-            subscription = Subscription(
-                organization_id=organization.id,
-                user_id=user.id,
-                plan_id=plan.id,
-                subscription_type=SubscriptionType.PPPOE,
-                start_date=start_date,
-                end_date=end_date,
-                status=SubscriptionStatus.ACTIVE,
-                username=user.username,
-                password=user.hashed_password,  # Already hashed
-            )
-            db.add(subscription)
-            await db.flush()
-
-            logger.info(f"Created new subscription {subscription.id} for user {user.username}")
-
-        # Sync user to MikroTik router
-        from app.models.router import Router
-        from app.modules.routers.mikrotik import get_mikrotik_client
-
-        router_result = await db.execute(
-            select(Router).where(
-                Router.organization_id == organization.id,
-                Router.is_active == True,
-            ).limit(1)
-        )
-        router = router_result.scalar_one_or_none()
-
-        if router:
-            try:
-                # Connect to router
-                client = get_mikrotik_client()
-                connection = await client.connect(
-                    ip_address=router.ip_address,
-                    username=router.username,
-                    password=router.password,
-                    port=router.port,
-                )
-
-                # Use plan's time_limit (in seconds) if set, otherwise unlimited
-                time_limit_seconds = plan.time_limit if plan.time_limit > 0 else None
-
-                # Calculate data limit in bytes (plan.data_limit is in MB)
-                data_limit_bytes = None
-                if plan.data_limit > 0 and not plan.is_unlimited_data:
-                    data_limit_bytes = plan.data_limit * 1024 * 1024  # MB to bytes
-
-                # Create or update PPPoE user with data/time limits
-                await client.create_pppoe_user(
-                    connection=connection,
-                    username=user.username,
-                    password=user.hashed_password,  # Will need to use plain password
-                    profile="default",
-                    service="pppoe",
-                    **{
-                        "limit-bytes-total": data_limit_bytes if data_limit_bytes else None,
-                        "limit-uptime": f"{time_limit_seconds}s" if time_limit_seconds else None,
-                        "comment": f"PPPoE subscription - {plan.name} - Valid until {subscription.end_date.date()}",
-                    }
-                )
-
-                await client.disconnect(router.ip_address, router.port)
-
-                logger.info(
-                    f"Synced PPPoE user {user.username} to router {router.name} "
-                    f"for subscription {subscription.id}"
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed to sync PPPoE user {user.username} to router {router.name}: {e}. "
-                    f"User may need to reconnect manually."
-                )
-                # Don't fail the whole webhook if router sync fails
-        else:
-            logger.warning(
-                f"No active router found for organization {organization.id}. "
-                f"PPPoE user {user.username} not synced to router."
-            )
+        await _process_pppoe_subscription_renewal(db, payment, organization, logger)
 
     await db.commit()
 

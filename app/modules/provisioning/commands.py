@@ -305,7 +305,7 @@ def generate_configuration_commands(
     commands.append(
         {
             "type": "api_call",
-            "command": f"/ip/dhcp-server/network/add address={subnet_address}/{cidr} gateway={gateway} dns-server={gateway}",
+            "command": f"/ip/dhcp-server/network/add address={subnet_address}/{cidr} gateway={gateway} dns-server={gateway} comment=codevertex-dhcp-network",
             "description": "Configuring DHCP network parameters",
             "critical": True,
         }
@@ -316,7 +316,7 @@ def generate_configuration_commands(
     commands.append(
         {
             "type": "api_call",
-            "command": f"/ip/firewall/nat/add chain=srcnat action=masquerade out-interface={wan_interface}",
+            "command": f"/ip/firewall/nat/add chain=srcnat action=masquerade out-interface={wan_interface} comment=codevertex-masquerade",
             "description": f"Enabling NAT masquerade on {wan_interface}",
             "critical": True,
         }
@@ -395,20 +395,39 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     # This is a non-critical step: if certificate creation fails, the hotspot
     # still works via legacy HTTP interception + DNS static entries.
     # =========================================================================
+    # Step 1: Create a self-signed CA certificate (needed to sign server cert)
+    ca_cert_name = config.get("hotspot_ca_cert_name", "codevertex-ca")
     cert_name = config.get("hotspot_cert_name", "codevertex-hotspot-cert")
     commands.append(
         {
             "type": "api_call",
-            "command": f"/certificate/add name={cert_name} common-name={dns_name} key-size=2048 days-valid=3650",
-            "description": "Creating self-signed SSL certificate for RFC 7710 captive portal API",
+            "command": f"/certificate/add name={ca_cert_name} common-name=codevertex-ca key-usage=key-cert-sign,crl-sign key-size=2048 days-valid=3650",
+            "description": "Creating CA certificate for hotspot SSL",
             "critical": False,
         }
     )
     commands.append(
         {
             "type": "api_call",
-            "command": f"/certificate/sign number={cert_name}",
-            "description": "Signing SSL certificate for captive portal",
+            "command": f"/certificate/sign .id={ca_cert_name}",
+            "description": "Self-signing CA certificate",
+            "critical": False,
+        }
+    )
+    # Step 2: Create server certificate and sign with our CA
+    commands.append(
+        {
+            "type": "api_call",
+            "command": f"/certificate/add name={cert_name} common-name={dns_name} key-size=2048 days-valid=3650",
+            "description": "Creating SSL certificate for hotspot captive portal",
+            "critical": False,
+        }
+    )
+    commands.append(
+        {
+            "type": "api_call",
+            "command": f"/certificate/sign .id={cert_name} ca={ca_cert_name}",
+            "description": "Signing hotspot certificate with CA",
             "critical": False,
         }
     )
@@ -419,7 +438,10 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     #   - http-pap: Plain-text auth over HTTP (legacy fallback)
     #   - https: TLS-encrypted auth + enables RFC 7710 DHCP Option 114 (modern devices)
     #   - mac-cookie: Server-side MAC-to-credential mapping for auto-re-login (all devices)
-    # html-directory=hotspot: Use custom templates from /hotspot/ directory on router
+    # NOTE: html-directory is NOT set here initially. It defaults to MikroTik built-in
+    # templates. After custom templates are uploaded via FTP, the service layer sets
+    # html-directory=hotspot to use them. This ensures captive portal works even if
+    # template upload fails (falls back to built-in login page).
     # use-radius=no: Authenticate locally/via API, not RADIUS
     # http-cookie-lifetime=1d: Browser cookie keeps users logged in for 1 day
     # Note: mac-cookie-timeout is on /ip/hotspot/user/profile (NOT server profile)
@@ -428,7 +450,6 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     profile_cmd = (
         f"/ip/hotspot/profile/add name={profile_name} "
         f"hotspot-address={gateway} dns-name={dns_name} "
-        f"html-directory=hotspot "
         f"use-radius=no "
         f"login-by=http-chap,http-pap,https,mac-cookie "
         f"http-cookie-lifetime=1d "

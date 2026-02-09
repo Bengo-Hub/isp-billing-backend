@@ -4,6 +4,7 @@ Tenant Settings API.
 Endpoints for ISP providers to manage their organization settings.
 """
 
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -1100,21 +1101,25 @@ async def create_whatsapp_subscription_invoice(
         # 2. Generate invoice reference
         invoice_reference = f"WA-SUB-{organization.id}-{uuid.uuid4().hex[:8].upper()}"
 
-        # 3. Create invoice
+        # 3. Create invoice with correct model fields
+        from datetime import timedelta
+        now = datetime.utcnow()
+
         invoice = Invoice(
             invoice_number=invoice_reference,
             organization_id=organization.id,
-            customer_id=None,  # Subscription is organization-level
-            amount=monthly_fee,
+            user_id=current_user.id,
+            subtotal=monthly_fee,
+            tax_amount=Decimal("0"),
+            discount_amount=Decimal("0"),
+            total_amount=monthly_fee,
+            paid_amount=Decimal("0"),
+            balance=monthly_fee,
             currency=currency,
             status=InvoiceStatus.PENDING,
-            payment_method="paystack",
-            description=description,
-            metadata={
-                "type": "whatsapp_subscription",
-                "provider": request_data.provider,
-                "user_id": current_user.id,
-            }
+            issue_date=now,
+            due_date=now + timedelta(days=7),
+            notes=f"whatsapp_subscription:{request_data.provider}",
         )
         db.add(invoice)
         await db.flush()
@@ -1125,7 +1130,8 @@ async def create_whatsapp_subscription_invoice(
             description=description,
             quantity=1,
             unit_price=monthly_fee,
-            amount=monthly_fee,
+            total_price=monthly_fee,
+            item_type="whatsapp_subscription",
         )
         db.add(invoice_item)
 
