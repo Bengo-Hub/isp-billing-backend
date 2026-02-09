@@ -200,7 +200,7 @@ fi
 
 # =============================================================================
 # SECRETS SETUP (via centralized devops-k8s script)
-# =============================================================================
+# ============================================================================= 
 if ! kubectl -n "$NAMESPACE" get secret "$ENV_SECRET_NAME" >/dev/null 2>&1; then
   if [[ -d "$DEVOPS_DIR" && -f "$DEVOPS_DIR/scripts/infrastructure/create-service-secrets.sh" ]]; then
     info "Creating secrets for ${APP_NAME} using devops-k8s script..."
@@ -214,6 +214,29 @@ if ! kubectl -n "$NAMESPACE" get secret "$ENV_SECRET_NAME" >/dev/null 2>&1; then
     warn "Secret $ENV_SECRET_NAME not found and create-service-secrets.sh not available"
     warn "Please create the secret manually or ensure devops-k8s repo is cloned"
   fi
+fi
+
+# Add ISP Billing specific secrets (admin credentials from git secrets)
+if kubectl -n "$NAMESPACE" get secret "$ENV_SECRET_NAME" >/dev/null 2>&1; then
+  info "Updating secret with admin credentials from git secrets..."
+  
+  # Use defaults if not provided (should not happen in production)
+  ADMIN_EMAIL="${GLOBAL_ADMIN_EMAIL:-superuser@codevertexitsolutions.com}"
+  ADMIN_PASSWORD="${GLOBAL_ADMIN_PASSWORD:-superuser123}"
+  
+  if [[ "$ADMIN_PASSWORD" == "superuser123" ]]; then
+    warn "Using default admin password! Set GLOBAL_ADMIN_PASSWORD secret in production"
+  fi
+  
+  # Patch the existing secret with admin credentials
+  kubectl -n "$NAMESPACE" patch secret "$ENV_SECRET_NAME" \
+    --type merge \
+    -p "{\"stringData\":{\"GLOBAL_ADMIN_EMAIL\":\"$ADMIN_EMAIL\",\"GLOBAL_ADMIN_PASSWORD\":\"$ADMIN_PASSWORD\"}}" \
+    >/dev/null 2>&1 || warn "Failed to update secret with admin credentials"
+  
+  success "Admin credentials added to secret"
+else
+  warn "Secret $ENV_SECRET_NAME not found - skipping admin credential update"
 fi
 
 # =============================================================================
