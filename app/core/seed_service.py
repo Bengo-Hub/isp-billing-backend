@@ -7,7 +7,7 @@ lifespan startup, not on first HTTP request.
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -188,6 +188,22 @@ async def run_startup_seeds() -> None:
     """Run all idempotent seeds during application startup."""
     async with AsyncSessionLocal() as db:
         try:
+            # Check if schema tables exist (Alembic migrations may not have run yet)
+            result = await db.execute(
+                text(
+                    "SELECT EXISTS ("
+                    "  SELECT 1 FROM information_schema.tables"
+                    "  WHERE table_name = 'roles'"
+                    ")"
+                )
+            )
+            if not result.scalar():
+                logger.warning(
+                    "Database tables not found — skipping startup seeds. "
+                    "Run 'alembic upgrade head' to create tables."
+                )
+                return
+
             # 1. Roles & permissions
             roles = await _seed_rbac(db)
 
@@ -230,6 +246,8 @@ async def _get_or_create_role(
     role = Role(name=name, description=description, is_system_role=True)
     db.add(role)
     await db.flush()
+    # Eagerly load permissions to avoid lazy-load MissingGreenlet in async
+    await db.refresh(role, ["permissions"])
     return role
 
 

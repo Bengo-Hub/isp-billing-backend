@@ -407,7 +407,7 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     commands.append(
         {
             "type": "api_call",
-            "command": f"/certificate/sign {cert_name}",
+            "command": f"/certificate/sign number={cert_name}",
             "description": "Signing SSL certificate for captive portal",
             "critical": False,
         }
@@ -422,7 +422,8 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     # html-directory=hotspot: Use custom templates from /hotspot/ directory on router
     # use-radius=no: Authenticate locally/via API, not RADIUS
     # http-cookie-lifetime=1d: Browser cookie keeps users logged in for 1 day
-    # mac-cookie-timeout=1d: MAC-based auto-re-login for 1 day (works across browsers)
+    # Note: mac-cookie-timeout is on /ip/hotspot/user/profile (NOT server profile)
+    #   mac-cookie defaults to 3-day timeout from user profile, which is fine
     # Note: HTTP proxy/interception is enabled automatically by MikroTik hotspot
     profile_cmd = (
         f"/ip/hotspot/profile/add name={profile_name} "
@@ -431,7 +432,6 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
         f"use-radius=no "
         f"login-by=http-chap,http-pap,https,mac-cookie "
         f"http-cookie-lifetime=1d "
-        f"mac-cookie-timeout=1d "
         f"split-user-domain=no"
     )
 

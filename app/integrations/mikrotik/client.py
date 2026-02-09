@@ -572,7 +572,7 @@ class MikroTikClient(BaseIntegrationClient[routeros_api.RouterOsApiPool]):
 
         # Extract method from the end of the path
         # Common methods: add, set, remove, print, get, enable, disable
-        method_keywords = ['add', 'set', 'remove', 'print', 'get', 'enable', 'disable', 'reset']
+        method_keywords = ['add', 'set', 'remove', 'print', 'get', 'enable', 'disable', 'reset', 'sign']
         method = "get"  # default
         resource_path = path_with_method
 
@@ -701,6 +701,10 @@ class MikroTikClient(BaseIntegrationClient[routeros_api.RouterOsApiPool]):
                 elif method == "disable":
                     # Disable is typically: set .id=* disabled=yes
                     return resource.set(disabled="yes", **params)
+                elif method == "sign":
+                    # Action command: /certificate/sign number=cert-name
+                    # Uses resource.call() which sends the correct API command word
+                    return resource.call('sign', params)
                 elif method == "call":
                     cmd = params.pop("cmd", "print")
                     return resource.call(cmd, params)
