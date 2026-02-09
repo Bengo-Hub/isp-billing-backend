@@ -16,6 +16,7 @@ from app.models.organization import Organization, OrganizationStatus
 from app.models.router import Router
 from app.models.user import User
 from app.models.subscription import Subscription
+from app.models.platform_billing import PlatformInvoice, BillingCycle
 from app.modules.licences import LicenceService
 
 logger = get_logger(__name__)
@@ -352,6 +353,111 @@ def generate_licence_reports(self):
     except Exception as exc:
         logger.error(f"Licence report generation failed: {exc}")
         raise self.retry(exc=exc, countdown=86400, max_retries=3)
+
+
+@celery_app.task(bind=True)
+def generate_renewal_invoices_for_expiring_subscriptions(self):
+    """
+    Generate renewal invoices for organizations whose subscriptions expire in the next 10 days.
+
+    This ensures ISP providers have time to pay before their subscription expires.
+    Invoices are created automatically and set as PENDING with due date = subscription_ends_at.
+
+    Run daily at 00:00 UTC.
+    """
+    logger.info("Generating renewal invoices for expiring subscriptions")
+
+    try:
+        async def _generate_renewal_invoices():
+            async with AsyncSessionLocal() as db:
+                from app.modules.platform_billing.service import PlatformBillingService
+                from app.models.platform_billing import InvoiceStatus
+
+                now = datetime.utcnow()
+                # Organizations expiring in next 10 days
+                renewal_threshold = now + timedelta(days=10)
+
+                # Find ISP organizations with active subscriptions expiring soon
+                # Requirements:
+                # 1. Status must be ACTIVE or TRIAL
+                # 2. Must have a subscription_tier_id (excludes platform org)
+                # 3. subscription_ends_at must be between now and 10 days from now
+                result = await db.execute(
+                    select(Organization).where(
+                        and_(
+                            Organization.status.in_([OrganizationStatus.ACTIVE, OrganizationStatus.TRIAL]),
+                            Organization.subscription_tier_id.isnot(None),  # Must have a subscription tier
+                            Organization.subscription_ends_at.isnot(None),
+                            Organization.subscription_ends_at <= renewal_threshold,
+                            Organization.subscription_ends_at > now,  # Not yet expired
+                        )
+                    )
+                )
+                expiring_orgs = result.scalars().all()
+
+                billing_service = PlatformBillingService(db)
+                invoices_created = 0
+                skipped = 0
+
+                for org in expiring_orgs:
+                    try:
+                        # Check if invoice already exists for this renewal period
+                        # Calculate renewal period (1 month from expiry date)
+                        renewal_start = org.subscription_ends_at
+                        renewal_end = renewal_start + timedelta(days=30)  # Default to monthly
+
+                        # Check for existing invoice
+                        existing_invoice = await db.execute(
+                            select(PlatformInvoice).where(
+                                and_(
+                                    PlatformInvoice.organization_id == org.id,
+                                    PlatformInvoice.billing_period_start == renewal_start,
+                                    PlatformInvoice.billing_period_end == renewal_end,
+                                    PlatformInvoice.status.in_([InvoiceStatus.PENDING, InvoiceStatus.PAID])
+                                )
+                            )
+                        )
+
+                        if existing_invoice.scalar_one_or_none():
+                            logger.info(f"Invoice already exists for org {org.id} ({org.name}) renewal")
+                            skipped += 1
+                            continue
+
+                        # Generate invoice for renewal period
+                        invoice = await billing_service.generate_invoice(
+                            organization_id=org.id,
+                            billing_period_start=renewal_start,
+                            billing_period_end=renewal_end,
+                            billing_cycle=BillingCycle.MONTHLY,  # Default to monthly
+                        )
+
+                        # Update due date to be immediately (so they have time to pay before expiry)
+                        invoice.due_date = org.subscription_ends_at
+                        await db.commit()
+
+                        invoices_created += 1
+                        logger.info(
+                            f"Created renewal invoice {invoice.invoice_number} for org {org.id} ({org.name}). "
+                            f"Subscription expires: {org.subscription_ends_at}, Due: {invoice.due_date}"
+                        )
+
+                    except Exception as e:
+                        logger.error(f"Failed to create renewal invoice for org {org.id}: {e}")
+
+                return {
+                    "invoices_created": invoices_created,
+                    "organizations_checked": len(expiring_orgs),
+                    "skipped": skipped
+                }
+
+        result = asyncio.run(_generate_renewal_invoices())
+
+        logger.info(f"Renewal invoice generation completed: {result}")
+        return result
+
+    except Exception as exc:
+        logger.error(f"Renewal invoice generation failed: {exc}")
+        raise self.retry(exc=exc, countdown=3600, max_retries=3)
 
 
 @celery_app.task(bind=True)

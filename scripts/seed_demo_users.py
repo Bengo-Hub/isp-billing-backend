@@ -75,14 +75,14 @@ async def create_2min_test_package(db: AsyncSession, organization: Organization)
 async def create_demo_users(db: AsyncSession) -> tuple:
     """Create two demo users (1 hotspot, 1 PPPoE) for testing."""
 
-    # Get the demo organization
+    # Get the demo ISP organization (not platform org)
     result = await db.execute(
-        select(Organization).where(Organization.slug == "codevertex")
+        select(Organization).where(Organization.slug == "demo-isp")
     )
     organization = result.scalar_one_or_none()
 
     if not organization:
-        logger.error("Demo organization not found. Run seed_organizations first!")
+        logger.error("Demo ISP organization not found. Run scripts/add_default_org.py first!")
         return None, None
 
     # Create the 2-minute test package

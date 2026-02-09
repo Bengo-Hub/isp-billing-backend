@@ -2,8 +2,10 @@
 
 from datetime import datetime
 from typing import Optional
+import re
 
-from pydantic import BaseModel, EmailStr, Field, validator, computed_field
+from pydantic import BaseModel, EmailStr, Field, validator, computed_field, field_validator
+from pydantic_core import PydanticCustomError
 
 from app.models.user import UserRole, UserStatus
 
@@ -12,12 +14,25 @@ class UserBase(BaseModel):
     """Base user schema."""
 
     username: str = Field(..., min_length=3, max_length=50)
-    email: EmailStr
+    email: str = Field(..., min_length=3, max_length=255)
     phone: Optional[str] = Field(None, max_length=20)
     first_name: str = Field(..., min_length=1, max_length=50)
     last_name: str = Field(..., min_length=1, max_length=50)
     role: UserRole = UserRole.CUSTOMER
     bio: Optional[str] = None
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        """Validate email format, allowing test domains for development."""
+        # Basic email pattern that allows test domains
+        email_pattern = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+        if not re.match(email_pattern, v):
+            raise PydanticCustomError(
+                'value_error',
+                'Invalid email format',
+            )
+        return v.lower()
 
     @validator("phone")
     def validate_phone(cls, v):
@@ -116,7 +131,19 @@ class AdminSetPassword(BaseModel):
 class UserPasswordReset(BaseModel):
     """Schema for password reset request."""
 
-    email: EmailStr
+    email: str = Field(..., min_length=3, max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        """Validate email format, allowing test domains."""
+        email_pattern = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+        if not re.match(email_pattern, v):
+            raise PydanticCustomError(
+                'value_error',
+                'Invalid email format',
+            )
+        return v.lower()
 
 
 class UserPasswordResetConfirm(BaseModel):

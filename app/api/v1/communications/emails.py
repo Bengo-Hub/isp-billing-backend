@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, PaginationParams
+from app.api.deps_org import get_org_id_for_query
 from app.core.database import get_db
 from app.models.user import User
 from app.models.email import EmailStatus
@@ -23,11 +24,12 @@ async def get_emails(
     status_filter: Optional[EmailStatus] = Query(None, alias="status"),
     campaign_id: Optional[int] = Query(None),
     search: Optional[str] = Query(None),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> EmailListResponse:
     """Get all emails with pagination and filters."""
-    service = EmailService(db, current_user.organization_id, current_user.id)
+    service = EmailService(db, org_id, current_user.id)
     result = await service.get_all(
         pagination=pagination,
         status=status_filter,
@@ -40,11 +42,12 @@ async def get_emails(
 @router.post("/send", response_model=Email, status_code=status.HTTP_201_CREATED)
 async def send_email(
     email_data: EmailCreate,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Email:
     """Send an email (creates email record for processing)."""
-    service = EmailService(db, current_user.organization_id, current_user.id)
+    service = EmailService(db, org_id, current_user.id)
     try:
         email = await service.send_email(
             to_email=email_data.to_email,
@@ -67,11 +70,12 @@ async def send_email(
 @router.get("/{email_id}", response_model=Email)
 async def get_email(
     email_id: int,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Email:
     """Get email by ID."""
-    service = EmailService(db, current_user.organization_id, current_user.id)
+    service = EmailService(db, org_id, current_user.id)
     email = await service.get_by_id(email_id)
     if not email:
         raise HTTPException(

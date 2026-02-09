@@ -4,6 +4,7 @@ Platform Owner API - Billing Management.
 Endpoints for platform billing and invoice management.
 """
 
+import logging
 from datetime import datetime
 from typing import List, Optional
 
@@ -29,6 +30,7 @@ from app.modules.platform_billing.schemas import (
     InvoiceGenerationRequest,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/billing", tags=["Platform - Billing"])
 
 
@@ -94,7 +96,9 @@ async def list_invoices(
 
     Platform owner only.
     """
-    query = select(PlatformInvoice)
+    from sqlalchemy.orm import selectinload
+
+    query = select(PlatformInvoice).options(selectinload(PlatformInvoice.organization))
 
     if status_filter:
         query = query.where(PlatformInvoice.status == status_filter)
@@ -113,8 +117,41 @@ async def list_invoices(
     result = await db.execute(query)
     invoices = list(result.scalars().all())
 
+    # Map to response with organization name
+    invoice_responses = []
+    for inv in invoices:
+        inv_dict = {
+            "id": inv.id,
+            "organization_id": inv.organization_id,
+            "organization_name": inv.organization.name if inv.organization else None,
+            "invoice_number": inv.invoice_number,
+            "billing_cycle": inv.billing_cycle,
+            "billing_period_start": inv.billing_period_start,
+            "billing_period_end": inv.billing_period_end,
+            "tier_id": inv.tier_id,
+            "base_fee": inv.base_fee,
+            "earnings_during_period": inv.earnings_during_period,
+            "earnings_fee": inv.earnings_fee,
+            "customer_count": inv.customer_count,
+            "customer_fee": inv.customer_fee,
+            "additional_fees": inv.additional_fees,
+            "discount": inv.discount,
+            "tax": inv.tax,
+            "total_amount": inv.total_amount,
+            "currency": "KES",
+            "status": inv.status,
+            "due_date": inv.due_date,
+            "paid_at": inv.paid_at,
+            "paystack_reference": inv.paystack_reference,
+            "notes": inv.notes,
+            "pdf_url": inv.pdf_url,
+            "created_at": inv.created_at,
+            "updated_at": inv.updated_at,
+        }
+        invoice_responses.append(PlatformInvoiceResponse(**inv_dict))
+
     return InvoiceListResponse(
-        items=[PlatformInvoiceResponse.model_validate(inv) for inv in invoices],
+        items=invoice_responses,
         total=total,
         page=page,
         page_size=page_size,
@@ -330,7 +367,9 @@ async def list_payments(
 
     Platform owner only.
     """
-    query = select(PlatformPayment)
+    from sqlalchemy.orm import selectinload
+
+    query = select(PlatformPayment).options(selectinload(PlatformPayment.organization))
 
     if status_filter:
         query = query.where(PlatformPayment.status == status_filter)
@@ -349,8 +388,30 @@ async def list_payments(
     result = await db.execute(query)
     payments = list(result.scalars().all())
 
+    # Map to response with organization name
+    payment_responses = []
+    for p in payments:
+        p_dict = {
+            "id": p.id,
+            "invoice_id": p.invoice_id,
+            "organization_id": p.organization_id,
+            "organization_name": p.organization.name if p.organization else None,
+            "payment_reference": p.payment_reference,
+            "amount": p.amount,
+            "currency": p.currency,
+            "paystack_reference": p.paystack_reference,
+            "paystack_channel": p.paystack_channel,
+            "card_last4": p.card_last4,
+            "card_brand": p.card_brand,
+            "status": p.status,
+            "status_message": p.status_message,
+            "created_at": p.created_at,
+            "completed_at": p.completed_at,
+        }
+        payment_responses.append(PlatformPaymentResponse(**p_dict))
+
     return PaymentListResponse(
-        items=[PlatformPaymentResponse.model_validate(p) for p in payments],
+        items=payment_responses,
         total=total,
         page=page,
         page_size=page_size,
@@ -520,6 +581,374 @@ async def refund_payment(
         return RefundPaymentResponse(
             success=False,
             message=f"Refund processing error: {str(e)}",
+        )
+
+
+@router.patch("/invoices/{invoice_id}/update")
+async def update_invoice(
+    invoice_id: int,
+    total_amount: Optional[float] = None,
+    due_date: Optional[datetime] = None,
+    notes: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_platform_owner),
+):
+    """
+    Update invoice details (amount, due date, notes).
+
+    Platform owner only.
+    """
+    billing_service = PlatformBillingService(db)
+    invoice = await billing_service.get_invoice(invoice_id)
+
+    if not invoice:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invoice not found"
+        )
+
+    if invoice.status == InvoiceStatus.PAID:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot edit a paid invoice"
+        )
+
+    from decimal import Decimal
+
+    if total_amount is not None:
+        invoice.total_amount = Decimal(str(total_amount))
+
+    if due_date is not None:
+        invoice.due_date = due_date
+
+    if notes is not None:
+        invoice.notes = notes
+
+    invoice.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(invoice)
+
+    return PlatformInvoiceResponse.model_validate(invoice)
+
+
+@router.post("/invoices/{invoice_id}/void")
+async def void_invoice(
+    invoice_id: int,
+    reason: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_platform_owner),
+):
+    """
+    Void/cancel an invoice.
+
+    Platform owner only.
+    """
+    billing_service = PlatformBillingService(db)
+    invoice = await billing_service.get_invoice(invoice_id)
+
+    if not invoice:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invoice not found"
+        )
+
+    if invoice.status == InvoiceStatus.PAID:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot void a paid invoice. Use refund instead."
+        )
+
+    invoice.status = InvoiceStatus.CANCELLED
+    invoice.internal_notes = (invoice.internal_notes or "") + f"\nVoided by user {current_user.id}: {reason}"
+    invoice.updated_at = datetime.utcnow()
+
+    await db.commit()
+    await db.refresh(invoice)
+
+    return {
+        "message": "Invoice voided successfully",
+        "invoice_id": invoice.id,
+        "status": invoice.status.value,
+    }
+
+
+@router.delete("/invoices/{invoice_id}")
+async def delete_invoice(
+    invoice_id: int,
+    force: bool = False,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_platform_owner),
+):
+    """
+    Delete an invoice.
+
+    - DRAFT/CANCELLED: Can always be deleted
+    - PENDING: Can be deleted if never paid (no paid_at date)
+    - PAID/OVERDUE: Cannot be deleted unless force=True
+
+    Platform owner only.
+    """
+    billing_service = PlatformBillingService(db)
+    invoice = await billing_service.get_invoice(invoice_id)
+
+    if not invoice:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invoice not found"
+        )
+
+    # Check if invoice has been paid
+    if invoice.paid_at and not force:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete paid invoice. Use force=True to override (not recommended)."
+        )
+
+    # Allow deletion of DRAFT, CANCELLED, or PENDING (if not paid)
+    deletable_statuses = [InvoiceStatus.DRAFT, InvoiceStatus.CANCELLED]
+    if invoice.status == InvoiceStatus.PENDING and not invoice.paid_at:
+        deletable_statuses.append(InvoiceStatus.PENDING)
+
+    if invoice.status not in deletable_statuses and not force:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot delete invoice with status: {invoice.status.value}. Use force=True to override."
+        )
+
+    await db.delete(invoice)
+    await db.commit()
+
+    return {
+        "message": "Invoice deleted successfully",
+        "invoice_id": invoice_id,
+        "invoice_number": invoice.invoice_number,
+    }
+
+
+@router.post("/invoices/{invoice_id}/regenerate")
+async def regenerate_invoice(
+    invoice_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_platform_owner),
+):
+    """
+    Regenerate an invoice (recalculates amounts based on current data).
+
+    Platform owner only.
+    """
+    # Get invoice directly with a simple query first
+    result = await db.execute(
+        select(PlatformInvoice).where(PlatformInvoice.id == invoice_id)
+    )
+    old_invoice = result.scalar_one_or_none()
+
+    if not old_invoice:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Invoice with ID {invoice_id} not found"
+        )
+
+    if old_invoice.status == InvoiceStatus.PAID:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot regenerate a paid invoice"
+        )
+
+    # Save invoice details before deletion
+    org_id = old_invoice.organization_id
+    period_start = old_invoice.billing_period_start
+    period_end = old_invoice.billing_period_end
+    cycle = old_invoice.billing_cycle
+    old_amount = float(old_invoice.total_amount)
+
+    # Delete old invoice
+    await db.delete(old_invoice)
+    await db.flush()
+
+    # Generate new invoice with same period - skip duplicate check since we just deleted the old one
+    billing_service = PlatformBillingService(db)
+    new_invoice = await billing_service.generate_invoice(
+        org_id,
+        period_start,
+        period_end,
+        cycle,
+        skip_duplicate_check=True,
+    )
+
+    return {
+        "success": True,
+        "message": "Invoice regenerated successfully",
+        "old_invoice_id": invoice_id,
+        "new_invoice_id": new_invoice.id,
+        "old_amount": old_amount,
+        "new_amount": float(new_invoice.total_amount),
+        "invoice": PlatformInvoiceResponse.model_validate({
+            "id": new_invoice.id,
+            "organization_id": new_invoice.organization_id,
+            "organization_name": None,  # Will be populated by frontend refresh
+            "invoice_number": new_invoice.invoice_number,
+            "billing_cycle": new_invoice.billing_cycle,
+            "billing_period_start": new_invoice.billing_period_start,
+            "billing_period_end": new_invoice.billing_period_end,
+            "tier_id": new_invoice.tier_id,
+            "base_fee": new_invoice.base_fee,
+            "earnings_during_period": new_invoice.earnings_during_period,
+            "earnings_fee": new_invoice.earnings_fee,
+            "customer_count": new_invoice.customer_count,
+            "customer_fee": new_invoice.customer_fee,
+            "additional_fees": new_invoice.additional_fees,
+            "discount": new_invoice.discount,
+            "tax": new_invoice.tax,
+            "total_amount": new_invoice.total_amount,
+            "currency": "KES",
+            "status": new_invoice.status,
+            "due_date": new_invoice.due_date,
+            "paid_at": new_invoice.paid_at,
+            "paystack_reference": new_invoice.paystack_reference,
+            "notes": new_invoice.notes,
+            "pdf_url": new_invoice.pdf_url,
+            "created_at": new_invoice.created_at,
+            "updated_at": new_invoice.updated_at,
+        })
+    }
+
+
+class PlatformPaymentInitiationRequest(BaseModel):
+    """Request schema for platform payment initiation."""
+    callback_url: str = Field(..., description="URL to redirect after payment")
+    email: str = Field(..., description="Email for payment receipt")
+
+
+class PlatformPaymentInitiationResponse(BaseModel):
+    """Response schema for platform payment initiation."""
+    success: bool
+    checkout_url: Optional[str] = None
+    reference: Optional[str] = None
+    access_code: Optional[str] = None
+    error: Optional[str] = None
+
+
+@router.post("/invoices/{invoice_id}/pay", response_model=PlatformPaymentInitiationResponse)
+async def initiate_invoice_payment(
+    invoice_id: int,
+    request_data: PlatformPaymentInitiationRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Initiate a Paystack payment for a platform invoice.
+
+    This endpoint allows ISP providers to pay their platform subscription invoices.
+    Returns a Paystack checkout URL for payment completion.
+
+    The invoice_id should correspond to a platform_invoices record, NOT a regular invoices record.
+    """
+    try:
+        billing_service = PlatformBillingService(db)
+
+        # Verify invoice exists
+        invoice = await billing_service.get_invoice(invoice_id)
+        if not invoice:
+            return PlatformPaymentInitiationResponse(
+                success=False,
+                error="Invoice not found"
+            )
+
+        if invoice.status == InvoiceStatus.PAID:
+            return PlatformPaymentInitiationResponse(
+                success=False,
+                error="Invoice is already paid"
+            )
+
+        # Initiate payment through PlatformBillingService
+        result = await billing_service.initiate_payment(
+            invoice_id=invoice_id,
+            email=request_data.email,
+        )
+
+        return PlatformPaymentInitiationResponse(
+            success=result.get("success", False),
+            checkout_url=result.get("checkout_url"),
+            reference=result.get("reference"),
+            access_code=result.get("access_code"),
+            error=result.get("error"),
+        )
+
+    except Exception as e:
+        logger.error(f"Platform payment initiation error: {e}")
+        return PlatformPaymentInitiationResponse(
+            success=False,
+            error=str(e),
+        )
+
+
+class PaymentVerificationResponse(BaseModel):
+    """Response schema for payment verification."""
+    success: bool
+    status: str
+    message: str
+    invoice_id: Optional[int] = None
+    payment_id: Optional[int] = None
+
+
+@router.get("/payments/verify/{reference}", response_model=PaymentVerificationResponse)
+async def verify_payment_by_reference(
+    reference: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Verify a Paystack payment by reference.
+
+    This endpoint is called after a customer completes payment on Paystack
+    to confirm the payment status and update the invoice.
+    """
+    try:
+        billing_service = PlatformBillingService(db)
+
+        # Find payment by Paystack reference
+        result = await db.execute(
+            select(PlatformPayment).where(PlatformPayment.paystack_reference == reference)
+        )
+        payment = result.scalar_one_or_none()
+
+        if not payment:
+            return PaymentVerificationResponse(
+                success=False,
+                status="not_found",
+                message="Payment not found"
+            )
+
+        # Check payment status
+        if payment.status == PaymentStatus.COMPLETED:
+            return PaymentVerificationResponse(
+                success=True,
+                status="success",
+                message="Payment completed successfully",
+                invoice_id=payment.invoice_id,
+                payment_id=payment.id,
+            )
+        elif payment.status == PaymentStatus.FAILED:
+            return PaymentVerificationResponse(
+                success=False,
+                status="failed",
+                message=payment.status_message or "Payment failed",
+                invoice_id=payment.invoice_id,
+                payment_id=payment.id,
+            )
+        else:
+            return PaymentVerificationResponse(
+                success=False,
+                status="pending",
+                message="Payment is still pending verification",
+                invoice_id=payment.invoice_id,
+                payment_id=payment.id,
+            )
+
+    except Exception as e:
+        logger.error(f"Payment verification error: {e}")
+        return PaymentVerificationResponse(
+            success=False,
+            status="error",
+            message=f"Verification error: {str(e)}"
         )
 
 

@@ -346,12 +346,60 @@ async def authenticate_2fa(
 
     user_payload = UserSchema.model_validate(user).model_dump()
 
-    return {
-        "data": {
-            "access_token": tokens["access_token"],
-            "refresh_token": tokens["refresh_token"],
-            "token_type": tokens["token_type"],
-            "expires_in": 30 * 60,
-            "user": user_payload,
-        }
+    # Include organization info for all users (except platform superuser)
+    organization_info = None
+    customer_portal_info = None
+
+    if user.organization_id:
+        from sqlalchemy import select
+        from app.models.organization import Organization
+
+        # Get organization details
+        org_result = await db.execute(
+            select(Organization).where(Organization.id == user.organization_id)
+        )
+        organization = org_result.scalar_one_or_none()
+
+        if organization:
+            organization_info = {
+                "organization_id": organization.id,
+                "organization_slug": organization.slug,
+                "organization_name": organization.name,
+            }
+
+            # For customers, include subscription-specific portal URL
+            if user.role.value == "customer":
+                from app.models.subscription import Subscription, SubscriptionType
+
+                # Get customer's active subscription type
+                sub_result = await db.execute(
+                    select(Subscription).where(
+                        Subscription.user_id == user.id,
+                        Subscription.status.in_(["active", "suspended"])
+                    ).order_by(Subscription.created_at.desc()).limit(1)
+                )
+                subscription = sub_result.scalar_one_or_none()
+
+                customer_portal_info = {
+                    "organization_slug": organization.slug,
+                    "subscription_type": subscription.subscription_type.value if subscription else "hotspot",
+                    "portal_url": f"/{organization.slug}/portal/{'pppoe' if subscription and subscription.subscription_type == SubscriptionType.PPPOE else 'hotspot'}"
+                }
+
+    response_data = {
+        "access_token": tokens["access_token"],
+        "refresh_token": tokens["refresh_token"],
+        "token_type": tokens["token_type"],
+        "expires_in": 30 * 60,
+        "user": user_payload,
     }
+
+    # Add organization info for ISP users (isp_admin, isp_technician)
+    if organization_info and user.role.value in ["isp_admin", "isp_technician"]:
+        response_data["organization"] = organization_info
+
+    # Add customer portal info for customers
+    if customer_portal_info:
+        response_data["customer_portal"] = customer_portal_info
+
+    return {"data": response_data}

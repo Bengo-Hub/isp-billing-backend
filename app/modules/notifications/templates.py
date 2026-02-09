@@ -54,7 +54,8 @@ class NotificationTemplateService:
             ],
             "system": [
                 "@company_name", "@support_email", "@support_phone", "@website_url",
-                "@current_date", "@current_time", "@expiry_date", "@days_remaining"
+                "@portal_url", "@org_slug", "@account_number", "@paybill",
+                "@current_date", "@current_time", "@expiry_date", "@days_remaining", "@days_left"
             ]
         }
 
@@ -406,10 +407,15 @@ class NotificationTemplateService:
                 'support_email': system_data.get('support_email', 'support@example.com'),
                 'support_phone': system_data.get('support_phone', ''),
                 'website_url': system_data.get('website_url', ''),
+                'portal_url': system_data.get('portal_url', 'https://ispbilling.codevertexitsolutions.com'),
+                'org_slug': system_data.get('org_slug', ''),
+                'account_number': system_data.get('account_number', ''),
+                'paybill': system_data.get('paybill', ''),
                 'current_date': datetime.utcnow().strftime('%Y-%m-%d'),
                 'current_time': datetime.utcnow().strftime('%H:%M:%S'),
                 'expiry_date': system_data.get('expiry_date', ''),
-                'days_remaining': system_data.get('days_remaining', '')
+                'days_remaining': system_data.get('days_remaining', ''),
+                'days_left': system_data.get('days_remaining', '')  # Alias for compatibility
             })
 
         # Add any additional custom variables

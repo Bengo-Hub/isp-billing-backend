@@ -94,6 +94,7 @@ class PlatformInvoiceResponse(BaseModel):
 
     id: int
     organization_id: int
+    organization_name: Optional[str] = None
     invoice_number: str
     billing_cycle: BillingCycle
     billing_period_start: datetime
@@ -108,6 +109,7 @@ class PlatformInvoiceResponse(BaseModel):
     discount: Decimal
     tax: Decimal
     total_amount: Decimal
+    currency: str = "KES"
     status: InvoiceStatus
     due_date: datetime
     paid_at: Optional[datetime]
@@ -137,6 +139,7 @@ class PlatformPaymentResponse(BaseModel):
     id: int
     invoice_id: int
     organization_id: int
+    organization_name: Optional[str] = None
     payment_reference: str
     amount: Decimal
     currency: str

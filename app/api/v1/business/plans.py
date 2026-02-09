@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_admin, PaginationParams
+from app.api.deps_org import get_org_id_for_query
 from app.core.database import get_db
 from app.models.user import User
 from app.models.plan import PlanType, PlanStatus
@@ -26,10 +27,11 @@ async def get_plans(
     status: Optional[PlanStatus] = Query(None),
     is_active: Optional[bool] = Query(None),
     search: Optional[str] = Query(None),
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ServicePlanList:
-    """Get all service plans with pagination and filters."""
+    """Get all service plans with organization context."""
     service = PlanService(db)
     result = await service.get_all(
         pagination=pagination,
@@ -37,6 +39,7 @@ async def get_plans(
         status=status,
         is_active=is_active,
         search=search,
+        organization_id=org_id,
     )
     return ServicePlanList(**result)
 
@@ -44,10 +47,11 @@ async def get_plans(
 @router.post("/", response_model=ServicePlan, status_code=status.HTTP_201_CREATED)
 async def create_plan(
     plan_data: ServicePlanCreate,
+    org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> ServicePlan:
-    """Create a new service plan."""
+    """Create a new service plan with organization context."""
     service = PlanService(db)
     try:
         plan = await service.create_plan(
@@ -59,6 +63,7 @@ async def create_plan(
             billing_cycle=plan_data.billing_cycle,
             download_speed=plan_data.download_speed,
             upload_speed=plan_data.upload_speed,
+            organization_id=org_id,
             data_limit=plan_data.data_limit,
             time_limit=plan_data.time_limit,
             validity_days=plan_data.validity_days,

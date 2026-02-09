@@ -31,7 +31,8 @@ from app.models.platform_billing import (
     PaymentStatus,
 )
 from app.models.billing import Payment
-from app.integrations.payment_gateways import PaystackGateway
+from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
+from app.integrations.payment_gateways import PaystackGateway, PaymentGatewayFactory
 
 logger = logging.getLogger(__name__)
 
@@ -51,20 +52,25 @@ class PlatformBillingService:
     def __init__(self, db: AsyncSession):
         """Initialize the service with database session."""
         self.db = db
-        self._paystack: Optional[PaystackGateway] = None
 
-    @property
-    def paystack(self) -> PaystackGateway:
-        """Get Paystack gateway for platform billing."""
-        if self._paystack is None:
-            self._paystack = PaystackGateway({
-                "credentials": {
-                    "secret_key": getattr(settings, "platform_paystack_secret_key", ""),
-                    "public_key": getattr(settings, "platform_paystack_public_key", ""),
-                },
-                "callback_url": getattr(settings, "platform_paystack_callback_url", ""),
-            })
-        return self._paystack
+    async def _get_payment_gateway(self, organization_id: int):
+        """Get payment gateway for the organization."""
+        # Load the organization's Paystack configuration from database
+        result = await self.db.execute(
+            select(PaymentGatewayConfig).where(
+                and_(
+                    PaymentGatewayConfig.organization_id == organization_id,
+                    PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
+                    PaymentGatewayConfig.is_active == True
+                )
+            )
+        )
+        gateway_config = result.scalar_one_or_none()
+
+        if not gateway_config:
+            raise ValueError("Paystack payment gateway not configured for this organization")
+
+        return PaymentGatewayFactory.create(gateway_config)
 
     # =========================================================================
     # Subscription Tier Management
@@ -307,6 +313,7 @@ class PlatformBillingService:
         billing_period_start: datetime,
         billing_period_end: datetime,
         billing_cycle: BillingCycle = BillingCycle.MONTHLY,
+        skip_duplicate_check: bool = False,
     ) -> PlatformInvoice:
         """Generate an invoice for an organization."""
         # Get organization
@@ -317,6 +324,22 @@ class PlatformBillingService:
 
         if not organization:
             raise ValueError(f"Organization {organization_id} not found")
+
+        # Check for existing invoice in the same billing period (unless skipped)
+        if not skip_duplicate_check:
+            existing_invoice_result = await self.db.execute(
+                select(PlatformInvoice).where(
+                    PlatformInvoice.organization_id == organization_id,
+                    PlatformInvoice.billing_period_start == billing_period_start,
+                    PlatformInvoice.billing_period_end == billing_period_end,
+                    PlatformInvoice.status.in_([InvoiceStatus.PENDING, InvoiceStatus.PAID])
+                )
+            )
+            existing_invoice = existing_invoice_result.scalar_one_or_none()
+
+            if existing_invoice:
+                logger.info(f"Invoice already exists for org {organization_id} for period {billing_period_start} to {billing_period_end}: {existing_invoice.invoice_number}")
+                return existing_invoice
 
         # Calculate amounts
         amounts = await self.calculate_invoice_amount(
@@ -353,16 +376,46 @@ class PlatformBillingService:
         self,
         organization_ids: Optional[List[int]] = None,
     ) -> List[PlatformInvoice]:
-        """Generate monthly invoices for all or specified organizations."""
+        """Generate monthly invoices for all or specified ISP organizations with active subscriptions."""
         # Calculate billing period (previous month)
         today = datetime.utcnow()
         first_of_month = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         billing_period_end = first_of_month
         billing_period_start = (first_of_month - timedelta(days=1)).replace(day=1)
 
-        # Get organizations
+        # Get ISP organizations with active subscriptions or trials
+        # Requirements:
+        # 1. Status must be ACTIVE or TRIAL
+        # 2. Must have a subscription_tier_id (excludes platform org)
+        # 3. For TRIAL: trial_ends_at must be in the future OR NULL
+        # 4. For ACTIVE: subscription_ends_at must be in the future OR NULL (grace period)
+        from sqlalchemy import or_
+
         query = select(Organization).where(
-            Organization.status.in_([OrganizationStatus.ACTIVE, OrganizationStatus.TRIAL])
+            and_(
+                Organization.status.in_([OrganizationStatus.ACTIVE, OrganizationStatus.TRIAL]),
+                Organization.subscription_tier_id.isnot(None),  # Must have a subscription tier
+                # Include if:
+                # - Status is TRIAL with valid trial_ends_at OR
+                # - Status is ACTIVE with valid subscription_ends_at OR
+                # - Has subscription tier (covers cases where dates are NULL but org should be billed)
+                or_(
+                    and_(
+                        Organization.status == OrganizationStatus.TRIAL,
+                        or_(
+                            Organization.trial_ends_at > today,
+                            Organization.trial_ends_at.is_(None)
+                        )
+                    ),
+                    and_(
+                        Organization.status == OrganizationStatus.ACTIVE,
+                        or_(
+                            Organization.subscription_ends_at > today,
+                            Organization.subscription_ends_at.is_(None)
+                        )
+                    )
+                )
+            )
         )
 
         if organization_ids:
@@ -371,18 +424,23 @@ class PlatformBillingService:
         result = await self.db.execute(query)
         organizations = list(result.scalars().all())
 
+        logger.info(f"Found {len(organizations)} organizations eligible for billing")
+
         invoices = []
         for org in organizations:
             try:
+                # generate_invoice has built-in duplicate prevention
                 invoice = await self.generate_invoice(
                     org.id,
                     billing_period_start,
                     billing_period_end,
                 )
                 invoices.append(invoice)
+                logger.info(f"Generated invoice {invoice.invoice_number} for org {org.name}")
             except Exception as e:
-                logger.error(f"Failed to generate invoice for org {org.id}: {e}")
+                logger.error(f"Failed to generate invoice for org {org.id} ({org.name}): {e}")
 
+        logger.info(f"Successfully generated {len(invoices)} invoices out of {len(organizations)} organizations")
         return invoices
 
     async def get_invoice(self, invoice_id: int) -> Optional[PlatformInvoice]:
@@ -479,9 +537,18 @@ class PlatformBillingService:
         if invoice.status == InvoiceStatus.PAID:
             raise ValueError("Invoice is already paid")
 
+        # Get the organization's payment gateway
+        try:
+            paystack = await self._get_payment_gateway(invoice.organization_id)
+        except ValueError as e:
+            return {
+                "success": False,
+                "error": str(e),
+            }
+
         reference = f"PLAT-{invoice.invoice_number}-{uuid.uuid4().hex[:8].upper()}"
 
-        result = await self.paystack.initiate_payment(
+        result = await paystack.initiate_payment(
             amount=invoice.total_amount,
             phone_number="",  # Not needed for Paystack
             reference=reference,
@@ -503,6 +570,7 @@ class PlatformBillingService:
             "checkout_url": result.checkout_url,
             "reference": reference,
             "message": result.message,
+            "error": result.message if not result.success else None,
         }
 
     async def process_payment_callback(
@@ -510,14 +578,16 @@ class PlatformBillingService:
         callback_data: dict,
     ) -> Optional[PlatformPayment]:
         """Process Paystack payment callback."""
-        result = await self.paystack.process_callback(callback_data)
+        # Extract reference from callback data
+        event = callback_data.get("event", "")
+        data = callback_data.get("data", {})
+        reference = data.get("reference", "")
 
-        if not result.success:
-            logger.warning(f"Payment callback failed: {result.message}")
+        if not reference:
+            logger.error("No reference in callback data")
             return None
 
-        # Find the invoice by reference
-        reference = result.transaction_reference
+        # Find the invoice by reference first
         invoice_result = await self.db.execute(
             select(PlatformInvoice).where(
                 PlatformInvoice.paystack_reference == reference
@@ -527,6 +597,20 @@ class PlatformBillingService:
 
         if not invoice:
             logger.error(f"Invoice not found for reference: {reference}")
+            return None
+
+        # Get the payment gateway to process the callback
+        try:
+            paystack = await self._get_payment_gateway(invoice.organization_id)
+        except ValueError as e:
+            logger.error(f"Payment gateway not configured: {e}")
+            return None
+
+        # Process the callback
+        result = await paystack.process_callback(callback_data)
+
+        if not result.success:
+            logger.warning(f"Payment callback failed: {result.message}")
             return None
 
         # Create payment record

@@ -150,7 +150,8 @@ async def list_organizations(
 
     Platform owner only.
     """
-    query = select(Organization)
+    # Only show ISP organizations (exclude platform org which has subscription_tier_id = NULL)
+    query = select(Organization).where(Organization.subscription_tier_id.isnot(None))
 
     if status:
         query = query.where(Organization.status == status)
@@ -177,8 +178,27 @@ async def list_organizations(
     result = await db.execute(query)
     organizations = list(result.scalars().all())
 
+    # Map organizations to response (handle computed properties)
+    items = []
+    for org in organizations:
+        org_dict = org.to_dict()
+        org_dict['uuid'] = str(org.uuid)  # Convert UUID to string
+
+        # Add missing fields that to_dict() doesn't include
+        org_dict['subscription_tier_id'] = org.subscription_tier_id
+        org_dict['trial_ends_at'] = org.trial_ends_at
+        org_dict['subscription_ends_at'] = org.subscription_ends_at
+
+        # Add aggregate fields (these would need proper queries for real data)
+        # For now, use 0 as placeholder - these should be calculated from actual data
+        org_dict['total_revenue'] = 0
+        org_dict['total_customers'] = 0
+        org_dict['active_subscriptions'] = 0
+
+        items.append(OrganizationResponse(**org_dict))
+
     return OrganizationListResponse(
-        items=[OrganizationResponse.model_validate(org) for org in organizations],
+        items=items,
         total=total,
         page=page,
         page_size=page_size,
@@ -196,18 +216,22 @@ async def get_organization_stats(
 
     Platform owner only.
     """
-    # Total counts by status
+    # Total counts by status (exclude platform org)
     result = await db.execute(
         select(Organization.status, func.count(Organization.id))
+        .where(Organization.subscription_tier_id.isnot(None))
         .group_by(Organization.status)
     )
     status_counts = {row[0]: row[1] for row in result.all()}
 
-    # New organizations this month
+    # New organizations this month (exclude platform org)
     first_of_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     new_result = await db.execute(
         select(func.count(Organization.id))
-        .where(Organization.created_at >= first_of_month)
+        .where(
+            Organization.created_at >= first_of_month,
+            Organization.subscription_tier_id.isnot(None)
+        )
     )
     new_this_month = new_result.scalar() or 0
 
