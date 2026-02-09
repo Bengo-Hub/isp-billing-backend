@@ -1,7 +1,15 @@
-"""Master seed script for seeding all demo data with configurable options."""
+"""Master seed script for seeding all demo data with configurable options.
+
+Supports environment-aware seeding:
+  --env dev         (default) Seeds everything including demo data
+  --env production  Seeds only essential system data (RBAC, superuser, platform
+                    org, platform settings, subscription tiers, notification
+                    templates, system configurations)
+"""
 
 import asyncio
 import argparse
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +34,9 @@ from seed_licences import seed_licences
 from seed_subscriptions import seed_subscriptions
 
 logger = get_logger(__name__)
+
+# Models that are only seeded in dev (demo data)
+DEMO_ONLY_MODELS = {"users", "licences", "subscriptions"}
 
 
 class MasterSeeder:
@@ -59,19 +70,35 @@ class MasterSeeder:
         ]
 
     async def seed_all(
-        self, 
+        self,
         clear_existing: bool = False,
         counts: Dict[str, int] = None,
         skip_models: list = None,
-        only_models: list = None
+        only_models: list = None,
+        environment: str = "dev",
     ) -> Dict[str, Any]:
-        """Seed all data with configurable options."""
+        """Seed all data with configurable options.
+
+        Args:
+            environment: "dev" seeds everything (demo data included).
+                         "production" seeds only essential system data
+                         (RBAC, platform admin, plans, templates, configs).
+        """
         start_time = datetime.utcnow()
-        
+        is_production = environment == "production"
+
         # Use provided counts or defaults
         seed_counts = {**self.default_counts, **(counts or {})}
         skip_models = skip_models or []
-        
+
+        # In production mode, skip demo-only models
+        if is_production:
+            skip_models = list(set(skip_models) | DEMO_ONLY_MODELS)
+            self.logger.info(
+                f"[PROD] Production mode — skipping demo models: "
+                f"{', '.join(sorted(DEMO_ONLY_MODELS))}"
+            )
+
         # Filter models if only_models is specified
         if only_models:
             models_to_seed = [model for model in self.seed_order if model in only_models]
@@ -102,8 +129,13 @@ class MasterSeeder:
         # List models to seed for visibility
         self.logger.info(f"[LIST] Models to seed: {', '.join(models_to_seed)}")
         self.logger.info(f"[CHART] Seed counts: {seed_counts}")
-        
+
         try:
+            # In production, seed essentials (superuser, platform org, settings)
+            # BEFORE other models so that created_by FKs have a valid user
+            if is_production:
+                await self._seed_production_essentials()
+
             # Seed each model in order
             for model_name in models_to_seed:
                 self.logger.info(f"[SEED] Seeding {model_name}...")
@@ -172,7 +204,7 @@ class MasterSeeder:
             
             # Additional system data
             await self._seed_system_data()
-            
+
             end_time = datetime.utcnow()
             duration = (end_time - start_time).total_seconds()
             
@@ -211,22 +243,110 @@ class MasterSeeder:
             }
 
     async def _clear_system_level_data(self):
-        """Clear system-level data that must be removed before deleting users."""
-        async with AsyncSessionLocal() as db:
-            from sqlalchemy import delete
-            from app.models.notification import NotificationTemplate
-            from app.models.user_settings import UIPreferences
-            from app.models.configuration import Configuration
-            from app.models.sms_credit import SMSTransaction, SMSCreditAccount, SMSTopUp
+        """Clear system-level data that must be removed before deleting users.
 
-            await db.execute(delete(SMSTransaction))
-            await db.execute(delete(SMSTopUp))
-            await db.execute(delete(SMSCreditAccount))
-            await db.execute(delete(NotificationTemplate))
-            await db.execute(delete(UIPreferences))
-            await db.execute(delete(Configuration))
+        Dynamically discovers ALL tables with foreign keys to ``users`` and
+        deletes their rows.  Each table is cleared in its own savepoint so
+        that a missing table (older schema) doesn't abort the transaction.
+        """
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import text
+
+            # Dynamically find every table that has a FK pointing at 'users'
+            result = await db.execute(text("""
+                SELECT DISTINCT tc.table_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.constraint_column_usage ccu
+                    ON tc.constraint_name = ccu.constraint_name
+                    AND tc.table_schema = ccu.table_schema
+                WHERE tc.constraint_type = 'FOREIGN KEY'
+                    AND ccu.table_name = 'users'
+                ORDER BY tc.table_name
+            """))
+            fk_tables = [row[0] for row in result.fetchall()]
+
+            # Also include platform_settings explicitly (safety net)
+            if "platform_settings" not in fk_tables:
+                fk_tables.append("platform_settings")
+
+            self.logger.info(
+                f"Found {len(fk_tables)} tables referencing users: "
+                f"{', '.join(fk_tables)}"
+            )
+
+            for table in fk_tables:
+                try:
+                    # Use savepoint so a failure doesn't abort the transaction
+                    nested = await db.begin_nested()
+                    await db.execute(text(f'DELETE FROM "{table}"'))
+                    await nested.commit()
+                except Exception:
+                    await nested.rollback()
+
             await db.commit()
-            self.logger.info("Cleared system-level data (sms, notifications, ui prefs, configurations)")
+            self.logger.info(
+                "Cleared system-level data (all tables referencing users)"
+            )
+
+    async def _seed_production_essentials(self):
+        """Seed production-essential data: superuser, platform org, platform settings.
+
+        This runs the same idempotent logic from seed_service.py so that
+        ``python seed_all.py --env production`` produces a fully usable
+        production database without any demo data.
+        """
+        from app.core.seed_service import (
+            _seed_rbac,
+            _seed_platform_admin,
+            _seed_platform_settings,
+            _seed_subscription_tiers,
+        )
+
+        async with AsyncSessionLocal() as db:
+            try:
+                roles = await _seed_rbac(db)
+                admin = await _seed_platform_admin(db, roles)
+                await _seed_platform_settings(db, admin)
+                await _seed_subscription_tiers(db)
+
+                # Ensure platform org (Codevertex IT Solutions) exists
+                await self._seed_platform_org(db)
+
+                await db.commit()
+                self.logger.info("[OK] Production essentials seeded (superuser, platform org, settings, tiers)")
+            except Exception as e:
+                await db.rollback()
+                self.logger.error(f"[FAIL] Failed to seed production essentials: {e}")
+                raise
+
+    async def _seed_platform_org(self, db: AsyncSession):
+        """Ensure the platform organization (Codevertex IT Solutions) exists."""
+        from app.models.organization import Organization, OrganizationType, OrganizationStatus
+
+        result = await db.execute(
+            select(Organization).where(Organization.slug == "codevertex")
+        )
+        if result.scalar_one_or_none():
+            return
+
+        self.logger.info("Creating platform organization: Codevertex IT Solutions")
+        org = Organization(
+            name="Codevertex IT Solutions",
+            slug="codevertex",
+            organization_type=OrganizationType.HOTSPOT,
+            status=OrganizationStatus.ACTIVE,
+            email="info@codevertexitsolutions.com",
+            phone="+254792548766",
+            address="OGINGA STREET, BANK ST., PIONEER HSE",
+            city="KISUMU",
+            country="Kenya",
+            max_users=10,
+            max_routers=0,
+            max_customers=0,
+        )
+        db.add(org)
+        await db.flush()
+        self.logger.info(f"Platform organization created (id={org.id})")
 
     async def _seed_system_data(self):
         """Seed additional system data."""
@@ -578,19 +698,20 @@ class MasterSeeder:
             self.logger.error(f"[FAIL] Failed to clear data: {e}")
             raise
 
-    def print_summary(self, results: Dict[str, Any]):
+    def print_summary(self, results: Dict[str, Any], environment: str = "dev"):
         """Print seeding summary."""
         print("\n" + "=" * 80)
         print("[DONE] SEEDING SUMMARY")
         print("=" * 80)
-        
+        print(f"[ENV] Environment: {environment.upper()}")
+
         if results["status"] == "completed":
             print(f"[OK] Status: {results['status'].upper()}")
             print(f"[CHART] Total Records: {results['total_records']}")
             print(f"[OK] Successful Models: {results['successful_models']}")
             print(f"[FAIL] Failed Models: {results['failed_models']}")
-            print(f"[TIME]️  Duration: {results['duration_seconds']:.2f} seconds")
-            
+            print(f"[TIME]  Duration: {results['duration_seconds']:.2f} seconds")
+
             print("\n[LIST] DETAILED RESULTS:")
             for model, result in results["results"].items():
                 status_icon = "[OK]" if result["status"] == "success" else "[FAIL]"
@@ -600,31 +721,44 @@ class MasterSeeder:
         else:
             print(f"[FAIL] Status: {results['status'].upper()}")
             print(f"[ERROR] Error: {results.get('error', 'Unknown error')}")
-        
-        print("\n[GO] NEXT STEPS:")
-        print("  1. Start the FastAPI server: uvicorn app.main:app --reload")
-        print("  2. Access API docs: http://localhost:8000/docs")
-        print("  3. Login with credentials:")
-        print("     * Platform Owner: platformadmin / admin123")
-        print("     * ISP Admin (Codevertex): codevertexadmin / admin123")
-        print("     * ISP Technician: codevertextech1 / tech123")
-        print("     * Customer: [customer username] / customer123")
-        print("  4. Explore the seeded data through the API endpoints")
-        
-        print("\n[DATA] SEEDED DATA INCLUDES:")
-        print("  * Organization (created via scripts/add_default_org.py)")
-        print("  * RBAC roles and permissions")
-        print("  * Platform owner (super admin)")
-        print("  * ISP admins and technicians")
-        print("  * Customer users")
-        print("  * Realistic ISP service plans and pricing")
-        print("  * CodeVertex licences with payment history")
-        print("  * Customer subscriptions with billing data")
-        print("  * Package templates and categories")
-        print("  * Notification templates (including SMS templates)")
-        print("  * System configuration settings")
-        print("\n  NOTE: MikroTik routers are NOT seeded - create them via provisioning")
-        
+
+        if environment == "production":
+            print("\n[DATA] PRODUCTION DATA SEEDED:")
+            print("  * RBAC roles and permissions")
+            print("  * Platform superuser (credentials from env vars)")
+            print("  * Platform organization (Codevertex IT Solutions)")
+            print("  * Platform settings")
+            print("  * Subscription tiers (Hotspot Starter, PPPoE Starter)")
+            print("  * Package categories and templates")
+            print("  * Plans (service packages)")
+            print("  * Notification templates")
+            print("  * System configuration settings")
+            print("\n  NOTE: No demo users, licences, or subscriptions seeded in production")
+        else:
+            print("\n[GO] NEXT STEPS:")
+            print("  1. Start the FastAPI server: uvicorn app.main:app --reload")
+            print("  2. Access API docs: http://localhost:8000/docs")
+            print("  3. Login with credentials:")
+            print("     * Platform Owner: platformadmin / admin123")
+            print("     * ISP Admin (Codevertex): codevertexadmin / admin123")
+            print("     * ISP Technician: codevertextech1 / tech123")
+            print("     * Customer: [customer username] / customer123")
+            print("  4. Explore the seeded data through the API endpoints")
+
+            print("\n[DATA] DEV DATA SEEDED:")
+            print("  * Organization (created via scripts/add_default_org.py)")
+            print("  * RBAC roles and permissions")
+            print("  * Platform owner (super admin)")
+            print("  * ISP admins and technicians")
+            print("  * Customer users")
+            print("  * Realistic ISP service plans and pricing")
+            print("  * CodeVertex licences with payment history")
+            print("  * Customer subscriptions with billing data")
+            print("  * Package templates and categories")
+            print("  * Notification templates (including SMS templates)")
+            print("  * System configuration settings")
+            print("\n  NOTE: MikroTik routers are NOT seeded - create them via provisioning")
+
         print("=" * 80)
 
 
@@ -633,6 +767,13 @@ async def main():
     parser = argparse.ArgumentParser(description="ISP Billing System - Master Data Seeder")
     
     parser.add_argument("--clear", action="store_true", help="Clear existing data before seeding")
+    parser.add_argument(
+        "--env",
+        choices=["dev", "production"],
+        default=os.getenv("ENVIRONMENT", "dev"),
+        help="Environment mode: 'dev' seeds everything incl. demo data, "
+             "'production' seeds only essential system data (default: $ENVIRONMENT or dev)",
+    )
     parser.add_argument("--users", type=int, default=50, help="Number of users to seed (default: 50)")
     parser.add_argument("--plans", type=int, default=20, help="Number of plans to seed (default: 20)")
     # parser.add_argument("--routers", type=int, default=10, help="Number of routers to seed (default: 10)")  # Disabled
@@ -644,7 +785,7 @@ async def main():
                        choices=["rbac", "users", "plans", "licences", "subscriptions", "package_categories", "package_templates"])
     parser.add_argument("--only", nargs="+", help="Only seed these models",
                        choices=["rbac", "users", "plans", "licences", "subscriptions", "package_categories", "package_templates"])
-    
+
     parser.add_argument("--clear-only", action="store_true", help="Only clear data, don't seed")
     parser.add_argument("--quiet", action="store_true", help="Reduce output verbosity")
     
@@ -659,6 +800,7 @@ async def main():
     
     try:
         if args.clear_only:
+            await seeder._clear_system_level_data()
             await seeder.clear_all_data()
             print("[OK] All data cleared successfully")
             return
@@ -678,12 +820,13 @@ async def main():
             clear_existing=args.clear,
             counts=counts,
             skip_models=args.skip,
-            only_models=args.only
+            only_models=args.only,
+            environment=args.env,
         )
         
         # Print summary
         if not args.quiet:
-            seeder.print_summary(results)
+            seeder.print_summary(results, environment=args.env)
         
         # Exit with appropriate code
         if results["status"] == "completed" and results["failed_models"] == 0:
