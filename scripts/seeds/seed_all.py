@@ -115,14 +115,28 @@ class MasterSeeder:
             self.logger.warning("[WARN]  CLEARING ALL EXISTING DATA")
             # Ensure DB enums are complete (adds missing billing cycle values if needed)
             try:
-                from ensure_billingcycle_values import ensure_billingcycle_values
-                await ensure_billingcycle_values()
-            except Exception:
-                self.logger.exception("Failed to ensure billing cycle enum values, continuing")
-
-            # Perform a full clear first to ensure a clean state before seeding
-            # Ensure system-level tables that reference users are cleared first to avoid FK issues
-            await self._clear_system_level_data()
+                    # Try normal import first (module may be available on PATH)
+                    from ensure_billingcycle_values import ensure_billingcycle_values
+                except Exception:
+                    # Fallback: attempt to load the utility from scripts/tools if present
+                    try:
+                        import importlib.util
+                        from pathlib import Path
+                        tools_path = Path(__file__).parent / 'tools' / 'ensure_billingcycle_values.py'
+                        if tools_path.exists():
+                            spec = importlib.util.spec_from_file_location('ensure_billingcycle_values', str(tools_path))
+                            mod = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                            ensure_billingcycle_values = getattr(mod, 'ensure_billingcycle_values')
+                        else:
+                            raise
+                    except Exception:
+                        self.logger.exception("Failed to ensure billing cycle enum values, continuing")
+                else:
+                    try:
+                        await ensure_billingcycle_values()
+                    except Exception:
+                        self.logger.exception("Failed to ensure billing cycle enum values, continuing")
             await self.clear_all_data()
             clear_existing = False
 
