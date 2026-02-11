@@ -3,6 +3,8 @@
 ## Overview
 This directory contains utility scripts for database management, seeding, and system initialization.
 
+> **Note:** Seed scripts have been consolidated under `scripts/seeds/` and helper utilities under `scripts/tools/`. The `scripts/tools/` folder has been restored and contains maintenance helpers such as `drop_db.py` and `migration_fk_fixer.py`.
+
 ---
 
 ## 🚀 Primary Script
