@@ -48,8 +48,8 @@ class Settings(BaseSettings):
     encryption_salt: Optional[str] = None
 
     # Platform Admin (picked from env / git secrets)
-    global_admin_email: str = "superuser@codevertexitsolutions.com"
-    global_admin_password: str = "superuser123"
+    global_admin_email: str = "admin@codevertexitsolutions.com"
+    global_admin_password: str = "Vertex2020!"  # MUST be changed via env variable in production
     
     @model_validator(mode="after")
     def set_encryption_fallback(self) -> "Settings":
