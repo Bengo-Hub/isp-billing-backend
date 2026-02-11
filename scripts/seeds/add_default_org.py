@@ -86,9 +86,11 @@ async def add_default_organizations():
 
         if not demo_isp:
             # Get or create a subscription tier for the demo ISP
+            # Use TierType.STANDARD if available; otherwise fall back to TierType.HOTSPOT
+            tier_type_value = getattr(TierType, 'STANDARD', None) or TierType.HOTSPOT
             tier = await db.scalar(
                 select(PlatformSubscriptionTier).where(
-                    PlatformSubscriptionTier.tier_type == TierType.STANDARD
+                    PlatformSubscriptionTier.tier_type == tier_type_value
                 ).limit(1)
             )
 
@@ -96,7 +98,7 @@ async def add_default_organizations():
                 # Create a basic subscription tier
                 tier = PlatformSubscriptionTier(
                     name="Standard Plan",
-                    tier_type=TierType.STANDARD,
+                    tier_type=tier_type_value,
                     price_monthly=5000,  # 5000 KES
                     price_annual=50000,  # 50000 KES
                     max_routers=5,
