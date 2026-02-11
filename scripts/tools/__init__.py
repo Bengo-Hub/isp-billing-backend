@@ -1,1 +1,1 @@
-# Tools package for maintenance utilities
+# tools package for maintenance scripts
