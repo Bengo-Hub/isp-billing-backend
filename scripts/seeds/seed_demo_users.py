@@ -106,8 +106,9 @@ async def create_demo_users(db: AsyncSession) -> tuple:
             router_type="mikrotik",
             ip_address="192.168.100.7",  # Actual provisioned router IP
             port=8728,
-            username="admin",
-            password="",  # Empty password for demo
+            # Use the demo API user credentials requested: codevertex_api_user / Vertex2020
+            username="codevertex_api_user",
+            password="Vertex2020",
             winbox_port=8291,
             status=RouterStatus.ONLINE,
             is_active=True,
@@ -181,6 +182,35 @@ async def create_demo_users(db: AsyncSession) -> tuple:
     await create_demo_subscriptions(db, hotspot_user, pppoe_user, test_package, router)
 
     await db.commit()
+
+    # Create a demo voucher for quick testing
+    try:
+        from app.models.customer_portal import VoucherCode, VoucherStatus
+        from datetime import timedelta
+
+        existing_voucher = await db.execute(
+            select(VoucherCode).where(VoucherCode.organization_id == organization.id).limit(1)
+        )
+        if not existing_voucher.scalar_one_or_none():
+            code = VoucherCode.generate_code(format_pattern=organization.voucher_format or "XXXX-XXXX")
+            voucher = VoucherCode(
+                organization_id=organization.id,
+                code=code,
+                plan_id=test_package.id,
+                hotspot_username="demo_hotspot",
+                hotspot_password="demo1234",
+                status=VoucherStatus.ACTIVE,
+                expires_at=datetime.utcnow() + timedelta(days=30),
+                created_at=datetime.utcnow()
+            )
+            db.add(voucher)
+            await db.flush()
+            logger.info(f"Created demo voucher: {voucher.code}")
+        else:
+            logger.info("Demo voucher already exists for organization")
+        await db.commit()
+    except Exception as e:
+        logger.error(f"Failed to create demo voucher: {e}")
 
     return hotspot_user, pppoe_user
 
