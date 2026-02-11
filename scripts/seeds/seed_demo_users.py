@@ -192,7 +192,9 @@ async def create_demo_users(db: AsyncSession) -> tuple:
             select(VoucherCode).where(VoucherCode.organization_id == organization.id).limit(1)
         )
         if not existing_voucher.scalar_one_or_none():
-            code = VoucherCode.generate_code(format_pattern=organization.voucher_format or "XXXX-XXXX")
+            # Use organization's voucher_format if available, otherwise fallback to a sensible default
+            voucher_format = getattr(organization, "voucher_format", "XXXX-XXXX")
+            code = VoucherCode.generate_code(format_pattern=voucher_format)
             voucher = VoucherCode(
                 organization_id=organization.id,
                 code=code,
