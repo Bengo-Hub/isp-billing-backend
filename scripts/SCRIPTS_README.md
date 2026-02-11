@@ -60,34 +60,29 @@ python scripts/create_admin.py
 
 ### Seeding Scripts
 
-#### `seed_all.py`
-Seed all sample data.
+All seed scripts are grouped under `scripts/seeds/` for clarity. Use `run_seeds.py` for interactive seeding or individual modules for automation.
+
+#### Interactive runner
 
 ```bash
-python scripts/seed_all.py
+python scripts/seeds/run_seeds.py
 ```
 
-#### `seed_plans.py`
-Seed service plans.
+#### Programmatic / CI runner
 
 ```bash
-python scripts/seed_plans.py
+python scripts/run_prod_seed.py  # Seeds production essentials (RBAC, platform admin, tiers)
 ```
 
-#### `seed_users.py`
-Seed demo users.
+#### Individual seed modules
+
+You can also invoke individual seed modules directly (useful for testing):
 
 ```bash
-python scripts/seed_users.py
+python scripts/seeds/seed_plans.py
+python scripts/seeds/seed_users.py
+python scripts/seeds/seed_demo_users.py
 ```
-
-#### `seed_routers.py`
-Seed sample routers.
-
-```bash
-python scripts/seed_routers.py
-```
-
 ---
 
 ## Common Use Cases
