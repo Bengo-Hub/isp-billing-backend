@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     mikrotik_default_subnet: str = "192.168.88.0/24"  # Default subnet for provisioning
     # API user credentials (created during bootstrap for secure API access)
     mikrotik_api_username: str = "codevertex_api"
-    mikrotik_api_password: str = "changeme_in_production"  # MUST be changed via env variable
+    mikrotik_api_password: str = "Vertex2020!"  # MUST be changed via env variable
 
     # Rate Limiting
     rate_limit_enabled: bool = True
