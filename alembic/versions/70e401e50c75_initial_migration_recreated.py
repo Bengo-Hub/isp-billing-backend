@@ -1,8 +1,8 @@
-"""initial_migration
+"""initial_migration_recreated
 
-Revision ID: 3ced4a9f40aa
+Revision ID: 70e401e50c75
 Revises: 
-Create Date: 2026-02-09 21:08:21.411536
+Create Date: 2026-02-12 00:04:02.696460
 
 """
 from alembic import op
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = '3ced4a9f40aa'
+revision = '70e401e50c75'
 down_revision = None
 branch_labels = None
 depends_on = None
@@ -130,10 +130,8 @@ def upgrade() -> None:
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('activated_at', sa.DateTime(), nullable=True),
     sa.Column('suspended_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['bypass_set_by'], ['users.id'], name=op.f('fk_organizations_bypass_set_by_users')),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_organizations_created_by_users')),
-    sa.ForeignKeyConstraint(['subscription_tier_id'], ['platform_subscription_tiers.id'], name=op.f('fk_organizations_subscription_tier_id_platform_subscription_tiers')),
-    sa.ForeignKeyConstraint(['updated_by'], ['users.id'], name=op.f('fk_organizations_updated_by_users')),
+    # Deferred foreign keys to users: fk_organizations_bypass_set_by_users, fk_organizations_created_by_users, fk_organizations_updated_by_users
+    # Deferred foreign key to platform_subscription_tiers: fk_organizations_subscription_tier_id_platform_subscription_tiers
     sa.PrimaryKeyConstraint('id', name=op.f('pk_organizations'))
     )
     op.create_index(op.f('ix_organizations_email'), 'organizations', ['email'], unique=False)
@@ -285,9 +283,9 @@ def upgrade() -> None:
     sa.Column('notes', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['previous_configuration_id'], ['router_configurations.id'], name=op.f('fk_provisioning_sessions_previous_configuration_id_router_configurations')),
-    sa.ForeignKeyConstraint(['router_id'], ['routers.id'], name=op.f('fk_provisioning_sessions_router_id_routers')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_provisioning_sessions_user_id_users')),
+    # Deferred foreign keys: fk_provisioning_sessions_previous_configuration_id_router_configurations, fk_provisioning_sessions_user_id_users
+    # Deferred FK moved to bottom: fk_provisioning_sessions_router_id_routers -> routers.id
+    # Deferred foreign key to users: fk_provisioning_sessions_user_id_users
     sa.PrimaryKeyConstraint('id', name=op.f('pk_provisioning_sessions'))
     )
     op.create_index(op.f('ix_provisioning_sessions_id'), 'provisioning_sessions', ['id'], unique=False)
@@ -319,9 +317,8 @@ def upgrade() -> None:
     sa.Column('rollback_available', sa.Boolean(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['applied_by'], ['users.id'], name=op.f('fk_router_configurations_applied_by_users')),
-    sa.ForeignKeyConstraint(['router_id'], ['routers.id'], name=op.f('fk_router_configurations_router_id_routers')),
-    sa.ForeignKeyConstraint(['session_id'], ['provisioning_sessions.id'], name=op.f('fk_router_configurations_session_id_provisioning_sessions')),
+    # Deferred foreign keys: fk_router_configurations_applied_by_users, fk_router_configurations_session_id_provisioning_sessions
+    # Deferred FK moved to bottom: fk_router_configurations_router_id_routers -> routers.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_router_configurations'))
     )
     op.create_index(op.f('ix_router_configurations_id'), 'router_configurations', ['id'], unique=False)
@@ -408,8 +405,8 @@ def upgrade() -> None:
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('email_verified_at', sa.DateTime(), nullable=True),
     sa.Column('phone_verified_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_users_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['role_id'], ['roles.id'], name=op.f('fk_users_role_id_roles')),
+    # Deferred FK moved to bottom: fk_users_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_users_role_id_roles -> roles.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_users'))
     )
     op.create_index(op.f('ix_users_email'), 'users', ['email'], unique=True)
@@ -462,7 +459,7 @@ def upgrade() -> None:
     sa.Column('notes', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_bulk_operations_created_by_users')),
+    # Deferred foreign key to users: fk_bulk_operations_created_by_users
     sa.PrimaryKeyConstraint('id', name=op.f('pk_bulk_operations'))
     )
     op.create_index(op.f('ix_bulk_operations_id'), 'bulk_operations', ['id'], unique=False)
@@ -490,8 +487,8 @@ def upgrade() -> None:
     sa.Column('notes', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by_user_id'], ['users.id'], name=op.f('fk_campaigns_created_by_user_id_users')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_campaigns_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_campaigns_created_by_user_id_users -> users.id
+    # Deferred FK moved to bottom: fk_campaigns_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_campaigns'))
     )
     op.create_index(op.f('ix_campaigns_created_at'), 'campaigns', ['created_at'], unique=False)
@@ -512,7 +509,7 @@ def upgrade() -> None:
     sa.Column('is_active', sa.Boolean(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
     sa.Column('updated_at', sa.DateTime(timezone=True), nullable=True),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_configurations_organization_id_organizations'), ondelete='CASCADE'),
+    # Deferred FK moved to bottom: fk_configurations_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_configurations'))
     )
     op.create_index(op.f('ix_configurations_category'), 'configurations', ['category'], unique=False)
@@ -535,7 +532,7 @@ def upgrade() -> None:
     sa.Column('churned_customers', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_earnings_records_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_earnings_records_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_earnings_records')),
     sa.UniqueConstraint('organization_id', 'date', name='uq_earnings_org_date')
     )
@@ -559,9 +556,9 @@ def upgrade() -> None:
     sa.Column('rejection_reason', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['added_by_user_id'], ['users.id'], name=op.f('fk_expenses_added_by_user_id_users')),
-    sa.ForeignKeyConstraint(['approved_by_user_id'], ['users.id'], name=op.f('fk_expenses_approved_by_user_id_users')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_expenses_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_expenses_added_by_user_id_users -> users.id
+    # Deferred FK moved to bottom: fk_expenses_approved_by_user_id_users -> users.id
+    # Deferred FK moved to bottom: fk_expenses_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_expenses'))
     )
     op.create_index(op.f('ix_expenses_created_at'), 'expenses', ['created_at'], unique=False)
@@ -582,7 +579,7 @@ def upgrade() -> None:
     sa.Column('user_agent', sa.String(length=500), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('expires_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_global_search_user_id_users')),
+    # Deferred foreign key to users: fk_global_search_user_id_users
     sa.PrimaryKeyConstraint('id', name=op.f('pk_global_search'))
     )
     op.create_index(op.f('ix_global_search_id'), 'global_search', ['id'], unique=False)
@@ -607,10 +604,10 @@ def upgrade() -> None:
     sa.Column('last_contacted_at', sa.DateTime(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['assigned_to_user_id'], ['users.id'], name=op.f('fk_leads_assigned_to_user_id_users')),
-    sa.ForeignKeyConstraint(['converted_to_user_id'], ['users.id'], name=op.f('fk_leads_converted_to_user_id_users')),
-    sa.ForeignKeyConstraint(['created_by_user_id'], ['users.id'], name=op.f('fk_leads_created_by_user_id_users')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_leads_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_leads_assigned_to_user_id_users -> users.id
+    # Deferred FK moved to bottom: fk_leads_converted_to_user_id_users -> users.id
+    # Deferred FK moved to bottom: fk_leads_created_by_user_id_users -> users.id
+    # Deferred FK moved to bottom: fk_leads_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_leads'))
     )
     op.create_index(op.f('ix_leads_created_at'), 'leads', ['created_at'], unique=False)
@@ -639,8 +636,8 @@ def upgrade() -> None:
     sa.Column('sms_sent', sa.Boolean(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['acknowledged_by'], ['users.id'], name=op.f('fk_licence_alerts_acknowledged_by_users')),
-    sa.ForeignKeyConstraint(['licence_id'], ['licences.id'], name=op.f('fk_licence_alerts_licence_id_licences')),
+    # Deferred FK moved to bottom: fk_licence_alerts_acknowledged_by_users -> users.id
+    # Deferred FK moved to bottom: fk_licence_alerts_licence_id_licences -> licences.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_licence_alerts'))
     )
     op.create_index(op.f('ix_licence_alerts_id'), 'licence_alerts', ['id'], unique=False)
@@ -665,7 +662,7 @@ def upgrade() -> None:
     sa.Column('notes', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['licence_id'], ['licences.id'], name=op.f('fk_licence_payments_licence_id_licences')),
+    # Deferred FK moved to bottom: fk_licence_payments_licence_id_licences -> licences.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_licence_payments'))
     )
     op.create_index(op.f('ix_licence_payments_id'), 'licence_payments', ['id'], unique=False)
@@ -689,7 +686,7 @@ def upgrade() -> None:
     sa.Column('log_date', sa.DateTime(), nullable=False),
     sa.Column('log_type', sa.String(length=20), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['licence_id'], ['licences.id'], name=op.f('fk_licence_usage_logs_licence_id_licences')),
+    # Deferred FK moved to bottom: fk_licence_usage_logs_licence_id_licences -> licences.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_licence_usage_logs')),
     sa.UniqueConstraint('licence_id', 'log_date', 'log_type', name='uq_licence_usage_log')
     )
@@ -721,8 +718,8 @@ def upgrade() -> None:
     sa.Column('last_updated_by', sa.Integer(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_notification_templates_created_by_users')),
-    sa.ForeignKeyConstraint(['last_updated_by'], ['users.id'], name=op.f('fk_notification_templates_last_updated_by_users')),
+    # Deferred FK moved to bottom: fk_notification_templates_created_by_users -> users.id
+    # Deferred FK moved to bottom: fk_notification_templates_last_updated_by_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_notification_templates')),
     sa.UniqueConstraint('name', name=op.f('uq_notification_templates_name'))
     )
@@ -745,7 +742,7 @@ def upgrade() -> None:
     sa.Column('max_retries', sa.Integer(), nullable=False),
     sa.Column('external_id', sa.String(length=100), nullable=True),
     sa.Column('extra_data', sa.Text(), nullable=True),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_notifications_user_id_users')),
+    # Deferred foreign key to users: fk_notifications_user_id_users
     sa.PrimaryKeyConstraint('id', name=op.f('pk_notifications'))
     )
     op.create_index(op.f('ix_notifications_id'), 'notifications', ['id'], unique=False)
@@ -816,7 +813,7 @@ def upgrade() -> None:
     sa.Column('pppoe_expiry_reminder_whatsapp', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_organization_settings_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_organization_settings_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_organization_settings')),
     sa.UniqueConstraint('organization_id', name=op.f('uq_organization_settings_organization_id'))
     )
@@ -845,9 +842,9 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('published_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_package_guides_created_by_users')),
-    sa.ForeignKeyConstraint(['last_updated_by'], ['users.id'], name=op.f('fk_package_guides_last_updated_by_users')),
-    sa.ForeignKeyConstraint(['parent_guide_id'], ['package_guides.id'], name=op.f('fk_package_guides_parent_guide_id_package_guides')),
+    # Deferred FK moved to bottom: fk_package_guides_created_by_users -> users.id
+    # Deferred FK moved to bottom: fk_package_guides_last_updated_by_users -> users.id
+    # Deferred FK moved to bottom: fk_package_guides_parent_guide_id_package_guides -> package_guides.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_package_guides'))
     )
     op.create_index(op.f('ix_package_guides_id'), 'package_guides', ['id'], unique=False)
@@ -881,7 +878,7 @@ def upgrade() -> None:
     sa.Column('notes', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_package_templates_created_by_users')),
+    # Deferred FK moved to bottom: fk_package_templates_created_by_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_package_templates')),
     sa.UniqueConstraint('template_code', name=op.f('uq_package_templates_template_code'))
     )
@@ -927,7 +924,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('verified_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_payment_gateway_configs_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_payment_gateway_configs_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_payment_gateway_configs')),
     sa.UniqueConstraint('organization_id', 'gateway_type', 'paybill_number', name='uq_org_gateway_paybill')
     )
@@ -964,7 +961,7 @@ def upgrade() -> None:
     sa.Column('consecutive_failures', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_payout_configs_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_payout_configs_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_payout_configs'))
     )
     op.create_index(op.f('ix_payout_configs_id'), 'payout_configs', ['id'], unique=False)
@@ -999,8 +996,7 @@ def upgrade() -> None:
     sa.Column('blacklisted_by', sa.Integer(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['associated_user_id'], ['users.id'], name=op.f('fk_phone_number_management_associated_user_id_users')),
-    sa.ForeignKeyConstraint(['blacklisted_by'], ['users.id'], name=op.f('fk_phone_number_management_blacklisted_by_users')),
+    # Deferred foreign keys to users: fk_phone_number_management_associated_user_id_users, fk_phone_number_management_blacklisted_by_users
     sa.PrimaryKeyConstraint('id', name=op.f('pk_phone_number_management'))
     )
     op.create_index(op.f('ix_phone_number_management_id'), 'phone_number_management', ['id'], unique=False)
@@ -1032,8 +1028,8 @@ def upgrade() -> None:
     sa.Column('pdf_url', sa.String(length=500), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_platform_invoices_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['tier_id'], ['platform_subscription_tiers.id'], name=op.f('fk_platform_invoices_tier_id_platform_subscription_tiers')),
+    # Deferred FK moved to bottom: fk_platform_invoices_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_platform_invoices_tier_id_platform_subscription_tiers -> platform_subscription_tiers.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_platform_invoices'))
     )
     op.create_index(op.f('ix_platform_invoices_id'), 'platform_invoices', ['id'], unique=False)
@@ -1064,7 +1060,7 @@ def upgrade() -> None:
     sa.Column('admin_user_id', sa.Integer(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['admin_user_id'], ['users.id'], name=op.f('fk_platform_settings_admin_user_id_users')),
+    # Deferred foreign key to users: fk_platform_settings_admin_user_id_users
     sa.PrimaryKeyConstraint('id', name=op.f('pk_platform_settings'))
     )
     op.create_index(op.f('ix_platform_settings_id'), 'platform_settings', ['id'], unique=False)
@@ -1087,7 +1083,7 @@ def upgrade() -> None:
     sa.Column('max_retries', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['session_id'], ['provisioning_sessions.id'], name=op.f('fk_provisioning_step_logs_session_id_provisioning_sessions')),
+    # Deferred FK moved to bottom: fk_provisioning_step_logs_session_id_provisioning_sessions -> provisioning_sessions.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_provisioning_step_logs'))
     )
     op.create_index(op.f('ix_provisioning_step_logs_id'), 'provisioning_step_logs', ['id'], unique=False)
@@ -1109,7 +1105,7 @@ def upgrade() -> None:
     sa.Column('success_rate', sa.Float(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_provisioning_templates_created_by_users')),
+    # Deferred FK moved to bottom: fk_provisioning_templates_created_by_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_provisioning_templates')),
     sa.UniqueConstraint('name', 'version', name='uq_template_name_version')
     )
@@ -1132,15 +1128,15 @@ def upgrade() -> None:
     sa.Column('created_by', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_quick_setups_created_by_users')),
+    # Deferred foreign key to users: fk_quick_setups_created_by_users
     sa.PrimaryKeyConstraint('id', name=op.f('pk_quick_setups'))
     )
     op.create_index(op.f('ix_quick_setups_id'), 'quick_setups', ['id'], unique=False)
     op.create_table('role_permissions',
     sa.Column('role_id', sa.Integer(), nullable=False),
     sa.Column('permission_id', sa.Integer(), nullable=False),
-    sa.ForeignKeyConstraint(['permission_id'], ['permissions.id'], name=op.f('fk_role_permissions_permission_id_permissions')),
-    sa.ForeignKeyConstraint(['role_id'], ['roles.id'], name=op.f('fk_role_permissions_role_id_roles')),
+    # Deferred FK moved to bottom: fk_role_permissions_permission_id_permissions -> permissions.id
+    # Deferred FK moved to bottom: fk_role_permissions_role_id_roles -> roles.id
     sa.PrimaryKeyConstraint('role_id', 'permission_id', name=op.f('pk_role_permissions'))
     )
     op.create_table('routers',
@@ -1179,7 +1175,7 @@ def upgrade() -> None:
     sa.Column('bootstrap_completed', sa.Boolean(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_routers_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_routers_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_routers')),
     sa.UniqueConstraint('winbox_port', name=op.f('uq_routers_winbox_port'))
     )
@@ -1224,7 +1220,7 @@ def upgrade() -> None:
     sa.Column('notes', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_service_plans_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_service_plans_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_service_plans'))
     )
     op.create_index(op.f('ix_service_plans_id'), 'service_plans', ['id'], unique=False)
@@ -1258,8 +1254,8 @@ def upgrade() -> None:
     sa.Column('created_by', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_sms_credit_accounts_created_by_users')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_sms_credit_accounts_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_sms_credit_accounts_created_by_users -> users.id
+    # Deferred FK moved to bottom: fk_sms_credit_accounts_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_sms_credit_accounts'))
     )
     op.create_index(op.f('ix_sms_credit_accounts_account_code'), 'sms_credit_accounts', ['account_code'], unique=True)
@@ -1286,7 +1282,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('verified_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_sms_gateway_configs_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_sms_gateway_configs_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_sms_gateway_configs')),
     sa.UniqueConstraint('organization_id', 'provider_type', name='uq_org_sms_provider')
     )
@@ -1312,9 +1308,9 @@ def upgrade() -> None:
     sa.Column('extra_data', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['assigned_to'], ['users.id'], name=op.f('fk_support_tickets_assigned_to_users')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_support_tickets_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_support_tickets_user_id_users')),
+    # Deferred FK moved to bottom: fk_support_tickets_assigned_to_users -> users.id
+    # Deferred FK moved to bottom: fk_support_tickets_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_support_tickets_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_support_tickets'))
     )
     op.create_index(op.f('ix_support_tickets_id'), 'support_tickets', ['id'], unique=False)
@@ -1334,8 +1330,8 @@ def upgrade() -> None:
     sa.Column('entity_id', sa.Integer(), nullable=True),
     sa.Column('timestamp', sa.DateTime(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_system_logs_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_system_logs_user_id_users')),
+    # Deferred FK moved to bottom: fk_system_logs_organization_id_organizations -> organizations.id
+    # Deferred foreign key to users: fk_system_logs_user_id_users
     sa.PrimaryKeyConstraint('id', name=op.f('pk_system_logs'))
     )
     op.create_index(op.f('ix_system_logs_id'), 'system_logs', ['id'], unique=False)
@@ -1364,7 +1360,7 @@ def upgrade() -> None:
     sa.Column('notes', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_ui_bulk_operations_user_id_users')),
+    # Deferred foreign key to users: fk_ui_bulk_operations_user_id_users
     sa.PrimaryKeyConstraint('id', name=op.f('pk_ui_bulk_operations'))
     )
     op.create_index(op.f('ix_ui_bulk_operations_id'), 'ui_bulk_operations', ['id'], unique=False)
@@ -1378,8 +1374,8 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('expires_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['permission_id'], ['permissions.id'], name=op.f('fk_user_permissions_permission_id_permissions')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_user_permissions_user_id_users')),
+    # Deferred FK moved to bottom: fk_user_permissions_permission_id_permissions -> permissions.id
+    # Deferred FK moved to bottom: fk_user_permissions_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_user_permissions')),
     sa.UniqueConstraint('user_id', 'permission_id', name='uq_user_permission')
     )
@@ -1396,7 +1392,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('last_activity', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_user_sessions_user_id_users')),
+    # Deferred FK moved to bottom: fk_user_sessions_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_user_sessions'))
     )
     op.create_index(op.f('ix_user_sessions_id'), 'user_sessions', ['id'], unique=False)
@@ -1446,7 +1442,7 @@ def upgrade() -> None:
     sa.Column('last_active', sa.DateTime(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_user_settings_user_id_users')),
+    # Deferred FK moved to bottom: fk_user_settings_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_user_settings')),
     sa.UniqueConstraint('user_id', name=op.f('uq_user_settings_user_id'))
     )
@@ -1460,7 +1456,7 @@ def upgrade() -> None:
     sa.Column('expires_at', sa.DateTime(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_user_verifications_user_id_users')),
+    # Deferred FK moved to bottom: fk_user_verifications_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_user_verifications'))
     )
     op.create_index(op.f('ix_user_verifications_id'), 'user_verifications', ['id'], unique=False)
@@ -1485,7 +1481,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('verified_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_whatsapp_gateway_configs_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_whatsapp_gateway_configs_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_whatsapp_gateway_configs')),
     sa.UniqueConstraint('organization_id', 'provider_type', name='uq_org_whatsapp_provider')
     )
@@ -1516,9 +1512,9 @@ def upgrade() -> None:
     sa.Column('activated_at', sa.DateTime(), nullable=True),
     sa.Column('suspended_at', sa.DateTime(), nullable=True),
     sa.Column('cancelled_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_whatsapp_organization_subscriptions_created_by_users')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_whatsapp_organization_subscriptions_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['package_id'], ['whatsapp_subscription_packages.id'], name=op.f('fk_whatsapp_organization_subscriptions_package_id_whatsapp_subscription_packages')),
+    # Deferred FK moved to bottom: fk_whatsapp_organization_subscriptions_created_by_users -> users.id
+    # Deferred FK moved to bottom: fk_whatsapp_organization_subscriptions_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_whatsapp_organization_subscriptions_package_id_whatsapp_subscription_packages -> whatsapp_subscription_packages.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_whatsapp_organization_subscriptions')),
     sa.UniqueConstraint('organization_id', name='uq_whatsapp_org_subscription')
     )
@@ -1554,10 +1550,10 @@ def upgrade() -> None:
     sa.Column('extra_data', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['campaign_id'], ['campaigns.id'], name=op.f('fk_emails_campaign_id_campaigns')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_emails_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['sent_by_user_id'], ['users.id'], name=op.f('fk_emails_sent_by_user_id_users')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_emails_user_id_users')),
+    # Deferred FK moved to bottom: fk_emails_campaign_id_campaigns -> campaigns.id
+    # Deferred FK moved to bottom: fk_emails_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_emails_sent_by_user_id_users -> users.id
+    # Deferred FK moved to bottom: fk_emails_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_emails'))
     )
     op.create_index(op.f('ix_emails_created_at'), 'emails', ['created_at'], unique=False)
@@ -1584,10 +1580,10 @@ def upgrade() -> None:
     sa.Column('total_revenue', sa.Numeric(precision=10, scale=2), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['assigned_by'], ['users.id'], name=op.f('fk_package_assignments_assigned_by_users')),
-    sa.ForeignKeyConstraint(['plan_id'], ['service_plans.id'], name=op.f('fk_package_assignments_plan_id_service_plans')),
-    sa.ForeignKeyConstraint(['router_id'], ['routers.id'], name=op.f('fk_package_assignments_router_id_routers')),
-    sa.ForeignKeyConstraint(['template_id'], ['package_templates.id'], name=op.f('fk_package_assignments_template_id_package_templates')),
+    # Deferred FK moved to bottom: fk_package_assignments_assigned_by_users -> users.id
+    # Deferred FK moved to bottom: fk_package_assignments_plan_id_service_plans -> service_plans.id
+    # Deferred FK moved to bottom: fk_package_assignments_router_id_routers -> routers.id
+    # Deferred FK moved to bottom: fk_package_assignments_template_id_package_templates -> package_templates.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_package_assignments'))
     )
     op.create_index(op.f('ix_package_assignments_id'), 'package_assignments', ['id'], unique=False)
@@ -1607,9 +1603,9 @@ def upgrade() -> None:
     sa.Column('moderated_at', sa.DateTime(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['moderated_by'], ['users.id'], name=op.f('fk_package_ratings_moderated_by_users')),
-    sa.ForeignKeyConstraint(['template_id'], ['package_templates.id'], name=op.f('fk_package_ratings_template_id_package_templates')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_package_ratings_user_id_users')),
+    # Deferred FK moved to bottom: fk_package_ratings_moderated_by_users -> users.id
+    # Deferred FK moved to bottom: fk_package_ratings_template_id_package_templates -> package_templates.id
+    # Deferred FK moved to bottom: fk_package_ratings_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_package_ratings')),
     sa.UniqueConstraint('template_id', 'user_id', name='uq_template_user_rating')
     )
@@ -1632,8 +1628,8 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('processed_at', sa.DateTime(), nullable=True),
     sa.Column('completed_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_payout_records_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['payout_config_id'], ['payout_configs.id'], name=op.f('fk_payout_records_payout_config_id_payout_configs')),
+    # Deferred FK moved to bottom: fk_payout_records_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_payout_records_payout_config_id_payout_configs -> payout_configs.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_payout_records'))
     )
     op.create_index(op.f('ix_payout_records_id'), 'payout_records', ['id'], unique=False)
@@ -1649,7 +1645,7 @@ def upgrade() -> None:
     sa.Column('feature_value', sa.String(length=200), nullable=True),
     sa.Column('is_included', sa.Boolean(), nullable=False),
     sa.Column('sort_order', sa.Integer(), nullable=False),
-    sa.ForeignKeyConstraint(['plan_id'], ['service_plans.id'], name=op.f('fk_plan_features_plan_id_service_plans')),
+    # Deferred FK moved to bottom: fk_plan_features_plan_id_service_plans -> service_plans.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_plan_features'))
     )
     op.create_index(op.f('ix_plan_features_id'), 'plan_features', ['id'], unique=False)
@@ -1660,7 +1656,7 @@ def upgrade() -> None:
     sa.Column('price', sa.Numeric(precision=10, scale=2), nullable=False),
     sa.Column('discount_percentage', sa.Numeric(precision=5, scale=2), nullable=False),
     sa.Column('is_active', sa.Boolean(), nullable=False),
-    sa.ForeignKeyConstraint(['plan_id'], ['service_plans.id'], name=op.f('fk_plan_pricing_plan_id_service_plans')),
+    # Deferred FK moved to bottom: fk_plan_pricing_plan_id_service_plans -> service_plans.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_plan_pricing'))
     )
     op.create_index(op.f('ix_plan_pricing_id'), 'plan_pricing', ['id'], unique=False)
@@ -1682,8 +1678,8 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('completed_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['invoice_id'], ['platform_invoices.id'], name=op.f('fk_platform_payments_invoice_id_platform_invoices')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_platform_payments_organization_id_organizations')),
+    # Deferred FK moved to bottom: fk_platform_payments_invoice_id_platform_invoices -> platform_invoices.id
+    # Deferred FK moved to bottom: fk_platform_payments_organization_id_organizations -> organizations.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_platform_payments'))
     )
     op.create_index(op.f('ix_platform_payments_id'), 'platform_payments', ['id'], unique=False)
@@ -1713,8 +1709,8 @@ def upgrade() -> None:
     sa.Column('is_critical', sa.Boolean(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['session_id'], ['provisioning_sessions.id'], name=op.f('fk_provisioning_commands_session_id_provisioning_sessions')),
-    sa.ForeignKeyConstraint(['step_log_id'], ['provisioning_step_logs.id'], name=op.f('fk_provisioning_commands_step_log_id_provisioning_step_logs')),
+    # Deferred FK moved to bottom: fk_provisioning_commands_session_id_provisioning_sessions -> provisioning_sessions.id
+    # Deferred FK moved to bottom: fk_provisioning_commands_step_log_id_provisioning_step_logs -> provisioning_step_logs.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_provisioning_commands'))
     )
     op.create_index(op.f('ix_provisioning_commands_id'), 'provisioning_commands', ['id'], unique=False)
@@ -1732,7 +1728,7 @@ def upgrade() -> None:
     sa.Column('uptime', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['router_id'], ['routers.id'], name=op.f('fk_router_devices_router_id_routers')),
+    # Deferred FK moved to bottom: fk_router_devices_router_id_routers -> routers.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_router_devices'))
     )
     op.create_index(op.f('ix_router_devices_id'), 'router_devices', ['id'], unique=False)
@@ -1746,7 +1742,7 @@ def upgrade() -> None:
     sa.Column('ip_address', sa.String(length=45), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['router_id'], ['routers.id'], name=op.f('fk_router_logs_router_id_routers')),
+    # Deferred FK moved to bottom: fk_router_logs_router_id_routers -> routers.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_router_logs'))
     )
     op.create_index(op.f('ix_router_logs_id'), 'router_logs', ['id'], unique=False)
@@ -1768,8 +1764,8 @@ def upgrade() -> None:
     sa.Column('email_sent', sa.Boolean(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['account_id'], ['sms_credit_accounts.id'], name=op.f('fk_sms_credit_alerts_account_id_sms_credit_accounts')),
-    sa.ForeignKeyConstraint(['acknowledged_by'], ['users.id'], name=op.f('fk_sms_credit_alerts_acknowledged_by_users')),
+    # Deferred FK moved to bottom: fk_sms_credit_alerts_account_id_sms_credit_accounts -> sms_credit_accounts.id
+    # Deferred FK moved to bottom: fk_sms_credit_alerts_acknowledged_by_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_sms_credit_alerts'))
     )
     op.create_index(op.f('ix_sms_credit_alerts_id'), 'sms_credit_alerts', ['id'], unique=False)
@@ -1796,7 +1792,7 @@ def upgrade() -> None:
     sa.Column('lowest_balance', sa.Numeric(precision=10, scale=2), nullable=False),
     sa.Column('highest_balance', sa.Numeric(precision=10, scale=2), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['account_id'], ['sms_credit_accounts.id'], name=op.f('fk_sms_credit_usage_stats_account_id_sms_credit_accounts')),
+    # Deferred FK moved to bottom: fk_sms_credit_usage_stats_account_id_sms_credit_accounts -> sms_credit_accounts.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_sms_credit_usage_stats')),
     sa.UniqueConstraint('account_id', 'stats_date', 'period_type', name='uq_sms_stats_account_date')
     )
@@ -1825,9 +1821,9 @@ def upgrade() -> None:
     sa.Column('retry_count', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['account_id'], ['sms_credit_accounts.id'], name=op.f('fk_sms_top_ups_account_id_sms_credit_accounts')),
-    sa.ForeignKeyConstraint(['approved_by'], ['users.id'], name=op.f('fk_sms_top_ups_approved_by_users')),
-    sa.ForeignKeyConstraint(['requested_by'], ['users.id'], name=op.f('fk_sms_top_ups_requested_by_users')),
+    # Deferred FK moved to bottom: fk_sms_top_ups_account_id_sms_credit_accounts -> sms_credit_accounts.id
+    # Deferred FK moved to bottom: fk_sms_top_ups_approved_by_users -> users.id
+    # Deferred FK moved to bottom: fk_sms_top_ups_requested_by_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_sms_top_ups'))
     )
     op.create_index(op.f('ix_sms_top_ups_id'), 'sms_top_ups', ['id'], unique=False)
@@ -1857,11 +1853,11 @@ def upgrade() -> None:
     sa.Column('last_router_sync', sa.DateTime(), nullable=True),
     sa.Column('notes', sa.Text(), nullable=True),
     sa.Column('created_by', sa.Integer(), nullable=True),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_subscriptions_created_by_users')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_subscriptions_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['plan_id'], ['service_plans.id'], name=op.f('fk_subscriptions_plan_id_service_plans')),
-    sa.ForeignKeyConstraint(['router_id'], ['routers.id'], name=op.f('fk_subscriptions_router_id_routers')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_subscriptions_user_id_users')),
+    # Deferred FK moved to bottom: fk_subscriptions_created_by_users -> users.id
+    # Deferred FK moved to bottom: fk_subscriptions_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_subscriptions_plan_id_service_plans -> service_plans.id
+    # Deferred FK moved to bottom: fk_subscriptions_router_id_routers -> routers.id
+    # Deferred FK moved to bottom: fk_subscriptions_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_subscriptions')),
     sa.UniqueConstraint('user_id', 'router_id', 'subscription_type', name='uq_user_router_type')
     )
@@ -1877,8 +1873,8 @@ def upgrade() -> None:
     sa.Column('ip_address', sa.String(length=45), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['ticket_id'], ['support_tickets.id'], name=op.f('fk_ticket_messages_ticket_id_support_tickets')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_ticket_messages_user_id_users')),
+    # Deferred FK moved to bottom: fk_ticket_messages_ticket_id_support_tickets -> support_tickets.id
+    # Deferred FK moved to bottom: fk_ticket_messages_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_ticket_messages'))
     )
     op.create_index(op.f('ix_ticket_messages_id'), 'ticket_messages', ['id'], unique=False)
@@ -1901,9 +1897,9 @@ def upgrade() -> None:
     sa.Column('created_by', sa.Integer(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_voucher_batches_created_by_users')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_voucher_batches_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['plan_id'], ['service_plans.id'], name=op.f('fk_voucher_batches_plan_id_service_plans')),
+    # Deferred FK moved to bottom: fk_voucher_batches_created_by_users -> users.id
+    # Deferred FK moved to bottom: fk_voucher_batches_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_voucher_batches_plan_id_service_plans -> service_plans.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_voucher_batches'))
     )
     op.create_index(op.f('ix_voucher_batches_batch_id'), 'voucher_batches', ['batch_id'], unique=True)
@@ -1933,11 +1929,11 @@ def upgrade() -> None:
     sa.Column('sold_by', sa.Integer(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_voucher_codes_created_by_users')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_voucher_codes_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['plan_id'], ['service_plans.id'], name=op.f('fk_voucher_codes_plan_id_service_plans')),
-    sa.ForeignKeyConstraint(['sold_by'], ['users.id'], name=op.f('fk_voucher_codes_sold_by_users')),
-    sa.ForeignKeyConstraint(['used_by'], ['users.id'], name=op.f('fk_voucher_codes_used_by_users')),
+    # Deferred FK moved to bottom: fk_voucher_codes_created_by_users -> users.id
+    # Deferred FK moved to bottom: fk_voucher_codes_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_voucher_codes_plan_id_service_plans -> service_plans.id
+    # Deferred FK moved to bottom: fk_voucher_codes_sold_by_users -> users.id
+    # Deferred FK moved to bottom: fk_voucher_codes_used_by_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_voucher_codes'))
     )
     op.create_index(op.f('ix_voucher_codes_batch_id'), 'voucher_codes', ['batch_id'], unique=False)
@@ -1972,11 +1968,11 @@ def upgrade() -> None:
     sa.Column('last_retry_at', sa.DateTime(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['notification_id'], ['notifications.id'], name=op.f('fk_whatsapp_messages_notification_id_notifications')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_whatsapp_messages_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['subscription_id'], ['whatsapp_organization_subscriptions.id'], name=op.f('fk_whatsapp_messages_subscription_id_whatsapp_organization_subscriptions')),
-    sa.ForeignKeyConstraint(['triggered_by'], ['users.id'], name=op.f('fk_whatsapp_messages_triggered_by_users')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_whatsapp_messages_user_id_users')),
+    # Deferred FK moved to bottom: fk_whatsapp_messages_notification_id_notifications -> notifications.id
+    # Deferred FK moved to bottom: fk_whatsapp_messages_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_whatsapp_messages_subscription_id_whatsapp_organization_subscriptions -> whatsapp_organization_subscriptions.id
+    # Deferred FK moved to bottom: fk_whatsapp_messages_triggered_by_users -> users.id
+    # Deferred FK moved to bottom: fk_whatsapp_messages_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_whatsapp_messages'))
     )
     op.create_index(op.f('ix_whatsapp_messages_created_at'), 'whatsapp_messages', ['created_at'], unique=False)
@@ -2003,8 +1999,8 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('paid_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_whatsapp_subscription_payments_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['subscription_id'], ['whatsapp_organization_subscriptions.id'], name=op.f('fk_whatsapp_subscription_payments_subscription_id_whatsapp_organization_subscriptions')),
+    # Deferred FK moved to bottom: fk_whatsapp_subscription_payments_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_whatsapp_subscription_payments_subscription_id_whatsapp_organization_subscriptions -> whatsapp_organization_subscriptions.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_whatsapp_subscription_payments'))
     )
     op.create_index(op.f('ix_whatsapp_subscription_payments_id'), 'whatsapp_subscription_payments', ['id'], unique=False)
@@ -2041,9 +2037,9 @@ def upgrade() -> None:
     sa.Column('terminate_cause', sa.String(length=100), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_customer_sessions_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['subscription_id'], ['subscriptions.id'], name=op.f('fk_customer_sessions_subscription_id_subscriptions')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_customer_sessions_user_id_users')),
+    # Deferred FK moved to bottom: fk_customer_sessions_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_customer_sessions_subscription_id_subscriptions -> subscriptions.id
+    # Deferred FK moved to bottom: fk_customer_sessions_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_customer_sessions'))
     )
     op.create_index(op.f('ix_customer_sessions_id'), 'customer_sessions', ['id'], unique=False)
@@ -2074,9 +2070,9 @@ def upgrade() -> None:
     sa.Column('terms', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_invoices_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['subscription_id'], ['subscriptions.id'], name=op.f('fk_invoices_subscription_id_subscriptions')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_invoices_user_id_users')),
+    # Deferred FK moved to bottom: fk_invoices_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_invoices_subscription_id_subscriptions -> subscriptions.id
+    # Deferred FK moved to bottom: fk_invoices_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_invoices'))
     )
     op.create_index(op.f('ix_invoices_id'), 'invoices', ['id'], unique=False)
@@ -2110,10 +2106,10 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('processed_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['account_id'], ['sms_credit_accounts.id'], name=op.f('fk_sms_transactions_account_id_sms_credit_accounts')),
-    sa.ForeignKeyConstraint(['notification_id'], ['notifications.id'], name=op.f('fk_sms_transactions_notification_id_notifications')),
-    sa.ForeignKeyConstraint(['top_up_id'], ['sms_top_ups.id'], name=op.f('fk_sms_transactions_top_up_id_sms_top_ups')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_sms_transactions_user_id_users')),
+    # Deferred FK moved to bottom: fk_sms_transactions_account_id_sms_credit_accounts -> sms_credit_accounts.id
+    # Deferred FK moved to bottom: fk_sms_transactions_notification_id_notifications -> notifications.id
+    # Deferred FK moved to bottom: fk_sms_transactions_top_up_id_sms_top_ups -> sms_top_ups.id
+    # Deferred FK moved to bottom: fk_sms_transactions_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_sms_transactions'))
     )
     op.create_index(op.f('ix_sms_transactions_id'), 'sms_transactions', ['id'], unique=False)
@@ -2127,8 +2123,8 @@ def upgrade() -> None:
     sa.Column('details', sa.Text(), nullable=True),
     sa.Column('changed_by', sa.Integer(), nullable=True),
     sa.Column('ip_address', sa.String(length=45), nullable=True),
-    sa.ForeignKeyConstraint(['changed_by'], ['users.id'], name=op.f('fk_subscription_history_changed_by_users')),
-    sa.ForeignKeyConstraint(['subscription_id'], ['subscriptions.id'], name=op.f('fk_subscription_history_subscription_id_subscriptions')),
+    # Deferred FK moved to bottom: fk_subscription_history_changed_by_users -> users.id
+    # Deferred FK moved to bottom: fk_subscription_history_subscription_id_subscriptions -> subscriptions.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_subscription_history'))
     )
     op.create_index(op.f('ix_subscription_history_id'), 'subscription_history', ['id'], unique=False)
@@ -2141,7 +2137,7 @@ def upgrade() -> None:
     sa.Column('session_duration', sa.Integer(), nullable=False),
     sa.Column('ip_address', sa.String(length=45), nullable=True),
     sa.Column('mac_address', sa.String(length=17), nullable=True),
-    sa.ForeignKeyConstraint(['subscription_id'], ['subscriptions.id'], name=op.f('fk_subscription_usage_logs_subscription_id_subscriptions')),
+    # Deferred FK moved to bottom: fk_subscription_usage_logs_subscription_id_subscriptions -> subscriptions.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_subscription_usage_logs'))
     )
     op.create_index(op.f('ix_subscription_usage_logs_id'), 'subscription_usage_logs', ['id'], unique=False)
@@ -2155,7 +2151,7 @@ def upgrade() -> None:
     sa.Column('item_type', sa.String(length=50), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['invoice_id'], ['invoices.id'], name=op.f('fk_invoice_items_invoice_id_invoices')),
+    # Deferred FK moved to bottom: fk_invoice_items_invoice_id_invoices -> invoices.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_invoice_items'))
     )
     op.create_index(op.f('ix_invoice_items_id'), 'invoice_items', ['id'], unique=False)
@@ -2185,11 +2181,11 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('completed_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['gateway_id'], ['payment_gateway_configs.id'], name=op.f('fk_payment_transactions_gateway_id_payment_gateway_configs')),
-    sa.ForeignKeyConstraint(['invoice_id'], ['invoices.id'], name=op.f('fk_payment_transactions_invoice_id_invoices')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_payment_transactions_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['subscription_id'], ['subscriptions.id'], name=op.f('fk_payment_transactions_subscription_id_subscriptions')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_payment_transactions_user_id_users')),
+    # Deferred FK moved to bottom: fk_payment_transactions_gateway_id_payment_gateway_configs -> payment_gateway_configs.id
+    # Deferred FK moved to bottom: fk_payment_transactions_invoice_id_invoices -> invoices.id
+    # Deferred FK moved to bottom: fk_payment_transactions_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_payment_transactions_subscription_id_subscriptions -> subscriptions.id
+    # Deferred FK moved to bottom: fk_payment_transactions_user_id_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_payment_transactions'))
     )
     op.create_index(op.f('ix_payment_transactions_external_reference'), 'payment_transactions', ['external_reference'], unique=False)
@@ -2228,11 +2224,11 @@ def upgrade() -> None:
     sa.Column('receipt_image_url', sa.String(length=500), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['invoice_id'], ['invoices.id'], name=op.f('fk_payments_invoice_id_invoices')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_payments_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['recorded_by'], ['users.id'], name=op.f('fk_payments_recorded_by_users')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_payments_user_id_users')),
-    sa.ForeignKeyConstraint(['verified_by'], ['users.id'], name=op.f('fk_payments_verified_by_users')),
+    # Deferred FK moved to bottom: fk_payments_invoice_id_invoices -> invoices.id
+    # Deferred FK moved to bottom: fk_payments_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_payments_recorded_by_users -> users.id
+    # Deferred FK moved to bottom: fk_payments_user_id_users -> users.id
+    # Deferred FK moved to bottom: fk_payments_verified_by_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_payments'))
     )
     op.create_index(op.f('ix_payments_id'), 'payments', ['id'], unique=False)
@@ -2261,13 +2257,13 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('completed_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_customer_purchases_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['plan_id'], ['service_plans.id'], name=op.f('fk_customer_purchases_plan_id_service_plans')),
-    sa.ForeignKeyConstraint(['session_id'], ['customer_sessions.id'], name=op.f('fk_customer_purchases_session_id_customer_sessions')),
-    sa.ForeignKeyConstraint(['subscription_id'], ['subscriptions.id'], name=op.f('fk_customer_purchases_subscription_id_subscriptions')),
-    sa.ForeignKeyConstraint(['transaction_id'], ['payment_transactions.id'], name=op.f('fk_customer_purchases_transaction_id_payment_transactions')),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_customer_purchases_user_id_users')),
-    sa.ForeignKeyConstraint(['voucher_code_id'], ['voucher_codes.id'], name=op.f('fk_customer_purchases_voucher_code_id_voucher_codes')),
+    # Deferred FK moved to bottom: fk_customer_purchases_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_customer_purchases_plan_id_service_plans -> service_plans.id
+    # Deferred FK moved to bottom: fk_customer_purchases_session_id_customer_sessions -> customer_sessions.id
+    # Deferred FK moved to bottom: fk_customer_purchases_subscription_id_subscriptions -> subscriptions.id
+    # Deferred FK moved to bottom: fk_customer_purchases_transaction_id_payment_transactions -> payment_transactions.id
+    # Deferred FK moved to bottom: fk_customer_purchases_user_id_users -> users.id
+    # Deferred FK moved to bottom: fk_customer_purchases_voucher_code_id_voucher_codes -> voucher_codes.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_customer_purchases'))
     )
     op.create_index(op.f('ix_customer_purchases_id'), 'customer_purchases', ['id'], unique=False)
@@ -2292,11 +2288,11 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('recorded_by', sa.Integer(), nullable=False),
-    sa.ForeignKeyConstraint(['gateway_id'], ['payment_gateway_configs.id'], name=op.f('fk_manual_payment_records_gateway_id_payment_gateway_configs')),
-    sa.ForeignKeyConstraint(['matched_by'], ['users.id'], name=op.f('fk_manual_payment_records_matched_by_users')),
-    sa.ForeignKeyConstraint(['matched_transaction_id'], ['payment_transactions.id'], name=op.f('fk_manual_payment_records_matched_transaction_id_payment_transactions')),
-    sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], name=op.f('fk_manual_payment_records_organization_id_organizations')),
-    sa.ForeignKeyConstraint(['recorded_by'], ['users.id'], name=op.f('fk_manual_payment_records_recorded_by_users')),
+    # Deferred FK moved to bottom: fk_manual_payment_records_gateway_id_payment_gateway_configs -> payment_gateway_configs.id
+    # Deferred FK moved to bottom: fk_manual_payment_records_matched_by_users -> users.id
+    # Deferred FK moved to bottom: fk_manual_payment_records_matched_transaction_id_payment_transactions -> payment_transactions.id
+    # Deferred FK moved to bottom: fk_manual_payment_records_organization_id_organizations -> organizations.id
+    # Deferred FK moved to bottom: fk_manual_payment_records_recorded_by_users -> users.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_manual_payment_records'))
     )
     op.create_index(op.f('ix_manual_payment_records_gateway_id'), 'manual_payment_records', ['gateway_id'], unique=False)
@@ -2313,15 +2309,466 @@ def upgrade() -> None:
     sa.Column('ip_address', sa.String(length=45), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['payment_id'], ['payments.id'], name=op.f('fk_payment_logs_payment_id_payments')),
+    # Deferred FK moved to bottom: fk_payment_logs_payment_id_payments -> payments.id
     sa.PrimaryKeyConstraint('id', name=op.f('pk_payment_logs'))
     )
     op.create_index(op.f('ix_payment_logs_id'), 'payment_logs', ['id'], unique=False)
+
+    # Deferred foreign keys consolidated later in migration to avoid duplicates and ordering issues
+
+    op.create_foreign_key(op.f('fk_phone_number_management_blacklisted_by_users'), 'phone_number_management', 'users', ['blacklisted_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_platform_settings_admin_user_id_users'), 'platform_settings', 'users', ['admin_user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_provisioning_templates_created_by_users'), 'provisioning_templates', 'users', ['created_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_quick_setups_created_by_users'), 'quick_setups', 'users', ['created_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_sms_credit_accounts_created_by_users'), 'sms_credit_accounts', 'users', ['created_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_support_tickets_assigned_to_users'), 'support_tickets', 'users', ['assigned_to'], ['id'], ondelete='SET NULL')
+    op.create_foreign_key(op.f('fk_support_tickets_user_id_users'), 'support_tickets', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_system_logs_user_id_users'), 'system_logs', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_ui_bulk_operations_user_id_users'), 'ui_bulk_operations', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_user_permissions_user_id_users'), 'user_permissions', 'users', ['user_id'], ['id'], ondelete='CASCADE')
+
+    # ### Deferred foreign keys moved to end to avoid circular/ordering issues ###
+
+    op.create_foreign_key(op.f('fk_provisioning_sessions_router_id_routers'), 'provisioning_sessions', 'routers', ['router_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_router_configurations_router_id_routers'), 'router_configurations', 'routers', ['router_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_users_organization_id_organizations'), 'users', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_users_role_id_roles'), 'users', 'roles', ['role_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_campaigns_created_by_user_id_users'), 'campaigns', 'users', ['created_by_user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_campaigns_organization_id_organizations'), 'campaigns', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_configurations_organization_id_organizations'), 'configurations', 'organizations', ['organization_id'], ['id'], ondelete='CASCADE')
+
+    op.create_foreign_key(op.f('fk_earnings_records_organization_id_organizations'), 'earnings_records', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_expenses_added_by_user_id_users'), 'expenses', 'users', ['added_by_user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_expenses_approved_by_user_id_users'), 'expenses', 'users', ['approved_by_user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_expenses_organization_id_organizations'), 'expenses', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_leads_assigned_to_user_id_users'), 'leads', 'users', ['assigned_to_user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_leads_converted_to_user_id_users'), 'leads', 'users', ['converted_to_user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_leads_created_by_user_id_users'), 'leads', 'users', ['created_by_user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_leads_organization_id_organizations'), 'leads', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_licence_alerts_acknowledged_by_users'), 'licence_alerts', 'users', ['acknowledged_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_licence_alerts_licence_id_licences'), 'licence_alerts', 'licences', ['licence_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_licence_payments_licence_id_licences'), 'licence_payments', 'licences', ['licence_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_licence_usage_logs_licence_id_licences'), 'licence_usage_logs', 'licences', ['licence_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_notification_templates_created_by_users'), 'notification_templates', 'users', ['created_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_notification_templates_last_updated_by_users'), 'notification_templates', 'users', ['last_updated_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_organization_settings_organization_id_organizations'), 'organization_settings', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_package_guides_created_by_users'), 'package_guides', 'users', ['created_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_package_guides_last_updated_by_users'), 'package_guides', 'users', ['last_updated_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_package_guides_parent_guide_id_package_guides'), 'package_guides', 'package_guides', ['parent_guide_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_package_templates_created_by_users'), 'package_templates', 'users', ['created_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payment_gateway_configs_organization_id_organizations'), 'payment_gateway_configs', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payout_configs_organization_id_organizations'), 'payout_configs', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_platform_invoices_organization_id_organizations'), 'platform_invoices', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_platform_invoices_tier_id_platform_subscription_tiers'), 'platform_invoices', 'platform_subscription_tiers', ['tier_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_provisioning_step_logs_session_id_provisioning_sessions'), 'provisioning_step_logs', 'provisioning_sessions', ['session_id'], ['id'], ondelete='SET NULL')
+
+
+    op.create_foreign_key(op.f('fk_role_permissions_permission_id_permissions'), 'role_permissions', 'permissions', ['permission_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_role_permissions_role_id_roles'), 'role_permissions', 'roles', ['role_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_routers_organization_id_organizations'), 'routers', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_service_plans_organization_id_organizations'), 'service_plans', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+
+    op.create_foreign_key(op.f('fk_sms_credit_accounts_organization_id_organizations'), 'sms_credit_accounts', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_sms_gateway_configs_organization_id_organizations'), 'sms_gateway_configs', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+
+    op.create_foreign_key(op.f('fk_support_tickets_organization_id_organizations'), 'support_tickets', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+
+    op.create_foreign_key(op.f('fk_system_logs_organization_id_organizations'), 'system_logs', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_user_permissions_permission_id_permissions'), 'user_permissions', 'permissions', ['permission_id'], ['id'], ondelete='SET NULL')
+
+
+    op.create_foreign_key(op.f('fk_user_sessions_user_id_users'), 'user_sessions', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_user_settings_user_id_users'), 'user_settings', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_user_verifications_user_id_users'), 'user_verifications', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_whatsapp_gateway_configs_organization_id_organizations'), 'whatsapp_gateway_configs', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_whatsapp_organization_subscriptions_created_by_users'), 'whatsapp_organization_subscriptions', 'users', ['created_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_whatsapp_organization_subscriptions_organization_id_organizations'), 'whatsapp_organization_subscriptions', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_whatsapp_organization_subscriptions_package_id_whatsapp_subscription_packages'), 'whatsapp_organization_subscriptions', 'whatsapp_subscription_packages', ['package_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_emails_campaign_id_campaigns'), 'emails', 'campaigns', ['campaign_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_emails_organization_id_organizations'), 'emails', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_emails_sent_by_user_id_users'), 'emails', 'users', ['sent_by_user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_emails_user_id_users'), 'emails', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_package_assignments_assigned_by_users'), 'package_assignments', 'users', ['assigned_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_package_assignments_plan_id_service_plans'), 'package_assignments', 'service_plans', ['plan_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_package_assignments_router_id_routers'), 'package_assignments', 'routers', ['router_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_package_assignments_template_id_package_templates'), 'package_assignments', 'package_templates', ['template_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_package_ratings_moderated_by_users'), 'package_ratings', 'users', ['moderated_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_package_ratings_template_id_package_templates'), 'package_ratings', 'package_templates', ['template_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_package_ratings_user_id_users'), 'package_ratings', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payout_records_organization_id_organizations'), 'payout_records', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payout_records_payout_config_id_payout_configs'), 'payout_records', 'payout_configs', ['payout_config_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_plan_features_plan_id_service_plans'), 'plan_features', 'service_plans', ['plan_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_plan_pricing_plan_id_service_plans'), 'plan_pricing', 'service_plans', ['plan_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_platform_payments_invoice_id_platform_invoices'), 'platform_payments', 'platform_invoices', ['invoice_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_platform_payments_organization_id_organizations'), 'platform_payments', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_provisioning_commands_session_id_provisioning_sessions'), 'provisioning_commands', 'provisioning_sessions', ['session_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_provisioning_commands_step_log_id_provisioning_step_logs'), 'provisioning_commands', 'provisioning_step_logs', ['step_log_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_router_devices_router_id_routers'), 'router_devices', 'routers', ['router_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_router_logs_router_id_routers'), 'router_logs', 'routers', ['router_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_sms_credit_alerts_account_id_sms_credit_accounts'), 'sms_credit_alerts', 'sms_credit_accounts', ['account_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_sms_credit_alerts_acknowledged_by_users'), 'sms_credit_alerts', 'users', ['acknowledged_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_sms_credit_usage_stats_account_id_sms_credit_accounts'), 'sms_credit_usage_stats', 'sms_credit_accounts', ['account_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_sms_top_ups_account_id_sms_credit_accounts'), 'sms_top_ups', 'sms_credit_accounts', ['account_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_sms_top_ups_approved_by_users'), 'sms_top_ups', 'users', ['approved_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_sms_top_ups_requested_by_users'), 'sms_top_ups', 'users', ['requested_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_subscriptions_created_by_users'), 'subscriptions', 'users', ['created_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_subscriptions_organization_id_organizations'), 'subscriptions', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_subscriptions_plan_id_service_plans'), 'subscriptions', 'service_plans', ['plan_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_subscriptions_router_id_routers'), 'subscriptions', 'routers', ['router_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_subscriptions_user_id_users'), 'subscriptions', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_ticket_messages_ticket_id_support_tickets'), 'ticket_messages', 'support_tickets', ['ticket_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_ticket_messages_user_id_users'), 'ticket_messages', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_voucher_batches_created_by_users'), 'voucher_batches', 'users', ['created_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_voucher_batches_organization_id_organizations'), 'voucher_batches', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_voucher_batches_plan_id_service_plans'), 'voucher_batches', 'service_plans', ['plan_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_voucher_codes_created_by_users'), 'voucher_codes', 'users', ['created_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_voucher_codes_organization_id_organizations'), 'voucher_codes', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_voucher_codes_plan_id_service_plans'), 'voucher_codes', 'service_plans', ['plan_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_voucher_codes_sold_by_users'), 'voucher_codes', 'users', ['sold_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_voucher_codes_used_by_users'), 'voucher_codes', 'users', ['used_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_whatsapp_messages_notification_id_notifications'), 'whatsapp_messages', 'notifications', ['notification_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_whatsapp_messages_organization_id_organizations'), 'whatsapp_messages', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_whatsapp_messages_subscription_id_whatsapp_organization_subscriptions'), 'whatsapp_messages', 'whatsapp_organization_subscriptions', ['subscription_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_whatsapp_messages_triggered_by_users'), 'whatsapp_messages', 'users', ['triggered_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_whatsapp_messages_user_id_users'), 'whatsapp_messages', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_whatsapp_subscription_payments_organization_id_organizations'), 'whatsapp_subscription_payments', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_whatsapp_subscription_payments_subscription_id_whatsapp_organization_subscriptions'), 'whatsapp_subscription_payments', 'whatsapp_organization_subscriptions', ['subscription_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_customer_sessions_organization_id_organizations'), 'customer_sessions', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_customer_sessions_subscription_id_subscriptions'), 'customer_sessions', 'subscriptions', ['subscription_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_customer_sessions_user_id_users'), 'customer_sessions', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_invoices_organization_id_organizations'), 'invoices', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_invoices_subscription_id_subscriptions'), 'invoices', 'subscriptions', ['subscription_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_invoices_user_id_users'), 'invoices', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_sms_transactions_account_id_sms_credit_accounts'), 'sms_transactions', 'sms_credit_accounts', ['account_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_sms_transactions_notification_id_notifications'), 'sms_transactions', 'notifications', ['notification_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_sms_transactions_top_up_id_sms_top_ups'), 'sms_transactions', 'sms_top_ups', ['top_up_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_sms_transactions_user_id_users'), 'sms_transactions', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_subscription_history_changed_by_users'), 'subscription_history', 'users', ['changed_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_subscription_history_subscription_id_subscriptions'), 'subscription_history', 'subscriptions', ['subscription_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_subscription_usage_logs_subscription_id_subscriptions'), 'subscription_usage_logs', 'subscriptions', ['subscription_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_invoice_items_invoice_id_invoices'), 'invoice_items', 'invoices', ['invoice_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payment_transactions_gateway_id_payment_gateway_configs'), 'payment_transactions', 'payment_gateway_configs', ['gateway_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payment_transactions_invoice_id_invoices'), 'payment_transactions', 'invoices', ['invoice_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payment_transactions_organization_id_organizations'), 'payment_transactions', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payment_transactions_subscription_id_subscriptions'), 'payment_transactions', 'subscriptions', ['subscription_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payment_transactions_user_id_users'), 'payment_transactions', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payments_invoice_id_invoices'), 'payments', 'invoices', ['invoice_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payments_organization_id_organizations'), 'payments', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payments_recorded_by_users'), 'payments', 'users', ['recorded_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payments_user_id_users'), 'payments', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payments_verified_by_users'), 'payments', 'users', ['verified_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_customer_purchases_organization_id_organizations'), 'customer_purchases', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_customer_purchases_plan_id_service_plans'), 'customer_purchases', 'service_plans', ['plan_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_customer_purchases_session_id_customer_sessions'), 'customer_purchases', 'customer_sessions', ['session_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_customer_purchases_subscription_id_subscriptions'), 'customer_purchases', 'subscriptions', ['subscription_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_customer_purchases_transaction_id_payment_transactions'), 'customer_purchases', 'payment_transactions', ['transaction_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_customer_purchases_user_id_users'), 'customer_purchases', 'users', ['user_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_customer_purchases_voucher_code_id_voucher_codes'), 'customer_purchases', 'voucher_codes', ['voucher_code_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_manual_payment_records_gateway_id_payment_gateway_configs'), 'manual_payment_records', 'payment_gateway_configs', ['gateway_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_manual_payment_records_matched_by_users'), 'manual_payment_records', 'users', ['matched_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_manual_payment_records_matched_transaction_id_payment_transactions'), 'manual_payment_records', 'payment_transactions', ['matched_transaction_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_manual_payment_records_organization_id_organizations'), 'manual_payment_records', 'organizations', ['organization_id'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_manual_payment_records_recorded_by_users'), 'manual_payment_records', 'users', ['recorded_by'], ['id'], ondelete='SET NULL')
+
+    op.create_foreign_key(op.f('fk_payment_logs_payment_id_payments'), 'payment_logs', 'payments', ['payment_id'], ['id'], ondelete='SET NULL')
+
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_constraint(op.f('fk_provisioning_sessions_router_id_routers'), 'provisioning_sessions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_router_configurations_router_id_routers'), 'router_configurations', type_='foreignkey')
+    op.drop_constraint(op.f('fk_users_organization_id_organizations'), 'users', type_='foreignkey')
+    op.drop_constraint(op.f('fk_users_role_id_roles'), 'users', type_='foreignkey')
+    op.drop_constraint(op.f('fk_campaigns_created_by_user_id_users'), 'campaigns', type_='foreignkey')
+    op.drop_constraint(op.f('fk_campaigns_organization_id_organizations'), 'campaigns', type_='foreignkey')
+    op.drop_constraint(op.f('fk_configurations_organization_id_organizations'), 'configurations', type_='foreignkey')
+    op.drop_constraint(op.f('fk_earnings_records_organization_id_organizations'), 'earnings_records', type_='foreignkey')
+    op.drop_constraint(op.f('fk_expenses_added_by_user_id_users'), 'expenses', type_='foreignkey')
+    op.drop_constraint(op.f('fk_expenses_approved_by_user_id_users'), 'expenses', type_='foreignkey')
+    op.drop_constraint(op.f('fk_expenses_organization_id_organizations'), 'expenses', type_='foreignkey')
+    op.drop_constraint(op.f('fk_leads_assigned_to_user_id_users'), 'leads', type_='foreignkey')
+    op.drop_constraint(op.f('fk_leads_converted_to_user_id_users'), 'leads', type_='foreignkey')
+    op.drop_constraint(op.f('fk_leads_created_by_user_id_users'), 'leads', type_='foreignkey')
+    op.drop_constraint(op.f('fk_leads_organization_id_organizations'), 'leads', type_='foreignkey')
+    op.drop_constraint(op.f('fk_licence_alerts_acknowledged_by_users'), 'licence_alerts', type_='foreignkey')
+    op.drop_constraint(op.f('fk_licence_alerts_licence_id_licences'), 'licence_alerts', type_='foreignkey')
+    op.drop_constraint(op.f('fk_licence_payments_licence_id_licences'), 'licence_payments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_licence_usage_logs_licence_id_licences'), 'licence_usage_logs', type_='foreignkey')
+    op.drop_constraint(op.f('fk_notification_templates_created_by_users'), 'notification_templates', type_='foreignkey')
+    op.drop_constraint(op.f('fk_notification_templates_last_updated_by_users'), 'notification_templates', type_='foreignkey')
+    op.drop_constraint(op.f('fk_organization_settings_organization_id_organizations'), 'organization_settings', type_='foreignkey')
+    op.drop_constraint(op.f('fk_package_guides_created_by_users'), 'package_guides', type_='foreignkey')
+    op.drop_constraint(op.f('fk_package_guides_last_updated_by_users'), 'package_guides', type_='foreignkey')
+    op.drop_constraint(op.f('fk_package_guides_parent_guide_id_package_guides'), 'package_guides', type_='foreignkey')
+    op.drop_constraint(op.f('fk_package_templates_created_by_users'), 'package_templates', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payment_gateway_configs_organization_id_organizations'), 'payment_gateway_configs', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payout_configs_organization_id_organizations'), 'payout_configs', type_='foreignkey')
+    op.drop_constraint(op.f('fk_platform_invoices_organization_id_organizations'), 'platform_invoices', type_='foreignkey')
+    op.drop_constraint(op.f('fk_platform_invoices_tier_id_platform_subscription_tiers'), 'platform_invoices', type_='foreignkey')
+    op.drop_constraint(op.f('fk_provisioning_step_logs_session_id_provisioning_sessions'), 'provisioning_step_logs', type_='foreignkey')
+    op.drop_constraint(op.f('fk_provisioning_templates_created_by_users'), 'provisioning_templates', type_='foreignkey')
+    op.drop_constraint(op.f('fk_role_permissions_permission_id_permissions'), 'role_permissions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_role_permissions_role_id_roles'), 'role_permissions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_routers_organization_id_organizations'), 'routers', type_='foreignkey')
+    op.drop_constraint(op.f('fk_service_plans_organization_id_organizations'), 'service_plans', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_credit_accounts_created_by_users'), 'sms_credit_accounts', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_credit_accounts_organization_id_organizations'), 'sms_credit_accounts', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_gateway_configs_organization_id_organizations'), 'sms_gateway_configs', type_='foreignkey')
+    op.drop_constraint(op.f('fk_support_tickets_assigned_to_users'), 'support_tickets', type_='foreignkey')
+    op.drop_constraint(op.f('fk_support_tickets_organization_id_organizations'), 'support_tickets', type_='foreignkey')
+    op.drop_constraint(op.f('fk_support_tickets_user_id_users'), 'support_tickets', type_='foreignkey')
+    op.drop_constraint(op.f('fk_system_logs_organization_id_organizations'), 'system_logs', type_='foreignkey')
+    op.drop_constraint(op.f('fk_user_permissions_permission_id_permissions'), 'user_permissions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_user_permissions_user_id_users'), 'user_permissions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_user_sessions_user_id_users'), 'user_sessions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_user_settings_user_id_users'), 'user_settings', type_='foreignkey')
+    op.drop_constraint(op.f('fk_user_verifications_user_id_users'), 'user_verifications', type_='foreignkey')
+    op.drop_constraint(op.f('fk_whatsapp_gateway_configs_organization_id_organizations'), 'whatsapp_gateway_configs', type_='foreignkey')
+    op.drop_constraint(op.f('fk_whatsapp_organization_subscriptions_created_by_users'), 'whatsapp_organization_subscriptions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_whatsapp_organization_subscriptions_organization_id_organizations'), 'whatsapp_organization_subscriptions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_whatsapp_organization_subscriptions_package_id_whatsapp_subscription_packages'), 'whatsapp_organization_subscriptions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_emails_campaign_id_campaigns'), 'emails', type_='foreignkey')
+    op.drop_constraint(op.f('fk_emails_organization_id_organizations'), 'emails', type_='foreignkey')
+    op.drop_constraint(op.f('fk_emails_sent_by_user_id_users'), 'emails', type_='foreignkey')
+    op.drop_constraint(op.f('fk_emails_user_id_users'), 'emails', type_='foreignkey')
+    op.drop_constraint(op.f('fk_package_assignments_assigned_by_users'), 'package_assignments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_package_assignments_plan_id_service_plans'), 'package_assignments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_package_assignments_router_id_routers'), 'package_assignments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_package_assignments_template_id_package_templates'), 'package_assignments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_package_ratings_moderated_by_users'), 'package_ratings', type_='foreignkey')
+    op.drop_constraint(op.f('fk_package_ratings_template_id_package_templates'), 'package_ratings', type_='foreignkey')
+    op.drop_constraint(op.f('fk_package_ratings_user_id_users'), 'package_ratings', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payout_records_organization_id_organizations'), 'payout_records', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payout_records_payout_config_id_payout_configs'), 'payout_records', type_='foreignkey')
+    op.drop_constraint(op.f('fk_plan_features_plan_id_service_plans'), 'plan_features', type_='foreignkey')
+    op.drop_constraint(op.f('fk_plan_pricing_plan_id_service_plans'), 'plan_pricing', type_='foreignkey')
+    op.drop_constraint(op.f('fk_platform_payments_invoice_id_platform_invoices'), 'platform_payments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_platform_payments_organization_id_organizations'), 'platform_payments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_provisioning_commands_session_id_provisioning_sessions'), 'provisioning_commands', type_='foreignkey')
+    op.drop_constraint(op.f('fk_provisioning_commands_step_log_id_provisioning_step_logs'), 'provisioning_commands', type_='foreignkey')
+    op.drop_constraint(op.f('fk_router_devices_router_id_routers'), 'router_devices', type_='foreignkey')
+    op.drop_constraint(op.f('fk_router_logs_router_id_routers'), 'router_logs', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_credit_alerts_account_id_sms_credit_accounts'), 'sms_credit_alerts', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_credit_alerts_acknowledged_by_users'), 'sms_credit_alerts', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_credit_usage_stats_account_id_sms_credit_accounts'), 'sms_credit_usage_stats', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_top_ups_account_id_sms_credit_accounts'), 'sms_top_ups', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_top_ups_approved_by_users'), 'sms_top_ups', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_top_ups_requested_by_users'), 'sms_top_ups', type_='foreignkey')
+    op.drop_constraint(op.f('fk_subscriptions_created_by_users'), 'subscriptions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_subscriptions_organization_id_organizations'), 'subscriptions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_subscriptions_plan_id_service_plans'), 'subscriptions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_subscriptions_router_id_routers'), 'subscriptions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_subscriptions_user_id_users'), 'subscriptions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_ticket_messages_ticket_id_support_tickets'), 'ticket_messages', type_='foreignkey')
+    op.drop_constraint(op.f('fk_ticket_messages_user_id_users'), 'ticket_messages', type_='foreignkey')
+    op.drop_constraint(op.f('fk_voucher_batches_created_by_users'), 'voucher_batches', type_='foreignkey')
+    op.drop_constraint(op.f('fk_voucher_batches_organization_id_organizations'), 'voucher_batches', type_='foreignkey')
+    op.drop_constraint(op.f('fk_voucher_batches_plan_id_service_plans'), 'voucher_batches', type_='foreignkey')
+    op.drop_constraint(op.f('fk_voucher_codes_created_by_users'), 'voucher_codes', type_='foreignkey')
+    op.drop_constraint(op.f('fk_voucher_codes_organization_id_organizations'), 'voucher_codes', type_='foreignkey')
+    op.drop_constraint(op.f('fk_voucher_codes_plan_id_service_plans'), 'voucher_codes', type_='foreignkey')
+    op.drop_constraint(op.f('fk_voucher_codes_sold_by_users'), 'voucher_codes', type_='foreignkey')
+    op.drop_constraint(op.f('fk_voucher_codes_used_by_users'), 'voucher_codes', type_='foreignkey')
+    op.drop_constraint(op.f('fk_whatsapp_messages_notification_id_notifications'), 'whatsapp_messages', type_='foreignkey')
+    op.drop_constraint(op.f('fk_whatsapp_messages_organization_id_organizations'), 'whatsapp_messages', type_='foreignkey')
+    op.drop_constraint(op.f('fk_whatsapp_messages_subscription_id_whatsapp_organization_subscriptions'), 'whatsapp_messages', type_='foreignkey')
+    op.drop_constraint(op.f('fk_whatsapp_messages_triggered_by_users'), 'whatsapp_messages', type_='foreignkey')
+    op.drop_constraint(op.f('fk_whatsapp_messages_user_id_users'), 'whatsapp_messages', type_='foreignkey')
+    op.drop_constraint(op.f('fk_whatsapp_subscription_payments_organization_id_organizations'), 'whatsapp_subscription_payments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_whatsapp_subscription_payments_subscription_id_whatsapp_organization_subscriptions'), 'whatsapp_subscription_payments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_customer_sessions_organization_id_organizations'), 'customer_sessions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_customer_sessions_subscription_id_subscriptions'), 'customer_sessions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_customer_sessions_user_id_users'), 'customer_sessions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_invoices_organization_id_organizations'), 'invoices', type_='foreignkey')
+    op.drop_constraint(op.f('fk_invoices_subscription_id_subscriptions'), 'invoices', type_='foreignkey')
+    op.drop_constraint(op.f('fk_invoices_user_id_users'), 'invoices', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_transactions_account_id_sms_credit_accounts'), 'sms_transactions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_transactions_notification_id_notifications'), 'sms_transactions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_transactions_top_up_id_sms_top_ups'), 'sms_transactions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_sms_transactions_user_id_users'), 'sms_transactions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_subscription_history_changed_by_users'), 'subscription_history', type_='foreignkey')
+    op.drop_constraint(op.f('fk_subscription_history_subscription_id_subscriptions'), 'subscription_history', type_='foreignkey')
+    op.drop_constraint(op.f('fk_subscription_usage_logs_subscription_id_subscriptions'), 'subscription_usage_logs', type_='foreignkey')
+    op.drop_constraint(op.f('fk_invoice_items_invoice_id_invoices'), 'invoice_items', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payment_transactions_gateway_id_payment_gateway_configs'), 'payment_transactions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payment_transactions_invoice_id_invoices'), 'payment_transactions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payment_transactions_organization_id_organizations'), 'payment_transactions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payment_transactions_subscription_id_subscriptions'), 'payment_transactions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payment_transactions_user_id_users'), 'payment_transactions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payments_invoice_id_invoices'), 'payments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payments_organization_id_organizations'), 'payments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payments_recorded_by_users'), 'payments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payments_user_id_users'), 'payments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payments_verified_by_users'), 'payments', type_='foreignkey')
+    op.drop_constraint(op.f('fk_customer_purchases_organization_id_organizations'), 'customer_purchases', type_='foreignkey')
+    op.drop_constraint(op.f('fk_customer_purchases_plan_id_service_plans'), 'customer_purchases', type_='foreignkey')
+    op.drop_constraint(op.f('fk_customer_purchases_session_id_customer_sessions'), 'customer_purchases', type_='foreignkey')
+    op.drop_constraint(op.f('fk_customer_purchases_subscription_id_subscriptions'), 'customer_purchases', type_='foreignkey')
+    op.drop_constraint(op.f('fk_customer_purchases_transaction_id_payment_transactions'), 'customer_purchases', type_='foreignkey')
+    op.drop_constraint(op.f('fk_customer_purchases_user_id_users'), 'customer_purchases', type_='foreignkey')
+    op.drop_constraint(op.f('fk_customer_purchases_voucher_code_id_voucher_codes'), 'customer_purchases', type_='foreignkey')
+    op.drop_constraint(op.f('fk_manual_payment_records_gateway_id_payment_gateway_configs'), 'manual_payment_records', type_='foreignkey')
+    op.drop_constraint(op.f('fk_manual_payment_records_matched_by_users'), 'manual_payment_records', type_='foreignkey')
+    op.drop_constraint(op.f('fk_manual_payment_records_matched_transaction_id_payment_transactions'), 'manual_payment_records', type_='foreignkey')
+    op.drop_constraint(op.f('fk_manual_payment_records_organization_id_organizations'), 'manual_payment_records', type_='foreignkey')
+    op.drop_constraint(op.f('fk_manual_payment_records_recorded_by_users'), 'manual_payment_records', type_='foreignkey')
+    op.drop_constraint(op.f('fk_payment_logs_payment_id_payments'), 'payment_logs', type_='foreignkey')
+
+    # Drop deferred foreign keys to users first (if present)
+    op.drop_constraint(op.f('fk_ui_bulk_operations_user_id_users'), 'ui_bulk_operations', type_='foreignkey')
+    op.drop_constraint(op.f('fk_system_logs_user_id_users'), 'system_logs', type_='foreignkey')
+    op.drop_constraint(op.f('fk_quick_setups_created_by_users'), 'quick_setups', type_='foreignkey')
+    op.drop_constraint(op.f('fk_platform_settings_admin_user_id_users'), 'platform_settings', type_='foreignkey')
+    op.drop_constraint(op.f('fk_phone_number_management_associated_user_id_users'), 'phone_number_management', type_='foreignkey')
+    op.drop_constraint(op.f('fk_phone_number_management_blacklisted_by_users'), 'phone_number_management', type_='foreignkey')
+    op.drop_constraint(op.f('fk_notifications_user_id_users'), 'notifications', type_='foreignkey')
+    op.drop_constraint(op.f('fk_global_search_user_id_users'), 'global_search', type_='foreignkey')
+    op.drop_constraint(op.f('fk_bulk_operations_created_by_users'), 'bulk_operations', type_='foreignkey')
+    op.drop_constraint(op.f('fk_router_configurations_applied_by_users'), 'router_configurations', type_='foreignkey')
+    op.drop_constraint(op.f('fk_provisioning_sessions_user_id_users'), 'provisioning_sessions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_provisioning_sessions_previous_configuration_id_router_configurations'), 'provisioning_sessions', type_='foreignkey')
+    op.drop_constraint(op.f('fk_router_configurations_session_id_provisioning_sessions'), 'router_configurations', type_='foreignkey')
+    op.drop_constraint(op.f('fk_organizations_updated_by_users'), 'organizations', type_='foreignkey')
+    op.drop_constraint(op.f('fk_organizations_created_by_users'), 'organizations', type_='foreignkey')
+    op.drop_constraint(op.f('fk_organizations_bypass_set_by_users'), 'organizations', type_='foreignkey')
     op.drop_index(op.f('ix_payment_logs_id'), table_name='payment_logs')
     op.drop_table('payment_logs')
     op.drop_index(op.f('ix_manual_payment_records_organization_id'), table_name='manual_payment_records')
@@ -2606,4 +3053,144 @@ def downgrade() -> None:
     op.drop_table('licence_features')
     op.drop_index(op.f('ix_billing_cycles_id'), table_name='billing_cycles')
     op.drop_table('billing_cycles')
+    # ### Deferred foreign keys moved to end to avoid circular/ordering issues ###
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     # ### end Alembic commands ###
