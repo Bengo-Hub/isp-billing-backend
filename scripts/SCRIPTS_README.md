@@ -105,5 +105,13 @@ python scripts/setup_complete.py --skip-sample-data
 
 ---
 
-**Last Updated**: October 21, 2025
+### Helper tools
+
+Helper scripts (utilities) now live in `scripts/tools/`. Notable tools:
+
+- `migration_fk_fixer.py` - idempotent fixer to move inline FK constraints to deferred `op.create_foreign_key(...)` blocks in alembic migration files.
+- `drop_db.py` - safer DB drop/create helper (requires `--yes` for production operations).
+
+
+**Last Updated**: February 12, 2026
 
