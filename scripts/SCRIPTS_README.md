@@ -60,29 +60,34 @@ python scripts/create_admin.py
 
 ### Seeding Scripts
 
-All seed scripts are grouped under `scripts/seeds/` for clarity. Use `run_seeds.py` for interactive seeding or individual modules for automation.
-
-#### Interactive runner
-
-```bash
-python scripts/seeds/run_seeds.py
-```
-
-#### Programmatic / CI runner
+#### `seed_all.py`
+Seed all sample data.
 
 ```bash
-python scripts/run_prod_seed.py  # Seeds production essentials (RBAC, platform admin, tiers)
+python scripts/seed_all.py
 ```
 
-#### Individual seed modules
-
-You can also invoke individual seed modules directly (useful for testing):
+#### `seed_plans.py`
+Seed service plans.
 
 ```bash
-python scripts/seeds/seed_plans.py
-python scripts/seeds/seed_users.py
-python scripts/seeds/seed_demo_users.py
+python scripts/seed_plans.py
 ```
+
+#### `seed_users.py`
+Seed demo users.
+
+```bash
+python scripts/seed_users.py
+```
+
+#### `seed_routers.py`
+Seed sample routers.
+
+```bash
+python scripts/seed_routers.py
+```
+
 ---
 
 ## Common Use Cases
@@ -105,13 +110,5 @@ python scripts/setup_complete.py --skip-sample-data
 
 ---
 
-### Helper tools
-
-Helper scripts (utilities) now live in `scripts/tools/`. Notable tools:
-
-- `migration_fk_fixer.py` - idempotent fixer to move inline FK constraints to deferred `op.create_foreign_key(...)` blocks in alembic migration files.
-- `drop_db.py` - safer DB drop/create helper (requires `--yes` for production operations).
-
-
-**Last Updated**: February 12, 2026
+**Last Updated**: October 21, 2025
 
