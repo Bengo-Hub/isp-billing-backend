@@ -310,6 +310,8 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+# Log effective CORS origins at startup for easier debugging in production
+logger.info("Configured CORS origins: %s", cors_origins)
 
 # Include API routers using the consolidated v1 router
 from app.api.v1 import api_router
