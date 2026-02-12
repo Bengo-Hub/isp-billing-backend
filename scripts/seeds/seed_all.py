@@ -569,7 +569,17 @@ class MasterSeeder:
             }
         ]
         
+        from sqlalchemy import select
+
         for pref_data in preferences:
+            # Skip if preference already exists (idempotent)
+            existing = await db.execute(
+                select(UIPreferences).where(UIPreferences.preference_key == pref_data["preference_key"])
+            )
+            if existing.scalar_one_or_none():
+                self.logger.debug(f"UI preference exists, skipping: {pref_data['preference_key']}")
+                continue
+
             preference = UIPreferences(
                 preference_key=pref_data["preference_key"],
                 preference_name=pref_data["preference_name"],
