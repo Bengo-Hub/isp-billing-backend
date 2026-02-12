@@ -71,6 +71,28 @@ class Settings(BaseSettings):
     frontend_url: Optional[str] = None  # e.g., https://app.example.com
     force_https: bool = False  # Force HTTPS for all integration URLs
 
+    @model_validator(mode="after")
+    def derive_backend_url_from_api_base(self) -> "Settings":
+        """Backwards-compatible: if BACKEND_URL is not provided, derive it from
+        API_BASE_URL (strip any trailing /api or /api/v1). This prevents a
+        Helm/values mismatch where charts set API_BASE_URL but forget BACKEND_URL.
+        """
+        import os
+        if not self.backend_url:
+            api_base = os.getenv("API_BASE_URL") or os.getenv("NEXT_PUBLIC_API_URL")
+            if api_base:
+                # Strip known API path suffixes to get canonical service base
+                for suffix in ("/api/v1", "/api"):
+                    if api_base.endswith(suffix):
+                        api_base = api_base[: -len(suffix)]
+                        break
+                # Ensure scheme present
+                if api_base.startswith("http://") or api_base.startswith("https://"):
+                    self.backend_url = api_base
+                else:
+                    self.backend_url = f"https://{api_base}"
+        return self
+
     # CORS
     cors_origins: List[str] = [
         "http://localhost:3000",
