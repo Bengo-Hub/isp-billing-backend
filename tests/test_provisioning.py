@@ -209,6 +209,41 @@ class TestProvisioningService:
         updated_session = await provisioning_service.get_session_by_id(session.session_id)
         assert updated_session.status == ProvisioningStatus.CANCELLED
 
+    async def test_start_provisioning_consumes_pending_checkin(
+        self,
+        provisioning_service,
+        sample_router,
+        sample_user
+    ):
+        """If a device already notified the backend before session start,
+        starting the session should consume the pending_checkin and mark the
+        session as completed so the UI advances immediately."""
+        from app.services.ping_monitor import ping_monitor
+
+        # Simulate router notify prior to session creation
+        public_ip = "77.237.232.66"
+        ping_monitor.register_device_checkin(public_ip, {"identity": sample_router.name, "timestamp": "now"})
+        assert public_ip in ping_monitor.pending_checkins
+
+        # Create a provisioning session for the router
+        session = await provisioning_service.create_provisioning_session(
+            router_id=sample_router.id,
+            user_id=sample_user.id,
+            service_type=ServiceType.HOTSPOT,
+            configuration={},
+            priority=ProvisioningPriority.NORMAL
+        )
+
+        # Start provisioning - should detect and consume pending_checkin
+        started = await provisioning_service.start_provisioning(session.session_id)
+        assert started is True
+
+        # Refresh session from DB and ensure it was marked completed
+        updated = await provisioning_service.get_session_by_id(session.session_id)
+        assert updated.status == ProvisioningStatus.COMPLETED
+        assert updated.success is True
+        assert public_ip not in ping_monitor.pending_checkins
+
     async def test_generate_configuration_commands(self, provisioning_service):
         """Test generating configuration commands."""
         config = {
@@ -349,6 +384,45 @@ class TestProvisioningAPI:
         assert "total" in data
         assert "page" in data
         assert "size" in data
+
+    async def test_create_provisioning_session_only(self, client, admin_headers):
+        """Test the create-only provisioning session endpoint used by the UI.
+
+        This should create a PENDING session without starting the background
+        provisioning workflow.
+        """
+        # First create a router
+        router_data = {
+            "name": "SessionOnlyRouter",
+            "ip_address": "192.168.99.1",
+            "username": "admin",
+            "password": "password",
+            "router_type": "mikrotik",
+            "port": 8728
+        }
+        router_response = await client.post(
+            "/api/v1/routers/",
+            json=router_data,
+            headers=admin_headers
+        )
+        assert router_response.status_code == 201
+        router = router_response.json()
+
+        # Create session using create-only endpoint
+        payload = {
+            "router_id": router["id"],
+            "service_type": "hotspot",
+            "configuration": {}
+        }
+        resp = await client.post(
+            "/api/v1/provisioning/sessions",
+            json=payload,
+            headers=admin_headers
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert "session_id" in body
+        assert body["status"] == "pending"
 
     async def test_get_service_types(self, client, admin_headers):
         """Test getting available service types."""
