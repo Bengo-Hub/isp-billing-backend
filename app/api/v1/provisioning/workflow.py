@@ -45,7 +45,13 @@ async def start_provisioning_workflow(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_technician_or_admin()),
 ):
-    """Start the provisioning workflow for a MikroTik device."""
+    """Start the provisioning workflow for a MikroTik device.
+
+    NOTE: This endpoint both *creates* the provisioning session and starts the
+    background workflow. If callers only need to *create* a session without
+    starting provisioning (used by the UI to attach session_id to bootstrap
+    commands), use `POST /sessions` (create-only) implemented below.
+    """
     try:
         provisioning_service = ProvisioningService(db)
 
@@ -81,6 +87,40 @@ async def start_provisioning_workflow(
     except Exception as e:
         logger.error(f"Failed to start provisioning workflow: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start provisioning: {str(e)}")
+
+
+# Create-only session endpoint (UI uses this to obtain a session_id that can
+# be embedded into the bootstrap notify URL so router callbacks can be
+# correlated immediately).
+@router.post("/sessions", status_code=201)
+async def create_provisioning_session_only(
+    request: ProvisioningRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_technician_or_admin()),
+):
+    """Create a provisioning session in PENDING state without starting it.
+
+    The UI should call this before generating the bootstrap command so the
+    returned `session_id` can be embedded in the notify URL. Later the UI
+    calls the standard `POST /workflow` or `POST /sessions/{session_id}/retry`
+    to start the actual provisioning process.
+    """
+    try:
+        provisioning_service = ProvisioningService(db)
+        service_type = ServiceType(request.service_type)
+
+        session = await provisioning_service.create_provisioning_session(
+            router_id=request.router_id,
+            user_id=current_user.id,
+            service_type=service_type,
+            configuration=request.configuration
+        )
+
+        return {"session_id": session.session_id, "status": "pending"}
+
+    except Exception as e:
+        logger.error(f"Failed to create provisioning session: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create provisioning session")
 
 
 @router.get("/sessions/{session_id}/status", response_model=SessionStatusResponse)

@@ -220,6 +220,63 @@ class ProvisioningService:
                 self.logger.error(f"Database error while updating session {session_id}: {e}")
                 raise
 
+            # Check for any prior device check-in recorded by the ping monitor.
+            # If the router already called the backend notify (e.g. router executed
+            # the bootstrap script before the UI started the session), consume
+            # that pending checkin and mark this session as already completed so
+            # the UI advances immediately.
+            try:
+                from app.services.ping_monitor import ping_monitor
+
+                # Retrieve router details to match by IP or identity
+                router = await self.router_service.get_by_id(session.router_id)
+                consumed = False
+
+                # 1) Match by router.ip_address (public or private)
+                pending = ping_monitor.pending_checkins.get(router.ip_address)
+                if pending:
+                    del ping_monitor.pending_checkins[router.ip_address]
+                    consumed = True
+                    self.logger.info(f"Consumed pending_checkin for router {router.id} ({router.ip_address}) when starting session {session_id}")
+
+                # 2) Fallback: match by identity inside pending_checkins values
+                if not consumed:
+                    for ip, info in list(ping_monitor.pending_checkins.items()):
+                        try:
+                            if info and info.get('identity') and info.get('identity') == router.name:
+                                del ping_monitor.pending_checkins[ip]
+                                consumed = True
+                                self.logger.info(f"Consumed pending_checkin for router {router.id} by identity match ({router.name}) when starting session {session_id}")
+                                break
+                        except Exception:
+                            continue
+
+                if consumed:
+                    # Mark session as completed immediately and emit streaming events
+                    session.status = ProvisioningStatus.COMPLETED
+                    session.success = True
+                    session.completed_at = datetime.utcnow()
+                    session.progress_percentage = 100.0
+                    await self.db.commit()
+
+                    # Log completion and end streaming session so the UI receives
+                    # the usual 'provisioning_complete' websocket message.
+                    from .live_streaming import streaming_manager
+
+                    await streaming_manager.log_provisioning_step(
+                        session.session_id,
+                        "completion",
+                        "Provisioning completed (consumed prior device check-in)",
+                        "success"
+                    )
+                    await streaming_manager.end_session(session.session_id, True)
+
+                    self.logger.info(f"Provisioning session {session.session_id} marked completed due to prior device check-in")
+                    return True
+            except Exception as e:
+                # Log and continue to normal provisioning if ping_monitor inspection fails
+                self.logger.debug(f"Error while checking ping_monitor pending_checkins: {e}")
+
             # Start provisioning process in background
             asyncio.create_task(self._execute_provisioning_workflow(session))
 
