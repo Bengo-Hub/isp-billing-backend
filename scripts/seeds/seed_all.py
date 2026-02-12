@@ -492,7 +492,7 @@ class MasterSeeder:
             },
         ]
 
-        from sqlalchemy import select
+        # use module-level `select` (avoid local import which causes UnboundLocalError)
 
         for template_data in templates:
             # Skip if a template with the same name already exists (idempotent)
