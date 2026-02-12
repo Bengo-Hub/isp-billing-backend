@@ -300,14 +300,29 @@ if settings.is_production and settings.allowed_hosts:
     )
 
 # Add CORS middleware (outermost - must wrap everything so headers are always present)
+# Ensure FRONTEND_URL is always allowed when provided (deduplicate values)
 cors_origins = settings.cors_origins if settings.is_production else ["*"]
+# Normalize single-string values to a list
+if isinstance(cors_origins, str):
+    cors_origins = [cors_origins]
+
+# Add FRONTEND_URL to allowed origins when present and not already included
+if settings.frontend_url:
+    frontend_origin = settings.frontend_url.rstrip("/")
+    if frontend_origin not in cors_origins and "*" not in cors_origins:
+        cors_origins.append(frontend_origin)
+
+# Defensive: when running in non-production, allow all origins for local dev convenience
+if not settings.is_production:
+    cors_origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=settings.cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
+    expose_headers=["Authorization", "X-Request-ID", "Content-Range", "*"],
 )
 
 # Log effective CORS origins at startup for easier debugging in production
