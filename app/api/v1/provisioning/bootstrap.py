@@ -544,10 +544,20 @@ async def provisioning_notify(
 
     # Broadcast to any active provisioning session associated with this router IP
     try:
-        # Find router by IP
+        # Find router by IP (fallback to router identity when IP doesn't match)
         from app.models.router import Router
-        router_result = await db.execute(select(Router).where(Router.ip_address == client_ip))
-        router = router_result.scalar_one_or_none()
+        router = None
+        if client_ip:
+            router_result = await db.execute(select(Router).where(Router.ip_address == client_ip))
+            router = router_result.scalar_one_or_none()
+
+        # If lookup by IP failed, try to resolve by the device identity reported
+        if not router and identity:
+            try:
+                router_result = await db.execute(select(Router).where(Router.name == identity))
+                router = router_result.scalar_one_or_none()
+            except Exception:
+                router = None
 
         session_found = None
         if router:
@@ -563,6 +573,22 @@ async def provisioning_notify(
             )
             session_found = session_result.scalar_one_or_none()
 
+        # If still no session found but identity provided, try to find sessions via router.name
+        if not session_found and identity:
+            try:
+                session_result = await db.execute(
+                    select(ProvisioningSession)
+                    .join(Router, ProvisioningSession.router_id == Router.id)
+                    .where(
+                        Router.name == identity,
+                        ProvisioningSession.status.in_([ProvisioningStatus.PENDING, ProvisioningStatus.IN_PROGRESS])
+                    )
+                    .order_by(ProvisioningSession.created_at.desc())
+                    .limit(1)
+                )
+                session_found = session_result.scalar_one_or_none()
+            except Exception:
+                session_found = None
         # Inform ping monitor and live stream
         from app.api.v1.provisioning.stream import manager
         from app.services.ping_monitor import ping_monitor

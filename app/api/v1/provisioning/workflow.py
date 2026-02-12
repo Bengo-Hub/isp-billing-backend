@@ -277,15 +277,33 @@ async def list_provisioning_sessions(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_technician_or_admin()),
 ):
-    """List all provisioning sessions with optional filters."""
+    """List all provisioning sessions with optional filters.
+
+    Note: older callers pass `skip`/`limit` (offset/limit). The underlying
+    service expects a PaginationParams object — convert `skip`/`limit` to
+    page/size here for backward compatibility.
+    """
     try:
+        # Convert offset-based `skip` into page number (1-indexed)
+        page = 1
+        try:
+            if limit and limit > 0:
+                page = (int(skip) // int(limit)) + 1
+        except Exception:
+            page = 1
+
+        from app.api.deps import PaginationParams
+        pagination = PaginationParams(page=page, size=limit)
+
         provisioning_service = ProvisioningService(db)
-        sessions = await provisioning_service.get_sessions(
-            skip=skip,
-            limit=limit,
-            status=status,
-            router_id=router_id
+        result = await provisioning_service.get_sessions(
+            pagination=pagination,
+            router_id=router_id,
+            status=ProvisioningStatus[status.upper()] if status else None
         )
+
+        sessions = result.get("items", [])
+        total = result.get("total", len(sessions))
 
         return {
             "sessions": [
@@ -301,7 +319,7 @@ async def list_provisioning_sessions(
             ],
             "skip": skip,
             "limit": limit,
-            "total": len(sessions)
+            "total": total
         }
 
     except Exception as e:
