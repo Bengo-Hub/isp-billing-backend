@@ -150,9 +150,10 @@ async def get_bootstrap_command(
     request: Request,
     identity: str = Query("MikroTik"),
     api_port: int = Query(8728),
-    interface: str = Query("ether2"),
+    interface: str = Query("ether1"),
     ip_address: Optional[str] = Query(None, description="Device IP for pre-check"),
     use_encrypted_url: bool = Query(False, description="Use encrypted payload URL"),
+    session_id: Optional[str] = Query(None, description="Optional provisioning session_id to include in bootstrap callback"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_technician_or_admin()),
 ):
@@ -164,6 +165,7 @@ async def get_bootstrap_command(
     Optional features:
     - Device ping pre-check (if ip_address provided)
     - Encrypted payload URL (if use_encrypted_url=true)
+    - Optional `session_id` to let the router call back the backend once bootstrap completes
     """
     try:
         # Optional: Ping pre-check if IP address provided
@@ -174,13 +176,18 @@ async def get_bootstrap_command(
                 logger.warning(f"Device {ip_address} not responding to ping")
                 # Return warning but don't block - device might block ICMP
         
-        # Get backend URL from environment variable or use request URL
-        # This allows deployment flexibility (frontend != backend)
-        backend_url = os.getenv('BACKEND_URL')
-        
-        if backend_url:
-            base = backend_url
-            logger.info(f"Using configured BACKEND_URL: {base}")
+        # Determine canonical backend base URL.
+        # Prefer `settings.backend_url` (configured via env/Helm). Fall back to
+        # legacy BACKEND_URL env var, then to the request URL.
+        base = settings.backend_url or os.getenv('BACKEND_URL')
+
+        if base:
+            # Respect force_https setting or reverse-proxy header to avoid
+            # generating an http:// URL that will 308-redirect (RouterOS fetch
+            # doesn't follow redirects).
+            if settings.force_https or request.headers.get('x-forwarded-proto', '').lower() == 'https':
+                base = base.replace('http://', 'https://')
+            logger.info(f"Using backend base URL: {base}")
         else:
             # Fallback to request URL (development mode)
             base = f"{request.url.scheme}://{request.url.netloc}"
@@ -221,6 +228,15 @@ async def get_bootstrap_command(
         # Use proper MikroTik syntax: :delay (with colon) and /import (with forward slash)
         command = f"/tool fetch mode={fetch_mode} url=\"{script_url}\" dst-path=codevertex.rsc;:delay 2s;/import codevertex.rsc;"
 
+        # If the provisioning UI provided a session_id, append a callback from
+        # the router back to the backend so the UI gets an immediate signal that
+        # bootstrap executed (router-initiated callback works behind NAT).
+        if session_id:
+            notify_url = f"{base}/api/v1/provisioning/notify?session_id={session_id}&token={provisioning_token}&status=bootstrap_completed"
+            notify_mode = "https" if notify_url.startswith("https://") else "http"
+            # Append a lightweight fetch POST (RouterOS supports this syntax)
+            command += f" :delay 1s; /tool fetch mode={notify_mode} url=\"{notify_url}\" http-method=post;"
+
         notes = [
             "Waiting for mikrotik to come online...",
             "Please paste and execute the command in your Mikrotik terminal. The system will automatically detect when the command is executed.",
@@ -236,13 +252,18 @@ async def get_bootstrap_command(
             "notes": notes,
             "encrypted_url": use_encrypted_url
         }
-        
+
+        # Expose the notify URL in the response when session_id provided so the
+        # frontend can display/record it for debugging.
+        if session_id:
+            response_data["notify_url"] = notify_url
+
         # Add ping result if available
         if ping_result:
             response_data["ping_check"] = ping_result
             if not ping_result["reachable"]:
                 response_data["warnings"] = ["Device not responding to ping. Check network connection."]
-        
+
         return response_data
 
     except Exception as e:
@@ -267,9 +288,9 @@ async def get_bootstrap_script(
     1. Traditional: Query parameters (token, identity, api_port, interface)
     2. Encrypted: Single encrypted payload in URL path
 
-    This enables API on the specified port, sets identity, creates a dedicated API user,
-    and ensures the interface exists. The advanced configuration is later handled by
-    the provisioning workflow.
+    The script now performs a best-effort HTTPS POST back to the backend
+    notify endpoint after completion so the server can mark the device as
+    bootstrapped (useful for NAT'd devices and UI auto-advancement).
     """
     try:
         # Determine which mode to use
@@ -280,7 +301,7 @@ async def get_bootstrap_script(
                 token = payload.get("token")
                 identity = payload.get("identity", "MikroTik")
                 api_port = payload.get("api_port", 8728)
-                interface = payload.get("interface", "ether2")
+                interface = payload.get("interface", "ether1")
                 logger.info(f"Using encrypted payload for user {payload.get('user_id')}")
             except Exception as e:
                 logger.error(f"Failed to decrypt payload: {e}")
@@ -291,7 +312,7 @@ async def get_bootstrap_script(
                 raise HTTPException(status_code=400, detail="Token is required")
             identity = identity or "MikroTik"
             api_port = api_port or 8728
-            interface = interface or "ether2"
+            interface = interface or "ether1"
 
         # Verify provisioning token using the security module
         from app.core.security import verify_token
@@ -468,11 +489,210 @@ async def get_bootstrap_script(
             f":log info \"[BOOTSTRAP] ========================================\"",
         ])
 
+        # Notify backend that bootstrap completed (router -> backend)
+        # Use the provisioning token passed in the URL (required). The backend
+        # will verify the token and associate the check-in with a provisioning
+        # session or record the check-in for later consumption.
+        try:
+            notify_url = f"{settings.backend_url or (request.url.scheme + '://' + request.url.netloc)}/api/v1/provisioning/bootstrap/notify?token={token}&identity={identity}"
+            lines.append(":put \"Notifying backend of bootstrap completion...\"")
+            lines.append(f"/tool fetch mode=https url=\"{notify_url}\" http-method=post dst-path=notify.result; :put \"[OK] Notified backend (notify.result)\"; :log info \"[BOOTSTRAP] Notified backend of bootstrap completion\"")
+        except Exception:
+            # Best effort - don't fail script generation if notify_url cannot be built
+            lines.append(":put \"[WARN] Could not append backend notify call to bootstrap script\"")
+
         return "\n".join(lines) + "\n"
 
     except Exception as e:
         logger.error(f"Failed to generate bootstrap script: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate bootstrap script")
+
+
+@router.post('/notify')
+async def provisioning_notify(
+    request: Request,
+    token: Optional[str] = Query(None),
+    identity: Optional[str] = Query(None),
+    ip_address: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Endpoint called by devices after bootstrap to notify backend.
+
+    Query params:
+    - token: provisioning access token (required)
+    - identity: optional router identity (used for logging)
+    - ip_address: optional router-reported IP (falls back to request.client.host)
+
+    Behavior:
+    - verify token
+    - attempt to correlate to an existing provisioning session for the same router IP
+    - if found, broadcast `provisioning_complete` via websocket and update ping_monitor
+    - otherwise record a one-time pending check-in so a future session will see it
+    """
+    if not token:
+        raise HTTPException(status_code=400, detail='token is required')
+
+    from app.core.security import verify_token
+    try:
+        token_data = verify_token(token, token_type='access')
+    except Exception as e:
+        logger.warning(f'Provisioning notify token verification failed: {e}')
+        raise HTTPException(status_code=401, detail='invalid token')
+
+    # Resolve IP
+    client_ip = ip_address or (request.client.host if request.client else None)
+
+    # Broadcast to any active provisioning session associated with this router IP
+    try:
+        # Find router by IP
+        from app.models.router import Router
+        router_result = await db.execute(select(Router).where(Router.ip_address == client_ip))
+        router = router_result.scalar_one_or_none()
+
+        session_found = None
+        if router:
+            from app.models.provisioning import ProvisioningSession, ProvisioningStatus
+            session_result = await db.execute(
+                select(ProvisioningSession)
+                .where(
+                    ProvisioningSession.router_id == router.id,
+                    ProvisioningSession.status.in_([ProvisioningStatus.PENDING, ProvisioningStatus.IN_PROGRESS])
+                )
+                .order_by(ProvisioningSession.created_at.desc())
+                .limit(1)
+            )
+            session_found = session_result.scalar_one_or_none()
+
+        # Inform ping monitor and live stream
+        from app.api.v1.provisioning.stream import manager
+        from app.services.ping_monitor import ping_monitor
+
+        if session_found:
+            sid = session_found.session_id
+            # Mark ping_monitor result for this session so UI can advance
+            ping_monitor.monitor_results[sid] = {
+                'attempt': 0,
+                'ping_verified': True,
+                'api_verified': True,
+                'ip_address': client_ip,
+                'method': 'device-notify',
+                'timestamp': datetime.utcnow().isoformat()
+            }
+
+            # Stop any active monitoring for this session (if running)
+            try:
+                if ping_monitor.is_monitoring(sid):
+                    await ping_monitor.stop_monitoring(sid)
+            except Exception:
+                logger.debug('Failed to stop ping monitor after notify')
+
+            # Broadcast websocket message to UI
+            await manager.send_message(sid, {
+                'type': 'provisioning_complete',
+                'session_id': sid,
+                'data': {
+                    'message': 'Device reported bootstrap completion',
+                    'ip_address': client_ip,
+                    'identity': identity
+                }
+            })
+
+            logger.info(f'Provisioning notify: associated with session {sid} (router {router.id})')
+            return {'status': 'ok', 'session_id': sid}
+
+        # No active session found: record a pending check-in for the IP so
+        # future provisioning sessions will treat the device as already bootstrapped.
+        ping_monitor.register_device_checkin(client_ip, {'identity': identity, 'token_sub': getattr(token_data, 'sub', None), 'timestamp': datetime.utcnow().isoformat()})
+
+        logger.info(f'Provisioning notify: recorded pending check-in for IP {client_ip}')
+        return {'status': 'ok', 'session_id': None, 'note': 'pending_checkin_recorded'}
+
+    except Exception as e:
+        logger.error(f'Error handling provisioning notify: {e}')
+        raise HTTPException(status_code=500, detail='Failed to handle notify')
+
+
+@router.post('/notify')
+async def provisioning_notify(
+    session_id: Optional[str] = Query(None, description="Provisioning session UUID"),
+    token: Optional[str] = Query(None, description="Provisioning token (required)"),
+    status: str = Query('bootstrap_completed'),
+    db: AsyncSession = Depends(get_db),
+):
+    """Callback endpoint for routers to notify backend when bootstrap completes.
+
+    - Verifies provisioning token
+    - Marks provisioning session completed/successful when session_id provided
+    - Broadcasts `provisioning_complete` over the provisioning websocket
+    - Stops any active ping monitoring for the session
+
+    This endpoint is intentionally lightweight and token-protected because it
+    will be called directly from customer routers during first-touch.
+    """
+    if not token:
+        raise HTTPException(status_code=400, detail="Token is required")
+
+    # Verify token and ensure it was minted for provisioning
+    from app.core.security import verify_token
+    try:
+        token_data = verify_token(token, token_type='access')
+    except Exception as e:
+        logger.warning(f"Provisioning notify: token verification failed: {e}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    if not token_data or getattr(token_data, 'type', None) != 'provisioning':
+        logger.warning("Provisioning notify: token is not a provisioning token")
+        raise HTTPException(status_code=403, detail="Token not authorized for provisioning notifications")
+
+    # Broadcast websocket message and update provisioning session if provided
+    try:
+        from app.api.v1.provisioning.stream import manager
+        from app.models.provisioning import ProvisioningStatus
+
+        if session_id:
+            # Update ProvisioningSession if exists
+            result = await db.execute(select(ProvisioningSession).where(ProvisioningSession.session_id == session_id))
+            session = result.scalar_one_or_none()
+            if session:
+                session.status = ProvisioningStatus.COMPLETED
+                session.success = True if status == 'bootstrap_completed' else False
+                session.completed_at = datetime.utcnow()
+                session.progress_percentage = 100.0
+                await db.commit()
+                logger.info(f"Provisioning notify: marked session {session_id} as completed (status={status})")
+
+        # Update ping monitor internal state and stop monitoring if active
+        try:
+            ping_monitor.monitor_results[session_id] = {
+                "ping_verified": True,
+                "api_verified": True,
+                "timestamp": datetime.utcnow().isoformat(),
+                "status": status,
+                "session_id": session_id,
+            }
+            # best-effort stop
+            await ping_monitor.stop_monitoring(session_id)
+        except Exception:
+            # non-fatal
+            logger.debug(f"Provisioning notify: ping_monitor update/stop failed for {session_id}")
+
+        # Broadcast provisioning_complete for any connected UI clients
+        if session_id:
+            await manager.send_message(session_id, {
+                "type": "provisioning_complete",
+                "session_id": session_id,
+                "data": {
+                    "message": "Bootstrap completed on device",
+                    "status": status,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            })
+
+        return {"success": True, "session_id": session_id, "status": status}
+
+    except Exception as e:
+        logger.error(f"Provisioning notify failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process provisioning notify")
 
 
 @router.get("/complete", response_class=PlainTextResponse)

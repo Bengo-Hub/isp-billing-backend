@@ -16,11 +16,19 @@ logger = logging.getLogger(__name__)
 
 
 class PingMonitor:
-    """Monitors device connectivity via ICMP ping and API port check."""
+    """Monitors device connectivity via ICMP ping and API port check.
+
+    Also keeps a small in-memory register of device check-ins reported by
+    devices (router->backend notify) so provisioning sessions started after
+    a bootstrap can immediately observe that the device already reported
+    itself online.
+    """
 
     def __init__(self):
         self.active_monitors: Dict[str, asyncio.Task] = {}
         self.monitor_results: Dict[str, Dict[str, Any]] = {}
+        # Pending device check-ins keyed by ip_address
+        self.pending_checkins: Dict[str, Dict[str, Any]] = {}
 
     async def start_monitoring(
         self,
@@ -37,6 +45,10 @@ class PingMonitor:
         Stage 1: ICMP Ping - Verify device is reachable on network
         Stage 2: API Port Check - Verify API port is open (bootstrap executed)
 
+        If a device previously called the backend notify endpoint (router ->
+        backend), that check-in will be recorded in `pending_checkins` and we
+        treat the device as already reachable.
+
         Args:
             session_id: Provisioning session identifier
             ip_address: Target device IP address
@@ -48,6 +60,24 @@ class PingMonitor:
         if session_id in self.active_monitors:
             logger.warning(f"Monitor already running for session {session_id}")
             return
+
+        # If device already checked in via router->backend notify, mark as ready
+        pending = self.pending_checkins.get(ip_address)
+        if pending:
+            self.monitor_results[session_id] = {
+                "attempt": 0,
+                "ping_verified": True,
+                "api_verified": True,
+                "ip_address": ip_address,
+                "method": "device-checkin",
+                "note": "Device previously reported bootstrap completion",
+                "timestamp": pending.get("timestamp")
+            }
+            # Remove one-time pending checkin (consumed)
+            del self.pending_checkins[ip_address]
+            logger.info(f"Session {session_id}: Found prior device checkin for {ip_address}; marking as ready")
+            return
+
 
         # Create monitoring task
         task = asyncio.create_task(
@@ -110,6 +140,16 @@ class PingMonitor:
             logger.debug(f"API port check error for {ip_address}:{port}: {e}")
             return {"open": False, "latency_ms": None, "port": port, "error": str(e)}
 
+    # ---- Device check-in API (router -> backend) --------------------------------
+    def register_device_checkin(self, ip_address: str, info: Optional[Dict[str, Any]] = None) -> None:
+        """Record a one-time device check-in (called by provisioning notify).
+
+        This lets future provisioning sessions detect that the router already
+        executed the bootstrap and avoid waiting for ICMP/TCP checks.
+        """
+        self.pending_checkins[ip_address] = info or {"timestamp": datetime.now(timezone.utc).isoformat()}
+        logger.info(f"Registered device checkin for {ip_address}: {self.pending_checkins[ip_address]}")
+
     async def _monitor_loop(
         self,
         session_id: str,
@@ -134,6 +174,39 @@ class PingMonitor:
         consecutive_api_successes = 0
 
         try:
+            # If the target IP is a private / RFC1918 address, the cloud-hosted
+            # backend cannot reliably reach it. Inform the frontend and stop
+            # monitoring early so the UI can show actionable guidance instead
+            # of repeatedly retrying.
+            try:
+                import ipaddress
+                ip_obj = ipaddress.ip_address(ip_address)
+                if ip_obj.is_private:
+                    # Send a clear message to the frontend explaining why checks will fail
+                    await manager.send_message(session_id, {
+                        "type": "ping_error",
+                        "session_id": session_id,
+                        "data": {
+                            "message": "Device IP appears to be on a private LAN (RFC1918). Backend cannot reach private addresses from the cloud. Use local provisioning or ensure device is reachable from the control plane.",
+                            "ip_address": ip_address,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    })
+                    logger.warning(f"Session {session_id}: Target IP {ip_address} is private; aborting server-side monitoring")
+                    # Record the result so UI can display it
+                    self.monitor_results[session_id] = {
+                        "attempt": 0,
+                        "ping_verified": False,
+                        "api_verified": False,
+                        "ip_address": ip_address,
+                        "error": "private_address",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                    return
+            except Exception:
+                # If IP parsing fails, continue with monitoring and let checks fail normally
+                pass
+
             while True:  # Continue indefinitely with retry cycles
                 cycle_attempts = 0
 
