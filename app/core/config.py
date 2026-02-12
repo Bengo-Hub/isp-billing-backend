@@ -85,6 +85,37 @@ class Settings(BaseSettings):
     # Trusted hosts (comma-separated for production)
     allowed_hosts: Optional[str] = None  # e.g., "api.example.com,*.example.com"
 
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
+        """Parse CORS origins from string or list.
+
+        Previously returned JSON-like strings unchanged which caused the value to
+        remain a raw string in some environments. Accept both CSV *and* JSON
+        array strings and normalize to a Python list of origins.
+        """
+        # Accept CSV string (e.g. "https://a.com,https://b.com")
+        if isinstance(v, str) and not v.startswith("["):
+            return [i.strip() for i in v.split(",")]
+
+        # If value is a JSON array string (eg. '["https://a.com"]'), parse it
+        if isinstance(v, str) and v.startswith("["):
+            import json
+
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception:
+                # Fall through and return the original string so Pydantic can
+                # attempt coercion (backwards compatible)
+                return v
+
+        # Already a list or other accepted shape — return as-is
+        elif isinstance(v, (list, str)):
+            return v
+        raise ValueError(v)
+
     # MPESA
     mpesa_environment: str = "sandbox"
     mpesa_consumer_key: str
