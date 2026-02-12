@@ -492,7 +492,17 @@ class MasterSeeder:
             },
         ]
 
+        from sqlalchemy import select
+
         for template_data in templates:
+            # Skip if a template with the same name already exists (idempotent)
+            existing = await db.execute(
+                select(NotificationTemplate).where(NotificationTemplate.name == template_data["name"])
+            )
+            if existing.scalar_one_or_none():
+                self.logger.debug(f"Notification template exists, skipping: {template_data['name']}")
+                continue
+
             template = NotificationTemplate(
                 name=template_data["name"],
                 notification_type=template_data["notification_type"],

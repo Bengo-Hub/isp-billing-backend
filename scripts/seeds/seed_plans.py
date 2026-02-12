@@ -49,6 +49,32 @@ class PlanSeeder:
 
     async def seed_plans(self, count: int = 20, clear_existing: bool = False, demo_mode: bool = False) -> List[ServicePlan]:
         """Seed service plans with realistic ISP packages."""
+        # Ensure billingcycle enum contains required values before inserting plans
+        try:
+            # Try importing the helper used elsewhere in the project
+            from scripts.tools.ensure_billingcycle_values import ensure_billingcycle_values
+        except Exception:
+            try:
+                # Fallback to module path used by seed_all.py dynamic loader
+                import importlib.util
+                from pathlib import Path
+                tools_path = Path(__file__).parent.parent / 'tools' / 'ensure_billingcycle_values.py'
+                if tools_path.exists():
+                    spec = importlib.util.spec_from_file_location('ensure_billingcycle_values', str(tools_path))
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    ensure_billingcycle_values = getattr(mod, 'ensure_billingcycle_values')
+                else:
+                    ensure_billingcycle_values = None
+            except Exception:
+                ensure_billingcycle_values = None
+
+        if ensure_billingcycle_values:
+            try:
+                await ensure_billingcycle_values()
+            except Exception:
+                self.logger.exception("ensure_billingcycle_values failed, continuing")
+
         if clear_existing:
             await self._clear_plans()
             if count == 0:
@@ -792,7 +818,17 @@ class PlanSeeder:
             raise RuntimeError("No users found in database. Seed users before package templates.")
         admin_id = admin_user.id
         
+        from sqlalchemy import select
+
         for template_data in template_data:
+            # Skip if a template with same template_code exists (idempotent)
+            existing = await self.db.execute(
+                select(PackageTemplate).where(PackageTemplate.template_code == template_data["template_code"])
+            )
+            if existing.scalar_one_or_none():
+                self.logger.debug(f"PackageTemplate exists, skipping: {template_data['template_code']}")
+                continue
+
             template = PackageTemplate(
                 name=template_data["name"],
                 description=template_data["description"],
@@ -923,7 +959,17 @@ class PlanSeeder:
             }
         ]
         
+        from sqlalchemy import select
+
         for config_data in category_configs:
+            # Skip if category already exists (idempotent)
+            existing = await self.db.execute(
+                select(PackageCategoryConfig).where(PackageCategoryConfig.category == config_data["category"])
+            )
+            if existing.scalar_one_or_none():
+                self.logger.debug(f"PackageCategoryConfig exists, skipping: {config_data['category']}")
+                continue
+
             config = PackageCategoryConfig(
                 category=config_data["category"],
                 display_name=config_data["display_name"],
