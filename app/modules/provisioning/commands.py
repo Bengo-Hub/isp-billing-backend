@@ -203,6 +203,38 @@ def generate_configuration_commands(
         }
     )
 
+    # =========================================================================
+    # CLEAN UP DEFAULT BRIDGE (prevent port conflicts)
+    # =========================================================================
+    # MikroTik routers ship with a default 'bridge' that binds all ethernet
+    # ports. If those ports remain in the default bridge, they won't work
+    # properly in our codevertex-bridge (a port can only be in one bridge).
+    # We remove ports from the default bridge and disable its DHCP server.
+    commands.append(
+        {
+            "type": "api_call",
+            "command": ":foreach i in=[/interface/bridge/port/find where bridge=bridge] do={ /interface/bridge/port/remove $i }",
+            "description": "Removing ports from default bridge to prevent conflicts",
+            "critical": False,
+        }
+    )
+    commands.append(
+        {
+            "type": "api_call",
+            "command": ":foreach i in=[/ip/dhcp-server/find where interface=bridge] do={ /ip/dhcp-server/disable $i }",
+            "description": "Disabling default DHCP server on default bridge",
+            "critical": False,
+        }
+    )
+    commands.append(
+        {
+            "type": "api_call",
+            "command": ":do { /interface/bridge/set [find name=bridge] disabled=yes } on-error={}",
+            "description": "Disabling default bridge interface",
+            "critical": False,
+        }
+    )
+
     # Bridge configuration - required for all service types
     commands.append(
         {
@@ -496,6 +528,19 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
         }
     )
 
+    # CRITICAL: Bypass the gateway IP from hotspot authentication
+    # Without this, the router's own management traffic goes through the
+    # hotspot, causing connectivity issues and preventing proper HTTP
+    # interception for captive portal detection.
+    commands.append(
+        {
+            "type": "api_call",
+            "command": f"/ip/hotspot/ip-binding/add address={gateway} type=bypassed comment=codevertex-gateway-bypass",
+            "description": f"Bypassing gateway {gateway} from hotspot authentication",
+            "critical": False,
+        }
+    )
+
     # CRITICAL: Configure walled garden for external captive portal
     # Walled garden allows unauthenticated access to specific hosts/IPs
     # This is required so users can reach the captive portal before authentication
@@ -625,6 +670,55 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
             "type": "api_call",
             "command": f"/ip/firewall/nat/add chain=dstnat action=redirect to-ports=53 protocol=tcp dst-port=53 in-interface={bridge_name} comment=codevertex-dns-redirect",
             "description": "DNS redirect NAT rule (TCP) to force DNS through router",
+            "critical": False,
+        }
+    )
+
+    # =========================================================================
+    # BLOCK DNS-OVER-HTTPS (DoH) FOR UNAUTHENTICATED HOTSPOT USERS
+    # =========================================================================
+    # Modern browsers (Chrome, Firefox, Edge) and Windows 11 use DNS-over-HTTPS
+    # by default, sending DNS queries over port 443 to providers like Google
+    # (8.8.8.8), Cloudflare (1.1.1.1), etc. This completely bypasses our DNS
+    # redirect NAT rules (which only capture port 53), meaning captive portal
+    # detection domains resolve normally and the device never shows the
+    # "Sign in to network" popup.
+    #
+    # Solution: Block HTTPS traffic to known DoH providers on the bridge
+    # interface. This forces browsers to fall back to regular DNS (port 53),
+    # which gets redirected to the router and serves our static entries.
+    # The MikroTik hotspot will remove these blocks once the user authenticates
+    # because authenticated traffic bypasses the hotspot firewall rules.
+    # =========================================================================
+    doh_providers = [
+        ("8.8.8.8", "google-dns-1"),
+        ("8.8.4.4", "google-dns-2"),
+        ("1.1.1.1", "cloudflare-dns-1"),
+        ("1.0.0.1", "cloudflare-dns-2"),
+        ("9.9.9.9", "quad9-dns"),
+        ("149.112.112.112", "quad9-dns-2"),
+        ("208.67.222.222", "opendns-1"),
+        ("208.67.220.220", "opendns-2"),
+    ]
+    for ip, comment in doh_providers:
+        commands.append(
+            {
+                "type": "api_call",
+                "command": f"/ip/firewall/address-list/add list=codevertex-doh-providers address={ip} comment={comment}",
+                "description": f"Adding DoH provider {ip} ({comment}) to address list",
+                "critical": False,
+            }
+        )
+
+    # Block port 443 to DoH providers on the bridge interface.
+    # The hotspot's built-in firewall already blocks unauthenticated traffic,
+    # but this explicit rule ensures DoH is blocked even if hotspot walled
+    # garden rules accidentally allow HTTPS to these IPs.
+    commands.append(
+        {
+            "type": "api_call",
+            "command": f"/ip/firewall/filter/add chain=forward action=reject reject-with=icmp-network-unreachable dst-address-list=codevertex-doh-providers protocol=tcp dst-port=443 in-interface={bridge_name} comment=codevertex-block-doh",
+            "description": "Blocking DNS-over-HTTPS to prevent captive portal bypass",
             "critical": False,
         }
     )
