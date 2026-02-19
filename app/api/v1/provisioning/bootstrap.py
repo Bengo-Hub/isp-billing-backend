@@ -221,6 +221,9 @@ async def get_bootstrap_command(
         else:
             # Traditional query parameter approach
             script_url = f"{base}/api/v1/provisioning/bootstrap/script?token={provisioning_token}&identity={identity}&api_port={api_port}&interface={interface}"
+            # Pass session_id into the script URL so the script's notify callback can include it
+            if session_id:
+                script_url += f"&session_id={session_id}"
 
         # Detect URL scheme and set mode to match (RouterOS 7.16+ requires consistency)
         fetch_mode = "https" if script_url.startswith("https://") else "http"
@@ -232,7 +235,7 @@ async def get_bootstrap_command(
         # the router back to the backend so the UI gets an immediate signal that
         # bootstrap executed (router-initiated callback works behind NAT).
         if session_id:
-            notify_url = f"{base}/api/v1/provisioning/notify?session_id={session_id}&token={provisioning_token}&status=bootstrap_completed"
+            notify_url = f"{base}/api/v1/provisioning/bootstrap/notify?session_id={session_id}&token={provisioning_token}&status=bootstrap_completed"
             notify_mode = "https" if notify_url.startswith("https://") else "http"
             # Append a lightweight fetch POST (RouterOS supports this syntax)
             command += f" :delay 1s; /tool fetch mode={notify_mode} url=\"{notify_url}\" http-method=post;"
@@ -280,6 +283,7 @@ async def get_bootstrap_script(
     identity: Optional[str] = Query(None),
     api_port: Optional[int] = Query(None),
     interface: Optional[str] = Query(None),
+    session_id: Optional[str] = Query(None, description="Provisioning session ID for notify callback"),
     db: AsyncSession = Depends(get_db),
 ):
     """Return a minimal RouterOS script for first-touch provisioning with token verification.
@@ -494,9 +498,15 @@ async def get_bootstrap_script(
         # will verify the token and associate the check-in with a provisioning
         # session or record the check-in for later consumption.
         try:
-            notify_url = f"{settings.backend_url or (request.url.scheme + '://' + request.url.netloc)}/api/v1/provisioning/bootstrap/notify?token={token}&identity={identity}"
+            base_notify = settings.backend_url or (request.url.scheme + '://' + request.url.netloc)
+            notify_url = f"{base_notify}/api/v1/provisioning/bootstrap/notify?token={token}&identity={identity}"
+            # Include session_id in the notify callback so the backend can correlate
+            # with the WebSocket session and broadcast stage_complete/device_online
+            if session_id:
+                notify_url += f"&session_id={session_id}"
+            notify_mode = "https" if notify_url.startswith("https://") else "http"
             lines.append(":put \"Notifying backend of bootstrap completion...\"")
-            lines.append(f"/tool fetch mode=https url=\"{notify_url}\" http-method=post dst-path=notify.result; :put \"[OK] Notified backend (notify.result)\"; :log info \"[BOOTSTRAP] Notified backend of bootstrap completion\"")
+            lines.append(f"/tool fetch mode={notify_mode} url=\"{notify_url}\" http-method=post dst-path=notify.result; :put \"[OK] Notified backend (notify.result)\"; :log info \"[BOOTSTRAP] Notified backend of bootstrap completion\"")
         except Exception:
             # Best effort - don't fail script generation if notify_url cannot be built
             lines.append(":put \"[WARN] Could not append backend notify call to bootstrap script\"")
@@ -511,214 +521,157 @@ async def get_bootstrap_script(
 @router.post('/notify')
 async def provisioning_notify(
     request: Request,
-    token: Optional[str] = Query(None),
-    identity: Optional[str] = Query(None),
-    ip_address: Optional[str] = Query(None),
+    session_id: Optional[str] = Query(None, description="Provisioning session UUID (from ping monitoring)"),
+    token: Optional[str] = Query(None, description="Provisioning token (required)"),
+    status: str = Query('bootstrap_completed'),
+    identity: Optional[str] = Query(None, description="Router identity reported by device"),
+    ip_address: Optional[str] = Query(None, description="Router IP (falls back to request.client.host)"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Endpoint called by devices after bootstrap to notify backend.
+    """Unified callback endpoint for routers to notify backend when bootstrap completes.
 
-    Query params:
-    - token: provisioning access token (required)
-    - identity: optional router identity (used for logging)
-    - ip_address: optional router-reported IP (falls back to request.client.host)
+    Called by the router after executing the bootstrap script. This endpoint:
+    1. Verifies the provisioning token
+    2. Resolves the target WebSocket session (by session_id, or by IP/identity lookup)
+    3. Broadcasts stage_complete + device_online messages so the frontend Step 2
+       verification advances (NOT provisioning_complete, which is for Step 3)
+    4. Updates ping_monitor state and stops active monitoring
+    5. Records a pending check-in if no active session is found
 
-    Behavior:
-    - verify token
-    - attempt to correlate to an existing provisioning session for the same router IP
-    - if found, broadcast `provisioning_complete` via websocket and update ping_monitor
-    - otherwise record a one-time pending check-in so a future session will see it
+    This works for both cloud deployments (where the backend can't ping the router)
+    and local deployments (where ping monitoring may already be running).
     """
     if not token:
-        raise HTTPException(status_code=400, detail='token is required')
+        raise HTTPException(status_code=400, detail='Token is required')
 
     from app.core.security import verify_token
     try:
         token_data = verify_token(token, token_type='access')
     except Exception as e:
-        logger.warning(f'Provisioning notify token verification failed: {e}')
-        raise HTTPException(status_code=401, detail='invalid token')
+        logger.warning(f'Provisioning notify: token verification failed: {e}')
+        raise HTTPException(status_code=401, detail='Invalid token')
 
-    # Resolve IP
+    # Resolve client IP
     client_ip = ip_address or (request.client.host if request.client else None)
 
-    # Broadcast to any active provisioning session associated with this router IP
     try:
-        # Find router by IP (fallback to router identity when IP doesn't match)
-        from app.models.router import Router
-        router = None
-        if client_ip:
-            router_result = await db.execute(select(Router).where(Router.ip_address == client_ip))
-            router = router_result.scalar_one_or_none()
+        from app.api.v1.provisioning.stream import manager
+        from app.services.ping_monitor import ping_monitor
 
-        # If lookup by IP failed, try to resolve by the device identity reported
-        if not router and identity:
-            try:
-                router_result = await db.execute(select(Router).where(Router.name == identity))
-                router = router_result.scalar_one_or_none()
-            except Exception:
-                router = None
+        # Determine which WebSocket session to broadcast to.
+        # Priority: explicit session_id > DB session lookup by IP/identity
+        target_sid = session_id
 
-        session_found = None
-        if router:
-            from app.models.provisioning import ProvisioningSession, ProvisioningStatus
-            session_result = await db.execute(
-                select(ProvisioningSession)
-                .where(
-                    ProvisioningSession.router_id == router.id,
-                    ProvisioningSession.status.in_([ProvisioningStatus.PENDING, ProvisioningStatus.IN_PROGRESS])
-                )
-                .order_by(ProvisioningSession.created_at.desc())
-                .limit(1)
-            )
-            session_found = session_result.scalar_one_or_none()
+        # If no session_id provided (or it's a temp ping-* ID with no DB record),
+        # try to find a matching ProvisioningSession via router IP or identity
+        if not target_sid:
+            from app.models.router import Router as RouterModel
+            found_router = None
 
-        # If still no session found but identity provided, try to find sessions via router.name
-        if not session_found and identity:
-            try:
+            if client_ip:
+                router_result = await db.execute(select(RouterModel).where(RouterModel.ip_address == client_ip))
+                found_router = router_result.scalar_one_or_none()
+
+            if not found_router and identity:
+                try:
+                    router_result = await db.execute(select(RouterModel).where(RouterModel.name == identity))
+                    found_router = router_result.scalar_one_or_none()
+                except Exception:
+                    found_router = None
+
+            if found_router:
+                from app.models.provisioning import ProvisioningStatus
                 session_result = await db.execute(
                     select(ProvisioningSession)
-                    .join(Router, ProvisioningSession.router_id == Router.id)
                     .where(
-                        Router.name == identity,
+                        ProvisioningSession.router_id == found_router.id,
                         ProvisioningSession.status.in_([ProvisioningStatus.PENDING, ProvisioningStatus.IN_PROGRESS])
                     )
                     .order_by(ProvisioningSession.created_at.desc())
                     .limit(1)
                 )
                 session_found = session_result.scalar_one_or_none()
-            except Exception:
-                session_found = None
-        # Inform ping monitor and live stream
-        from app.api.v1.provisioning.stream import manager
-        from app.services.ping_monitor import ping_monitor
+                if session_found:
+                    target_sid = session_found.session_id
 
-        if session_found:
-            sid = session_found.session_id
-            # Mark ping_monitor result for this session so UI can advance
-            ping_monitor.monitor_results[sid] = {
+        if target_sid:
+            # Update ping_monitor state so it knows the device is online
+            ping_monitor.monitor_results[target_sid] = {
                 'attempt': 0,
                 'ping_verified': True,
                 'api_verified': True,
                 'ip_address': client_ip,
                 'method': 'device-notify',
+                'status': status,
                 'timestamp': datetime.utcnow().isoformat()
             }
 
-            # Stop any active monitoring for this session (if running)
+            # Stop any active ping monitoring for this session
             try:
-                if ping_monitor.is_monitoring(sid):
-                    await ping_monitor.stop_monitoring(sid)
+                if ping_monitor.is_monitoring(target_sid):
+                    await ping_monitor.stop_monitoring(target_sid)
             except Exception:
-                logger.debug('Failed to stop ping monitor after notify')
+                logger.debug(f'Provisioning notify: ping_monitor stop failed for {target_sid}')
 
-            # Broadcast websocket message to UI
-            await manager.send_message(sid, {
-                'type': 'provisioning_complete',
-                'session_id': sid,
+            # Broadcast Step 2-compatible messages so the frontend verification
+            # stages advance. The frontend expects stage_complete for stages 1
+            # and 2, then device_online to enable the Continue button.
+            now_iso = datetime.utcnow().isoformat()
+
+            # Stage 1: Network reachability confirmed (device called us)
+            await manager.send_message(target_sid, {
+                'type': 'stage_complete',
+                'session_id': target_sid,
                 'data': {
-                    'message': 'Device reported bootstrap completion',
-                    'ip_address': client_ip,
-                    'identity': identity
+                    'stage': 1,
+                    'stage_name': 'Network',
+                    'message': 'Device reachable (bootstrap callback received)',
+                    'timestamp': now_iso,
                 }
             })
 
-            logger.info(f'Provisioning notify: associated with session {sid} (router {router.id})')
-            return {'status': 'ok', 'session_id': sid}
+            # Stage 2: API port confirmed (bootstrap enables API before calling notify)
+            await manager.send_message(target_sid, {
+                'type': 'stage_complete',
+                'session_id': target_sid,
+                'data': {
+                    'stage': 2,
+                    'stage_name': 'API',
+                    'message': 'API service enabled (bootstrap confirmed)',
+                    'timestamp': now_iso,
+                }
+            })
+
+            # Device online: triggers the full verification in DeviceDetailsStep
+            await manager.send_message(target_sid, {
+                'type': 'device_online',
+                'session_id': target_sid,
+                'data': {
+                    'message': 'Device connected and API enabled - ready for configuration',
+                    'ip_address': client_ip,
+                    'identity': identity,
+                    'timestamp': now_iso,
+                }
+            })
+
+            logger.info(f'Provisioning notify: broadcast stage_complete + device_online to session {target_sid}')
+            return {'success': True, 'session_id': target_sid, 'status': status}
 
         # No active session found: record a pending check-in for the IP so
         # future provisioning sessions will treat the device as already bootstrapped.
-        ping_monitor.register_device_checkin(client_ip, {'identity': identity, 'token_sub': getattr(token_data, 'sub', None), 'timestamp': datetime.utcnow().isoformat()})
-
-        logger.info(f'Provisioning notify: recorded pending check-in for IP {client_ip}')
-        return {'status': 'ok', 'session_id': None, 'note': 'pending_checkin_recorded'}
-
-    except Exception as e:
-        logger.error(f'Error handling provisioning notify: {e}')
-        raise HTTPException(status_code=500, detail='Failed to handle notify')
-
-
-@router.post('/notify')
-async def provisioning_notify(
-    session_id: Optional[str] = Query(None, description="Provisioning session UUID"),
-    token: Optional[str] = Query(None, description="Provisioning token (required)"),
-    status: str = Query('bootstrap_completed'),
-    db: AsyncSession = Depends(get_db),
-):
-    """Callback endpoint for routers to notify backend when bootstrap completes.
-
-    - Verifies provisioning token
-    - Marks provisioning session completed/successful when session_id provided
-    - Broadcasts `provisioning_complete` over the provisioning websocket
-    - Stops any active ping monitoring for the session
-
-    This endpoint is intentionally lightweight and token-protected because it
-    will be called directly from customer routers during first-touch.
-    """
-    if not token:
-        raise HTTPException(status_code=400, detail="Token is required")
-
-    # Verify token and ensure it was minted for provisioning
-    from app.core.security import verify_token
-    try:
-        token_data = verify_token(token, token_type='access')
-    except Exception as e:
-        logger.warning(f"Provisioning notify: token verification failed: {e}")
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    if not token_data or getattr(token_data, 'type', None) != 'provisioning':
-        logger.warning("Provisioning notify: token is not a provisioning token")
-        raise HTTPException(status_code=403, detail="Token not authorized for provisioning notifications")
-
-    # Broadcast websocket message and update provisioning session if provided
-    try:
-        from app.api.v1.provisioning.stream import manager
-        from app.models.provisioning import ProvisioningStatus
-
-        if session_id:
-            # Update ProvisioningSession if exists
-            result = await db.execute(select(ProvisioningSession).where(ProvisioningSession.session_id == session_id))
-            session = result.scalar_one_or_none()
-            if session:
-                session.status = ProvisioningStatus.COMPLETED
-                session.success = True if status == 'bootstrap_completed' else False
-                session.completed_at = datetime.utcnow()
-                session.progress_percentage = 100.0
-                await db.commit()
-                logger.info(f"Provisioning notify: marked session {session_id} as completed (status={status})")
-
-        # Update ping monitor internal state and stop monitoring if active
-        try:
-            ping_monitor.monitor_results[session_id] = {
-                "ping_verified": True,
-                "api_verified": True,
-                "timestamp": datetime.utcnow().isoformat(),
-                "status": status,
-                "session_id": session_id,
-            }
-            # best-effort stop
-            await ping_monitor.stop_monitoring(session_id)
-        except Exception:
-            # non-fatal
-            logger.debug(f"Provisioning notify: ping_monitor update/stop failed for {session_id}")
-
-        # Broadcast provisioning_complete for any connected UI clients
-        if session_id:
-            await manager.send_message(session_id, {
-                "type": "provisioning_complete",
-                "session_id": session_id,
-                "data": {
-                    "message": "Bootstrap completed on device",
-                    "status": status,
-                    "timestamp": datetime.utcnow().isoformat(),
-                }
+        if client_ip:
+            ping_monitor.register_device_checkin(client_ip, {
+                'identity': identity,
+                'token_sub': getattr(token_data, 'sub', None),
+                'timestamp': datetime.utcnow().isoformat()
             })
 
-        return {"success": True, "session_id": session_id, "status": status}
+        logger.info(f'Provisioning notify: recorded pending check-in for IP {client_ip}')
+        return {'success': True, 'session_id': None, 'note': 'pending_checkin_recorded'}
 
     except Exception as e:
-        logger.error(f"Provisioning notify failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to process provisioning notify")
+        logger.error(f'Provisioning notify failed: {e}')
+        raise HTTPException(status_code=500, detail='Failed to process provisioning notify')
 
 
 @router.get("/complete", response_class=PlainTextResponse)
