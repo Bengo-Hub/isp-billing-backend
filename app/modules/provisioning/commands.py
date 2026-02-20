@@ -7,6 +7,7 @@ explicit parameters.
 
 from __future__ import annotations
 
+import re as _re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,6 +15,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.provisioning import ProvisioningCommand, ProvisioningStatus, ServiceType
 from .live_streaming import streaming_manager
+
+
+# ============================================================================
+# RouterOS Version Detection Helpers
+# ============================================================================
+
+def parse_routeros_version(version_string: str) -> Tuple[int, int, int]:
+    """Parse a RouterOS version string into a (major, minor, patch) tuple.
+
+    Examples:
+        '7.18.2 (stable)' -> (7, 18, 2)
+        '6.48.3'          -> (6, 48, 3)
+        '7.1beta4'        -> (7, 1, 0)
+    """
+    if not version_string:
+        return (7, 0, 0)  # Default to v7 if unknown
+    m = _re.match(r'(\d+)\.(\d+)(?:\.(\d+))?', version_string.strip())
+    if not m:
+        return (7, 0, 0)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+
+
+def is_v7_or_later(version_string: Optional[str]) -> bool:
+    """Check if a RouterOS version is 7.x or later.
+
+    Returns True if version is 7+ or if version_string is None/empty
+    (default to v7 since it's the current standard).
+    """
+    if not version_string:
+        return True
+    major, _, _ = parse_routeros_version(version_string)
+    return major >= 7
 
 
 def load_command_templates() -> Dict[str, Dict[str, Any]]:
@@ -132,7 +165,8 @@ def filter_wan_from_bridge_ports(
 
 
 def generate_configuration_commands(
-    config: Dict[str, Any], service_type: ServiceType
+    config: Dict[str, Any], service_type: ServiceType,
+    routeros_version: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Generate MikroTik configuration commands for basic network setup.
 
@@ -179,29 +213,54 @@ def generate_configuration_commands(
 
     # Configure NTP for time synchronization
     # This ensures router time is accurate for logs, certificates, and scheduling
+    _is_v7 = is_v7_or_later(routeros_version)
     ntp_servers = config.get("ntp_servers", ["time.cloudflare.com", "time.google.com"])
     if isinstance(ntp_servers, list) and len(ntp_servers) > 0:
-        # Enable NTP client
+        if _is_v7:
+            # RouterOS v7: uses 'servers=' parameter (comma-separated)
+            commands.append(
+                {
+                    "type": "api_call",
+                    "command": f"/system/ntp/client/set enabled=yes servers={','.join(ntp_servers)}",
+                    "description": "Configuring NTP time synchronization (v7)",
+                    "critical": False,
+                }
+            )
+        else:
+            # RouterOS v6: uses 'primary-ntp=' and 'secondary-ntp=' parameters
+            primary = ntp_servers[0] if len(ntp_servers) > 0 else "time.cloudflare.com"
+            secondary = ntp_servers[1] if len(ntp_servers) > 1 else "time.google.com"
+            commands.append(
+                {
+                    "type": "api_call",
+                    "command": f"/system/ntp/client/set enabled=yes primary-ntp={primary} secondary-ntp={secondary}",
+                    "description": "Configuring NTP time synchronization (v6)",
+                    "critical": False,
+                }
+            )
+
+    # Set timezone (default to Africa/Nairobi for Kenya - EAT UTC+3)
+    timezone = config.get("timezone", "Africa/Nairobi")
+    if _is_v7:
+        # RouterOS v7: IANA timezone database names
         commands.append(
             {
                 "type": "api_call",
-                "command": f"/system/ntp/client/set enabled=yes servers={','.join(ntp_servers)}",
-                "description": "Configuring NTP time synchronization",
+                "command": f"/system/clock/set time-zone-name={timezone}",
+                "description": f"Setting timezone to {timezone} (v7)",
                 "critical": False,
             }
         )
-
-    # Set timezone (default to Africa/Nairobi for Kenya - EAT UTC+3)
-    # MikroTik RouterOS v7+ uses IANA timezone database names
-    timezone = config.get("timezone", "Africa/Nairobi")
-    commands.append(
-        {
-            "type": "api_call",
-            "command": f"/system/clock/set time-zone-name={timezone}",
-            "description": f"Setting timezone to {timezone}",
-            "critical": False,
-        }
-    )
+    else:
+        # RouterOS v6: Use auto-detect (v6 doesn't support all IANA names reliably)
+        commands.append(
+            {
+                "type": "api_call",
+                "command": "/system/clock/set time-zone-autodetect=yes",
+                "description": "Enabling timezone auto-detect (v6)",
+                "critical": False,
+            }
+        )
 
     # =========================================================================
     # CLEAN UP DEFAULT BRIDGE (prevent port conflicts)
@@ -357,7 +416,7 @@ def generate_configuration_commands(
     return commands
 
 
-def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional[str] = None) -> List[Dict[str, Any]]:
     """Generate MikroTik hotspot configuration commands.
 
     Creates hotspot on the bridge interface with external captive portal redirect.
@@ -804,7 +863,7 @@ def generate_hotspot_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     return commands
 
 
-def generate_pppoe_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+def generate_pppoe_commands(config: Dict[str, Any], routeros_version: Optional[str] = None) -> List[Dict[str, Any]]:
     """Generate MikroTik PPPoE server configuration commands.
 
     Creates PPPoE server on the bridge interface with proper profile settings.
