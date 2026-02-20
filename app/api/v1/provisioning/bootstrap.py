@@ -154,6 +154,7 @@ async def get_bootstrap_command(
     ip_address: Optional[str] = Query(None, description="Device IP for pre-check"),
     use_encrypted_url: bool = Query(False, description="Use encrypted payload URL"),
     session_id: Optional[str] = Query(None, description="Optional provisioning session_id to include in bootstrap callback"),
+    router_id: Optional[int] = Query(None, description="Router ID - if provided, checks whether bootstrap was already done"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_technician_or_admin()),
 ):
@@ -161,13 +162,26 @@ async def get_bootstrap_command(
 
     This command downloads and executes the bootstrap script from the current domain.
     The script enables API access and sets basic device configuration.
-    
+
     Optional features:
     - Device ping pre-check (if ip_address provided)
     - Encrypted payload URL (if use_encrypted_url=true)
     - Optional `session_id` to let the router call back the backend once bootstrap completes
+    - Reprovisioning detection: if `router_id` provided and router already bootstrapped,
+      returns `bootstrap_already_done=true` so the UI can skip straight to API provisioning.
     """
     try:
+        # ── Reprovisioning auto-detection ──
+        # If the caller provides a router_id, check whether this router already
+        # completed bootstrap.  When it has stored API credentials, the frontend
+        # can skip the bootstrap step and provision directly via the API.
+        bootstrap_already_done = False
+        if router_id:
+            already_done = await can_use_direct_api(db, router_id)
+            if already_done:
+                bootstrap_already_done = True
+                logger.info(f"Router {router_id} already bootstrapped — direct API provisioning available")
+
         # Optional: Ping pre-check if IP address provided
         ping_result = None
         if ip_address:
@@ -228,14 +242,16 @@ async def get_bootstrap_command(
         # Use proper MikroTik syntax: :delay (with colon) and /import (with forward slash)
         command = f"/tool fetch mode={fetch_mode} url=\"{script_url}\" dst-path=codevertex.rsc;:delay 2s;/import codevertex.rsc;"
 
-        # If the provisioning UI provided a session_id, append a callback from
-        # the router back to the backend so the UI gets an immediate signal that
-        # bootstrap executed (router-initiated callback works behind NAT).
+        # Always append a callback from the router so the backend knows
+        # bootstrap executed (works behind NAT).  Include session_id when
+        # available for direct session correlation; otherwise the notify
+        # handler falls back to IP/identity-based lookup.
+        notify_params = f"token={provisioning_token}&identity={identity}&status=bootstrap_completed"
         if session_id:
-            notify_url = f"{base}/api/v1/provisioning/notify?session_id={session_id}&token={provisioning_token}&status=bootstrap_completed"
-            notify_mode = "https" if notify_url.startswith("https://") else "http"
-            # Append a lightweight fetch POST (RouterOS supports this syntax)
-            command += f" :delay 1s; /tool fetch mode={notify_mode} url=\"{notify_url}\" http-method=post;"
+            notify_params = f"session_id={session_id}&{notify_params}"
+        notify_url = f"{base}/api/v1/provisioning/bootstrap/notify?{notify_params}"
+        notify_mode = "https" if notify_url.startswith("https://") else "http"
+        command += f" :delay 1s; /tool fetch mode={notify_mode} url=\"{notify_url}\" http-method=post;"
 
         notes = [
             "Waiting for mikrotik to come online...",
@@ -250,13 +266,13 @@ async def get_bootstrap_command(
             "token": provisioning_token,
             "expires_in": 3600,  # 1 hour
             "notes": notes,
-            "encrypted_url": use_encrypted_url
+            "encrypted_url": use_encrypted_url,
+            "notify_url": notify_url,
+            # Reprovisioning detection: if True, the router already ran bootstrap
+            # and has stored API credentials.  The frontend can skip the bootstrap
+            # step and start direct API provisioning immediately.
+            "bootstrap_already_done": bootstrap_already_done,
         }
-
-        # Expose the notify URL in the response when session_id provided so the
-        # frontend can display/record it for debugging.
-        if session_id:
-            response_data["notify_url"] = notify_url
 
         # Add ping result if available
         if ping_result:
@@ -347,159 +363,199 @@ async def get_bootstrap_script(
         api_username = settings.mikrotik_api_username
         api_password = settings.mikrotik_api_password
 
+        # Helper: escape a string value for safe use inside RouterOS
+        # double-quoted strings.  RouterOS expands $var inside "..." so we
+        # must backslash-escape dollars, backslashes, and double-quotes.
+        def _ros_escape(value: str) -> str:
+            s = str(value)
+            s = s.replace("\\", "\\\\")
+            s = s.replace("\"", "\\\"")
+            s = s.replace("$", "\\$")
+            return s
+
+        safe_password = _ros_escape(api_password)
+        safe_username = _ros_escape(api_username)
+
         lines = [
             "# Codevertex Bootstrap Script - Initial Device Setup",
             "# Generated by Codevertex ISP Billing System",
             f"# User ID: {user_id}",
-            f"# Permissions: {', '.join(permissions) if permissions else 'N/A'}",
-            "# All operations are logged to /log and displayed in terminal",
             "",
             ":put \"\"",
             ":put \"=========================================\"",
             ":put \"Codevertex Bootstrap - Starting Setup\"",
             ":put \"=========================================\"",
             "",
-            "# [STEP 1/8] Set system identity",
-            f":do {{ /system/identity/set name={identity}; :put \"[OK] System identity set to {identity}\"; :log info \"[BOOTSTRAP] System identity set to {identity}\" }} on-error={{ :put \"[FAIL] Failed to set system identity\"; :log error \"[BOOTSTRAP] Failed to set system identity\" }}",
+            "# Step 1/8 - Set system identity",
+            ":do {",
+            f"  /system/identity/set name={identity}",
+            f"  :put \"[OK] System identity set to {identity}\"",
+            f"  :log info \"BOOTSTRAP: identity set to {identity}\"",
+            "} on-error={",
+            "  :put \"[FAIL] Failed to set system identity\"",
+            "  :log error \"BOOTSTRAP: Failed to set identity\"",
+            "}",
             "",
-            "# [STEP 2/8] Enable API service on specified port",
-            f":do {{ /ip/service/set api disabled=no port={api_port}; :put \"[OK] API service enabled on port {api_port}\"; :log info \"[BOOTSTRAP] API service enabled on port {api_port}\" }} on-error={{ :put \"[FAIL] Failed to enable API service\"; :log error \"[BOOTSTRAP] Failed to enable API service\" }}",
+            "# Step 2/8 - Enable API service",
+            ":do {",
+            f"  /ip/service/set api disabled=no port={api_port}",
+            f"  :put \"[OK] API service enabled on port {api_port}\"",
+            f"  :log info \"BOOTSTRAP: API enabled on port {api_port}\"",
+            "} on-error={",
+            "  :put \"[FAIL] Failed to enable API service\"",
+            "  :log error \"BOOTSTRAP: Failed to enable API\"",
+            "}",
             "",
-            "# [STEP 3/8] Enable FTP service (required for template upload)",
-            ":do { /ip/service/set [find name=\"ftp\"] disabled=no port=21; :put \"[OK] FTP service enabled on port 21\"; :log info \"[BOOTSTRAP] FTP service enabled on port 21\" } on-error={ :put \"[FAIL] Failed to enable FTP service\"; :log error \"[BOOTSTRAP] Failed to enable FTP service\" }",
+            "# Step 3/8 - Enable FTP service",
+            ":do {",
+            "  /ip/service/set [find name=ftp] disabled=no port=21",
+            "  :put \"[OK] FTP service enabled on port 21\"",
+            "  :log info \"BOOTSTRAP: FTP enabled on port 21\"",
+            "} on-error={",
+            "  :put \"[FAIL] Failed to enable FTP service\"",
+            "  :log error \"BOOTSTRAP: Failed to enable FTP\"",
+            "}",
             "",
-            "# [STEP 4/8] Enable Winbox service",
-            ":do { /ip/service/set winbox disabled=no; :put \"[OK] Winbox service enabled\"; :log info \"[BOOTSTRAP] Winbox service enabled\" } on-error={ :put \"[FAIL] Failed to enable Winbox\"; :log error \"[BOOTSTRAP] Failed to enable Winbox\" }",
+            "# Step 4/8 - Enable Winbox service",
+            ":do {",
+            "  /ip/service/set winbox disabled=no",
+            "  :put \"[OK] Winbox service enabled\"",
+            "  :log info \"BOOTSTRAP: Winbox enabled\"",
+            "} on-error={",
+            "  :put \"[FAIL] Failed to enable Winbox\"",
+            "  :log error \"BOOTSTRAP: Failed to enable Winbox\"",
+            "}",
             "",
-            "# [STEP 5/8] Configure SSH on custom port for security",
-            ":do { /ip/service/set ssh port=2222; :put \"[OK] SSH configured on port 2222\"; :log info \"[BOOTSTRAP] SSH configured on port 2222\" } on-error={ :put \"[FAIL] Failed to configure SSH\"; :log error \"[BOOTSTRAP] Failed to configure SSH\" }",
+            "# Step 5/8 - Configure SSH on custom port",
+            ":do {",
+            "  /ip/service/set ssh port=2222",
+            "  :put \"[OK] SSH configured on port 2222\"",
+            "  :log info \"BOOTSTRAP: SSH on port 2222\"",
+            "} on-error={",
+            "  :put \"[FAIL] Failed to configure SSH\"",
+            "  :log error \"BOOTSTRAP: Failed to configure SSH\"",
+            "}",
             "",
-            "# [STEP 6/8] Create API user group with full permissions",
+            "# Step 6/8 - Create API user group",
             ":put \"Creating codevertex-api user group...\"",
-            ":log info \"[BOOTSTRAP] Creating codevertex-api user group...\"",
-            ":if ([:len [/user/group/find name=\"codevertex-api\"]] = 0) do={",
+            ":if ([:len [/user/group/find name=codevertex-api]] = 0) do={",
             "  :do {",
-            "    /user/group/add name=\"codevertex-api\" policy=local,telnet,ssh,ftp,reboot,read,write,policy,test,winbox,password,web,sniff,sensitive,api,romon,rest-api;",
-            "    :put \"[OK] User group 'codevertex-api' created successfully\";",
-            "    :log info \"[BOOTSTRAP] User group 'codevertex-api' created successfully\"",
-            "  } on-error={ :put \"[FAIL] Failed to create user group\"; :log error \"[BOOTSTRAP] Failed to create user group\" }",
+            "    /user/group/add name=codevertex-api policy=local,telnet,ssh,ftp,reboot,read,write,policy,test,winbox,password,web,sniff,sensitive,api,romon,rest-api",
+            "    :put \"[OK] User group created\"",
+            "    :log info \"BOOTSTRAP: User group codevertex-api created\"",
+            "  } on-error={",
+            "    :put \"[FAIL] Failed to create user group\"",
+            "    :log error \"BOOTSTRAP: Failed to create user group\"",
+            "  }",
             "} else={",
-            "  :put \"[SKIP] User group 'codevertex-api' already exists\";",
-            "  :log info \"[BOOTSTRAP] User group 'codevertex-api' already exists\"",
+            "  :put \"[SKIP] User group already exists\"",
+            "  :log info \"BOOTSTRAP: User group already exists\"",
             "}",
             "",
-            "# [STEP 7/8] Create dedicated API user for Codevertex ISP Billing",
-            f":put \"Creating API user '{api_username}'...\"",
-            ":log info \"[BOOTSTRAP] Creating API user...\"",
-            f":if ([:len [/user/find name=\"{api_username}\"]] > 0) do={{",
-            f"  :do {{ /user/remove [find name=\"{api_username}\"]; :put \"[OK] Removed existing user {api_username}\"; :log info \"[BOOTSTRAP] Removed existing user {api_username}\" }} on-error={{ :put \"[WARN] Could not remove existing user\"; :log warning \"[BOOTSTRAP] Could not remove existing user\" }}",
+            "# Step 7/8 - Create API user",
+            f":put \"Creating API user {api_username}...\"",
+            f":if ([:len [/user/find name=\"{safe_username}\"]] > 0) do={{",
+            "  :do {",
+            f"    /user/remove [find name=\"{safe_username}\"]",
+            f"    :put \"[OK] Removed existing user {api_username}\"",
+            "  } on-error={",
+            "    :put \"[WARN] Could not remove existing user\"",
+            "  }",
             "}",
             ":do {",
-            f"  /user/add name=\"{api_username}\" password=\"{api_password}\" group=\"codevertex-api\" comment=\"Codevertex ISP Billing API User - DO NOT DELETE\";",
-            f"  :put \"[OK] API user '{api_username}' created successfully\";",
-            f"  :log info \"[BOOTSTRAP] API user '{api_username}' created successfully\"",
-            "} on-error={ :put \"[FAIL] Failed to create API user\"; :log error \"[BOOTSTRAP] Failed to create API user\" }",
+            f"  /user/add name=\"{safe_username}\" password=\"{safe_password}\" group=codevertex-api comment=\"Codevertex ISP Billing API - DO NOT DELETE\"",
+            f"  :put \"[OK] API user {api_username} created\"",
+            f"  :log info \"BOOTSTRAP: API user {api_username} created\"",
+            "} on-error={",
+            "  :put \"[FAIL] Failed to create API user\"",
+            "  :log error \"BOOTSTRAP: Failed to create API user\"",
+            "}",
             "",
-            "# [STEP 8/9] Verify interface exists",
-            f":do {{ /interface/print where name={interface}; :put \"[OK] Interface {interface} verified\"; :log info \"[BOOTSTRAP] Interface {interface} verified\" }} on-error={{ :put \"[WARN] Interface {interface} not found\"; :log warning \"[BOOTSTRAP] Interface {interface} not found\" }}",
-            "",
-            "# [STEP 9/11] Optimize system logging (reduce log growth)",
-            ":put \"Configuring system logging...\"",
+            "# Step 8/8 - Verify interface exists",
             ":do {",
-            "  /system logging action set memory memory-lines=500;",
-            "  :put \"[OK] Set log memory limit to 500 lines\";",
-            "  :log info \"[BOOTSTRAP] Set log memory limit to 500 lines\"",
-            "} on-error={ :put \"[WARN] Failed to set log memory limit\"; :log warning \"[BOOTSTRAP] Failed to set log memory limit\" }",
+            f"  /interface/print where name={interface}",
+            f"  :put \"[OK] Interface {interface} verified\"",
+            f"  :log info \"BOOTSTRAP: Interface {interface} verified\"",
+            "} on-error={",
+            f"  :put \"[WARN] Interface {interface} not found\"",
+            f"  :log warning \"BOOTSTRAP: Interface {interface} not found\"",
+            "}",
             "",
+            "# Optimize system logging",
             ":do {",
-            "  /system logging set [find] disabled=yes;",
-            "  :put \"[OK] Disabled all existing log rules\";",
-            "  :log info \"[BOOTSTRAP] Disabled all existing log rules\"",
-            "} on-error={ :put \"[WARN] Failed to disable existing log rules\" }",
-            "",
-            ":do {",
-            "  /system logging add topics=error,warning action=memory;",
-            "  :put \"[OK] Added error/warning logging to memory\";",
-            "  :log info \"[BOOTSTRAP] Added error/warning logging to memory\"",
-            "} on-error={ :put \"[WARN] Failed to add error/warning logging\" }",
+            "  /system/logging/action/set memory memory-lines=500",
+            "  :put \"[OK] Log memory limit set to 500\"",
+            "} on-error={",
+            "  :put \"[WARN] Failed to set log memory limit\"",
+            "}",
             "",
             ":do {",
-            "  /system logging add topics=script,fetch action=memory;",
-            "  :put \"[OK] Added script/fetch logging to memory\";",
-            "  :log info \"[BOOTSTRAP] Added script/fetch logging to memory\"",
-            "} on-error={ :put \"[WARN] Failed to add script/fetch logging\" }",
+            "  /system/logging/set [find] disabled=yes",
+            "  :put \"[OK] Disabled existing log rules\"",
+            "} on-error={",
+            "  :put \"[WARN] Failed to disable log rules\"",
+            "}",
             "",
-            "# [STEP 10/11] Download hotspot templates from backend",
+            ":do {",
+            "  /system/logging/add topics=error,warning action=memory",
+            "  :put \"[OK] Added error/warning logging\"",
+            "} on-error={",
+            "  :put \"[WARN] Failed to add error logging\"",
+            "}",
+            "",
+            ":do {",
+            "  /system/logging/add topics=script,fetch action=memory",
+            "  :put \"[OK] Added script/fetch logging\"",
+            "} on-error={",
+            "  :put \"[WARN] Failed to add script logging\"",
+            "}",
         ]
 
         # Add template download commands only if org_slug is available
         if org_slug and settings.backend_url:
             lines.extend([
+                "",
+                "# Download hotspot templates",
                 ":put \"Downloading hotspot templates...\"",
-                ":log info \"[BOOTSTRAP] Downloading hotspot templates...\"",
-                "",
-                "# Download login.html template",
                 ":do {",
-                f"  /tool/fetch url=\"{settings.backend_url}/api/v1/provisioning/templates/login.html?org_slug={org_slug}\" dst-path=hotspot/login.html;",
-                "  :put \"[OK] Downloaded login.html template\";",
-                "  :log info \"[BOOTSTRAP] Downloaded login.html template\"",
-                "} on-error={ :put \"[WARN] Failed to download login.html (will use FTP fallback)\"; :log warning \"[BOOTSTRAP] Failed to download login.html\" }",
+                f"  /tool/fetch url=\"{settings.backend_url}/api/v1/provisioning/templates/login.html?org_slug={org_slug}\" dst-path=hotspot/login.html",
+                "  :put \"[OK] Downloaded login.html\"",
+                "} on-error={",
+                "  :put \"[WARN] Failed to download login.html\"",
+                "}",
                 "",
-                "# Download alogin.html template",
                 ":do {",
-                f"  /tool/fetch url=\"{settings.backend_url}/api/v1/provisioning/templates/alogin.html?org_slug={org_slug}\" dst-path=hotspot/alogin.html;",
-                "  :put \"[OK] Downloaded alogin.html template\";",
-                "  :log info \"[BOOTSTRAP] Downloaded alogin.html template\"",
-                "} on-error={ :put \"[WARN] Failed to download alogin.html (will use FTP fallback)\"; :log warning \"[BOOTSTRAP] Failed to download alogin.html\" }",
-                "",
+                f"  /tool/fetch url=\"{settings.backend_url}/api/v1/provisioning/templates/alogin.html?org_slug={org_slug}\" dst-path=hotspot/alogin.html",
+                "  :put \"[OK] Downloaded alogin.html\"",
+                "} on-error={",
+                "  :put \"[WARN] Failed to download alogin.html\"",
+                "}",
             ])
         else:
             lines.extend([
-                ":put \"[SKIP] Template download skipped (will use FTP fallback during provisioning)\"",
-                ":log info \"[BOOTSTRAP] Template download skipped (will use FTP fallback)\"",
                 "",
+                ":put \"[SKIP] Template download skipped (FTP fallback during provisioning)\"",
             ])
 
-        # Add completion summary
-        template_status = "downloaded" if org_slug and settings.backend_url else "will be uploaded via FTP"
+        # Completion summary
         lines.extend([
-            "# Bootstrap completion summary",
+            "",
             ":put \"\"",
             ":put \"=========================================\"",
             f":put \"Bootstrap completed for {identity}\"",
             f":put \"API enabled on port {api_port}\"",
-            ":put \"FTP enabled for template upload fallback\"",
-            f":put \"API user '{api_username}' configured\"",
-            ":put \"Logging optimized (500 line limit, errors/warnings only)\"",
-            f":put \"Hotspot templates: {template_status}\"",
+            f":put \"API user: {api_username}\"",
             ":put \"Ready for provisioning workflow\"",
             ":put \"=========================================\"",
             ":put \"\"",
-            "",
-            "# Log summary to system log",
-            f":log info \"[BOOTSTRAP] ========================================\"",
-            f":log info \"[BOOTSTRAP] Bootstrap completed for {identity}\"",
-            f":log info \"[BOOTSTRAP] Token verified for user {user_id}\"",
-            f":log info \"[BOOTSTRAP] API enabled on port {api_port}\"",
-            f":log info \"[BOOTSTRAP] FTP enabled for template upload fallback\"",
-            f":log info \"[BOOTSTRAP] API user '{api_username}' configured\"",
-            f":log info \"[BOOTSTRAP] Logging optimized (500 line limit, errors/warnings only)\"",
-            f":log info \"[BOOTSTRAP] Hotspot templates: {template_status}\"",
-            f":log info \"[BOOTSTRAP] Ready for provisioning workflow\"",
-            f":log info \"[BOOTSTRAP] ========================================\"",
+            f":log info \"BOOTSTRAP: completed for {identity}\"",
         ])
 
-        # Notify backend that bootstrap completed (router -> backend)
-        # Use the provisioning token passed in the URL (required). The backend
-        # will verify the token and associate the check-in with a provisioning
-        # session or record the check-in for later consumption.
-        try:
-            notify_url = f"{settings.backend_url or (request.url.scheme + '://' + request.url.netloc)}/api/v1/provisioning/bootstrap/notify?token={token}&identity={identity}"
-            lines.append(":put \"Notifying backend of bootstrap completion...\"")
-            lines.append(f"/tool fetch mode=https url=\"{notify_url}\" http-method=post dst-path=notify.result; :put \"[OK] Notified backend (notify.result)\"; :log info \"[BOOTSTRAP] Notified backend of bootstrap completion\"")
-        except Exception:
-            # Best effort - don't fail script generation if notify_url cannot be built
-            lines.append(":put \"[WARN] Could not append backend notify call to bootstrap script\"")
+        # NOTE: The bootstrap command (one-liner) already appends a
+        # /tool fetch POST to the notify endpoint when session_id is
+        # provided.  We intentionally do NOT embed a notify call inside
+        # the .rsc script itself because the JWT token would make the
+        # URL extremely long and fragile.  The outer command handles it.
 
         return "\n".join(lines) + "\n"
 
@@ -511,214 +567,152 @@ async def get_bootstrap_script(
 @router.post('/notify')
 async def provisioning_notify(
     request: Request,
-    token: Optional[str] = Query(None),
-    identity: Optional[str] = Query(None),
-    ip_address: Optional[str] = Query(None),
+    session_id: Optional[str] = Query(None, description="Provisioning session UUID"),
+    token: Optional[str] = Query(None, description="Provisioning token (required)"),
+    identity: Optional[str] = Query(None, description="Router identity name"),
+    ip_address: Optional[str] = Query(None, description="Router-reported IP"),
+    status: str = Query('bootstrap_completed'),
     db: AsyncSession = Depends(get_db),
 ):
-    """Endpoint called by devices after bootstrap to notify backend.
+    """Unified callback endpoint for routers to notify backend when bootstrap completes.
 
-    Query params:
-    - token: provisioning access token (required)
-    - identity: optional router identity (used for logging)
-    - ip_address: optional router-reported IP (falls back to request.client.host)
+    Supports two correlation strategies (tried in order):
+    1. **session_id** - Direct session lookup (preferred, provided by bootstrap command)
+    2. **IP / identity** - Fallback: find router by IP or name, then find active session
 
-    Behavior:
-    - verify token
-    - attempt to correlate to an existing provisioning session for the same router IP
-    - if found, broadcast `provisioning_complete` via websocket and update ping_monitor
-    - otherwise record a one-time pending check-in so a future session will see it
+    After correlating:
+    - Marks provisioning session as bootstrap_completed
+    - Stores encrypted API credentials on the router for future reprovisioning
+    - Broadcasts `provisioning_complete` over WebSocket so UI auto-advances
+    - Stops any active ping monitoring
     """
     if not token:
-        raise HTTPException(status_code=400, detail='token is required')
+        raise HTTPException(status_code=400, detail='Token is required')
 
     from app.core.security import verify_token
     try:
         token_data = verify_token(token, token_type='access')
     except Exception as e:
-        logger.warning(f'Provisioning notify token verification failed: {e}')
-        raise HTTPException(status_code=401, detail='invalid token')
+        logger.warning(f'Provisioning notify: token verification failed: {e}')
+        raise HTTPException(status_code=401, detail='Invalid token')
 
-    # Resolve IP
     client_ip = ip_address or (request.client.host if request.client else None)
 
-    # Broadcast to any active provisioning session associated with this router IP
     try:
-        # Find router by IP (fallback to router identity when IP doesn't match)
         from app.models.router import Router
-        router = None
-        if client_ip:
-            router_result = await db.execute(select(Router).where(Router.ip_address == client_ip))
-            router = router_result.scalar_one_or_none()
-
-        # If lookup by IP failed, try to resolve by the device identity reported
-        if not router and identity:
-            try:
-                router_result = await db.execute(select(Router).where(Router.name == identity))
-                router = router_result.scalar_one_or_none()
-            except Exception:
-                router = None
+        from app.models.provisioning import ProvisioningSession, ProvisioningStatus
+        from app.api.v1.provisioning.stream import manager
+        from app.services.router_provisioning import store_router_credentials
 
         session_found = None
-        if router:
-            from app.models.provisioning import ProvisioningSession, ProvisioningStatus
-            session_result = await db.execute(
-                select(ProvisioningSession)
-                .where(
-                    ProvisioningSession.router_id == router.id,
-                    ProvisioningSession.status.in_([ProvisioningStatus.PENDING, ProvisioningStatus.IN_PROGRESS])
-                )
-                .order_by(ProvisioningSession.created_at.desc())
-                .limit(1)
-            )
-            session_found = session_result.scalar_one_or_none()
+        found_router = None
 
-        # If still no session found but identity provided, try to find sessions via router.name
-        if not session_found and identity:
-            try:
-                session_result = await db.execute(
+        # Strategy 1: Direct session_id lookup
+        if session_id:
+            result = await db.execute(
+                select(ProvisioningSession).where(ProvisioningSession.session_id == session_id)
+            )
+            session_found = result.scalar_one_or_none()
+            if session_found:
+                # Resolve the router for credential storage
+                if session_found.router_id:
+                    rr = await db.execute(select(Router).where(Router.id == session_found.router_id))
+                    found_router = rr.scalar_one_or_none()
+
+        # Strategy 2: IP / identity based lookup
+        if not session_found:
+            if client_ip:
+                rr = await db.execute(select(Router).where(Router.ip_address == client_ip))
+                found_router = rr.scalar_one_or_none()
+            if not found_router and identity:
+                try:
+                    rr = await db.execute(select(Router).where(Router.name == identity))
+                    found_router = rr.scalar_one_or_none()
+                except Exception:
+                    pass
+
+            if found_router:
+                sr = await db.execute(
                     select(ProvisioningSession)
-                    .join(Router, ProvisioningSession.router_id == Router.id)
                     .where(
-                        Router.name == identity,
-                        ProvisioningSession.status.in_([ProvisioningStatus.PENDING, ProvisioningStatus.IN_PROGRESS])
+                        ProvisioningSession.router_id == found_router.id,
+                        ProvisioningSession.status.in_([
+                            ProvisioningStatus.PENDING,
+                            ProvisioningStatus.IN_PROGRESS,
+                        ])
                     )
                     .order_by(ProvisioningSession.created_at.desc())
                     .limit(1)
                 )
-                session_found = session_result.scalar_one_or_none()
-            except Exception:
-                session_found = None
-        # Inform ping monitor and live stream
-        from app.api.v1.provisioning.stream import manager
-        from app.services.ping_monitor import ping_monitor
+                session_found = sr.scalar_one_or_none()
 
+        # ── Store API credentials on the router for future reprovisioning ──
+        if found_router:
+            try:
+                await store_router_credentials(db, found_router.id)
+                logger.info(f'Provisioning notify: stored credentials for router {found_router.id}')
+            except Exception as e:
+                logger.warning(f'Provisioning notify: failed to store credentials: {e}')
+
+        # ── Update session & broadcast ──
+        sid = None
         if session_found:
             sid = session_found.session_id
-            # Mark ping_monitor result for this session so UI can advance
-            ping_monitor.monitor_results[sid] = {
-                'attempt': 0,
+            session_found.status = ProvisioningStatus.COMPLETED
+            session_found.completed_at = datetime.utcnow()
+            try:
+                session_found.progress_percentage = 100.0
+            except Exception:
+                pass
+            await db.commit()
+            logger.info(f'Provisioning notify: session {sid} marked completed')
+
+        # Update ping monitor
+        monitor_key = sid or session_id or (client_ip or 'unknown')
+        try:
+            ping_monitor.monitor_results[monitor_key] = {
                 'ping_verified': True,
                 'api_verified': True,
                 'ip_address': client_ip,
                 'method': 'device-notify',
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.utcnow().isoformat(),
             }
+            if sid and ping_monitor.is_monitoring(sid):
+                await ping_monitor.stop_monitoring(sid)
+        except Exception:
+            logger.debug('Provisioning notify: ping_monitor update failed')
 
-            # Stop any active monitoring for this session (if running)
-            try:
-                if ping_monitor.is_monitoring(sid):
-                    await ping_monitor.stop_monitoring(sid)
-            except Exception:
-                logger.debug('Failed to stop ping monitor after notify')
-
-            # Broadcast websocket message to UI
+        # Broadcast to UI
+        if sid:
             await manager.send_message(sid, {
                 'type': 'provisioning_complete',
                 'session_id': sid,
                 'data': {
                     'message': 'Device reported bootstrap completion',
                     'ip_address': client_ip,
-                    'identity': identity
+                    'identity': identity,
+                    'status': status,
                 }
             })
 
-            logger.info(f'Provisioning notify: associated with session {sid} (router {router.id})')
+        if sid:
             return {'status': 'ok', 'session_id': sid}
 
-        # No active session found: record a pending check-in for the IP so
-        # future provisioning sessions will treat the device as already bootstrapped.
-        ping_monitor.register_device_checkin(client_ip, {'identity': identity, 'token_sub': getattr(token_data, 'sub', None), 'timestamp': datetime.utcnow().isoformat()})
-
+        # No session found — record pending check-in for future correlation
+        ping_monitor.register_device_checkin(
+            client_ip,
+            {
+                'identity': identity,
+                'token_sub': getattr(token_data, 'sub', None),
+                'timestamp': datetime.utcnow().isoformat(),
+            },
+        )
         logger.info(f'Provisioning notify: recorded pending check-in for IP {client_ip}')
         return {'status': 'ok', 'session_id': None, 'note': 'pending_checkin_recorded'}
 
     except Exception as e:
-        logger.error(f'Error handling provisioning notify: {e}')
+        logger.error(f'Provisioning notify failed: {e}')
         raise HTTPException(status_code=500, detail='Failed to handle notify')
-
-
-@router.post('/notify')
-async def provisioning_notify(
-    session_id: Optional[str] = Query(None, description="Provisioning session UUID"),
-    token: Optional[str] = Query(None, description="Provisioning token (required)"),
-    status: str = Query('bootstrap_completed'),
-    db: AsyncSession = Depends(get_db),
-):
-    """Callback endpoint for routers to notify backend when bootstrap completes.
-
-    - Verifies provisioning token
-    - Marks provisioning session completed/successful when session_id provided
-    - Broadcasts `provisioning_complete` over the provisioning websocket
-    - Stops any active ping monitoring for the session
-
-    This endpoint is intentionally lightweight and token-protected because it
-    will be called directly from customer routers during first-touch.
-    """
-    if not token:
-        raise HTTPException(status_code=400, detail="Token is required")
-
-    # Verify token and ensure it was minted for provisioning
-    from app.core.security import verify_token
-    try:
-        token_data = verify_token(token, token_type='access')
-    except Exception as e:
-        logger.warning(f"Provisioning notify: token verification failed: {e}")
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    if not token_data or getattr(token_data, 'type', None) != 'provisioning':
-        logger.warning("Provisioning notify: token is not a provisioning token")
-        raise HTTPException(status_code=403, detail="Token not authorized for provisioning notifications")
-
-    # Broadcast websocket message and update provisioning session if provided
-    try:
-        from app.api.v1.provisioning.stream import manager
-        from app.models.provisioning import ProvisioningStatus
-
-        if session_id:
-            # Update ProvisioningSession if exists
-            result = await db.execute(select(ProvisioningSession).where(ProvisioningSession.session_id == session_id))
-            session = result.scalar_one_or_none()
-            if session:
-                session.status = ProvisioningStatus.COMPLETED
-                session.success = True if status == 'bootstrap_completed' else False
-                session.completed_at = datetime.utcnow()
-                session.progress_percentage = 100.0
-                await db.commit()
-                logger.info(f"Provisioning notify: marked session {session_id} as completed (status={status})")
-
-        # Update ping monitor internal state and stop monitoring if active
-        try:
-            ping_monitor.monitor_results[session_id] = {
-                "ping_verified": True,
-                "api_verified": True,
-                "timestamp": datetime.utcnow().isoformat(),
-                "status": status,
-                "session_id": session_id,
-            }
-            # best-effort stop
-            await ping_monitor.stop_monitoring(session_id)
-        except Exception:
-            # non-fatal
-            logger.debug(f"Provisioning notify: ping_monitor update/stop failed for {session_id}")
-
-        # Broadcast provisioning_complete for any connected UI clients
-        if session_id:
-            await manager.send_message(session_id, {
-                "type": "provisioning_complete",
-                "session_id": session_id,
-                "data": {
-                    "message": "Bootstrap completed on device",
-                    "status": status,
-                    "timestamp": datetime.utcnow().isoformat(),
-                }
-            })
-
-        return {"success": True, "session_id": session_id, "status": status}
-
-    except Exception as e:
-        logger.error(f"Provisioning notify failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to process provisioning notify")
 
 
 @router.get("/complete", response_class=PlainTextResponse)
