@@ -22,6 +22,7 @@ from .customer_portal import (
 # Core models
 from .user import User, UserSession, UserVerification, UserRole as UserRoleEnum, UserStatus
 from .router import Router, RouterDevice, RouterLog
+from .router_command import RouterCommand, CommandStatus
 from .plan import ServicePlan, PlanFeature, PlanPricing
 from .subscription import Subscription, SubscriptionUsageLog, SubscriptionHistory
 from .billing import Invoice, InvoiceItem, Payment, PaymentLog, BillingCycle
@@ -112,6 +113,8 @@ __all__ = [
     "Router",
     "RouterDevice",
     "RouterLog",
+    "RouterCommand",
+    "CommandStatus",
 
     # Plans
     "ServicePlan",

@@ -68,6 +68,7 @@ from .portal import router as portal_router
 from .tenant import router as tenant_router
 from .onboarding import router as onboarding_router
 from .payments import router as payments_router
+from .router_agent import router as router_agent_router
 
 api_router = APIRouter()
 
@@ -144,3 +145,12 @@ api_router.include_router(onboarding_router)
 # 12. Public Payment Endpoints (No Auth Required)
 # =============================================================================
 api_router.include_router(payments_router)
+
+# =============================================================================
+# 13. Router Agent (Polling agent endpoints — no user auth, uses router token)
+# =============================================================================
+api_router.include_router(
+    router_agent_router,
+    prefix="/router-agent",
+    tags=["Router Agent"],
+)

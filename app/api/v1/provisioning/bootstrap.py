@@ -347,6 +347,24 @@ async def get_bootstrap_script(
             if organization:
                 org_slug = organization.slug
 
+        # Generate agent token for the polling agent (if router record exists)
+        agent_token = None
+        router_obj = None
+        try:
+            from app.models.router import Router as RouterModel
+            from app.services.router_agent import RouterAgentService
+            router_result = await db.execute(select(RouterModel).where(RouterModel.name == identity))
+            router_obj = router_result.scalar_one_or_none()
+            if router_obj:
+                agent_service = RouterAgentService(db)
+                agent_token = await agent_service.generate_agent_token(router_obj.id)
+                router_obj.agent_installed = True
+                router_obj.agent_version = settings.agent_script_version
+                await db.commit()
+                logger.info(f"Generated agent token for router {router_obj.id} ({identity})")
+        except Exception as e:
+            logger.warning(f"Could not generate agent token for {identity}: {e}")
+
         # Get API user credentials from settings
         api_username = settings.mikrotik_api_username
         api_password = settings.mikrotik_api_password
@@ -576,6 +594,38 @@ async def get_bootstrap_script(
             lines.extend([
                 ":put \"[SKIP] Template download skipped (will use FTP fallback during provisioning)\"",
                 ":log info \"[BOOTSTRAP] Template download skipped (will use FTP fallback)\"",
+                "",
+            ])
+
+        # [STEP 12/14] Install CodeVertex polling agent via fetch + import
+        if agent_token and settings.backend_url and router_obj:
+            agent_script_url = f"{settings.backend_url}/api/v1/router-agent/script/{router_obj.id}?token={agent_token}"
+            agent_fetch_mode = "https" if agent_script_url.startswith("https://") else "http"
+            poll_interval = settings.agent_default_poll_interval
+
+            lines.extend([
+                f"# [STEP 12/14] Install CodeVertex polling agent (polls every {poll_interval}s)",
+                ":put \"Installing CodeVertex billing agent...\"",
+                ":log info \"[BOOTSTRAP] Installing CodeVertex billing agent...\"",
+                "",
+                "# Download and install the agent script from backend",
+                ":do {",
+                f"  /tool/fetch mode={agent_fetch_mode} url=\"{agent_script_url}\" dst-path=codevertex-agent-install.rsc",
+                "  :delay 1s",
+                "  /import codevertex-agent-install.rsc",
+                "  :put \"[OK] Billing agent installed successfully\"",
+                "  :log info \"[BOOTSTRAP] Billing agent installed successfully\"",
+                "} on-error={",
+                "  :put \"[WARN] Failed to install billing agent (non-critical)\"",
+                "  :log warning \"[BOOTSTRAP] Failed to install billing agent\"",
+                "}",
+                "",
+            ])
+        else:
+            lines.extend([
+                "# [STEP 12/14] Polling agent skipped (no router record or backend URL)",
+                ":put \"[SKIP] Billing agent not installed (router record not found)\"",
+                ":log info \"[BOOTSTRAP] Billing agent skipped - router record not found\"",
                 "",
             ])
 

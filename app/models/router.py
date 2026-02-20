@@ -96,6 +96,14 @@ class Router(Base):
     last_provisioned_at = Column(DateTime, nullable=True)  # Last successful provisioning timestamp
     provisioning_status = Column(String(50), default='pending', nullable=False)  # pending, provisioned, failed
     bootstrap_completed = Column(Boolean, default=False, nullable=False)  # True if initial bootstrap was successful
+
+    # Polling agent fields
+    agent_token = Column(String(255), nullable=True)  # Hashed per-router auth token
+    agent_token_plain = Column(Text, nullable=True)  # Encrypted plain token (included in bootstrap script)
+    agent_installed = Column(Boolean, default=False, nullable=False)
+    agent_poll_interval = Column(Integer, default=30, nullable=False)  # seconds
+    last_poll_at = Column(DateTime, nullable=True)  # Last successful poll from agent
+    agent_version = Column(String(20), nullable=True)  # Agent script version on router
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -106,6 +114,7 @@ class Router(Base):
     subscriptions = relationship("Subscription", back_populates="router", cascade="all, delete-orphan")
     devices = relationship("RouterDevice", back_populates="router", cascade="all, delete-orphan")
     logs = relationship("RouterLog", back_populates="router", cascade="all, delete-orphan")
+    commands = relationship("RouterCommand", back_populates="router", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         """String representation."""
