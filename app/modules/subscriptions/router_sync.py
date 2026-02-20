@@ -74,7 +74,14 @@ class SubscriptionRouterSyncService:
                 result["error"] = f"Plan {subscription.plan_id} not found"
                 return result
 
-            # Connect to router
+            # If router has the polling agent installed, use command queue
+            # instead of direct API connection (works behind NAT)
+            if router.agent_installed and router.agent_token:
+                return await self._sync_via_agent_queue(
+                    subscription, router, plan, force_create
+                )
+
+            # Fallback: direct API connection (only works on local network)
             client = get_mikrotik_client()
             try:
                 connection = await client.connect(
@@ -129,6 +136,94 @@ class SubscriptionRouterSyncService:
 
         except Exception as e:
             logger.error(f"Subscription sync failed for {subscription.id}: {e}")
+            result["error"] = str(e)
+            return result
+
+    async def _sync_via_agent_queue(
+        self,
+        subscription: Subscription,
+        router: Router,
+        plan: ServicePlan,
+        force_create: bool = False,
+    ) -> Dict[str, Any]:
+        """Sync subscription to router via the polling agent command queue.
+
+        Instead of connecting directly to the router, this method queues
+        commands that the router's polling agent will pick up and execute
+        on the next poll cycle (~30 seconds).
+
+        The subscription's is_router_synced will remain False until the
+        agent reports successful command execution.
+        """
+        from app.services.router_agent import RouterAgentService
+
+        result = {
+            "success": True,  # Command was queued successfully
+            "subscription_id": subscription.id,
+            "action": None,
+            "error": None,
+            "timestamp": datetime.utcnow().isoformat(),
+            "queued": True,  # Indicates async execution via agent
+        }
+
+        agent_service = RouterAgentService(self.db)
+        user_type = "hotspot" if subscription.subscription_type == SubscriptionType.HOTSPOT else "pppoe"
+        rate_limit = self._calculate_rate_limit(plan)
+        profile_name = f"plan_{plan.id}"
+
+        try:
+            if subscription.status == SubscriptionStatus.ACTIVE:
+                # Queue create_user command
+                await agent_service.queue_command(
+                    router_id=router.id,
+                    action="create_user",
+                    params={
+                        "username": subscription.username,
+                        "password": subscription.password,
+                        "type": user_type,
+                        "profile": profile_name,
+                        "rate_limit": rate_limit,
+                    },
+                    priority=3,
+                    source="subscription_sync",
+                    source_id=str(subscription.id),
+                )
+                result["action"] = "create_user_queued"
+
+            elif subscription.status in [
+                SubscriptionStatus.EXPIRED,
+                SubscriptionStatus.SUSPENDED,
+                SubscriptionStatus.CANCELLED,
+            ]:
+                # Queue disable_user + disconnect commands
+                await agent_service.queue_command(
+                    router_id=router.id,
+                    action="disable_user",
+                    params={
+                        "username": subscription.username,
+                        "type": user_type,
+                    },
+                    priority=2,
+                    source="subscription_sync",
+                    source_id=str(subscription.id),
+                )
+                result["action"] = "disable_user_queued"
+
+            # Note: is_router_synced stays False until agent reports success
+            # The agent report handler will update it
+            await self.db.commit()
+
+            logger.info(
+                f"Subscription {subscription.id} queued for agent sync: "
+                f"action={result['action']}, router={router.id}"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(
+                f"Failed to queue agent command for subscription {subscription.id}: {e}"
+            )
+            result["success"] = False
             result["error"] = str(e)
             return result
 

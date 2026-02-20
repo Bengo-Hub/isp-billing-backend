@@ -235,6 +235,9 @@ async def get_bootstrap_command(
         else:
             # Traditional query parameter approach
             script_url = f"{base}/api/v1/provisioning/bootstrap/script?token={provisioning_token}&identity={identity}&api_port={api_port}&interface={interface}"
+            # Pass session_id into the script URL so the script's notify callback can include it
+            if session_id:
+                script_url += f"&session_id={session_id}"
 
         # Detect URL scheme and set mode to match (RouterOS 7.16+ requires consistency)
         fetch_mode = "https" if script_url.startswith("https://") else "http"
@@ -296,6 +299,7 @@ async def get_bootstrap_script(
     identity: Optional[str] = Query(None),
     api_port: Optional[int] = Query(None),
     interface: Optional[str] = Query(None),
+    session_id: Optional[str] = Query(None, description="Provisioning session ID for notify callback"),
     db: AsyncSession = Depends(get_db),
 ):
     """Return a minimal RouterOS script for first-touch provisioning with token verification.
@@ -358,6 +362,24 @@ async def get_bootstrap_script(
             organization = org_result.scalar_one_or_none()
             if organization:
                 org_slug = organization.slug
+
+        # Generate agent token for the polling agent (if router record exists)
+        agent_token = None
+        router_obj = None
+        try:
+            from app.models.router import Router as RouterModel
+            from app.services.router_agent import RouterAgentService
+            router_result = await db.execute(select(RouterModel).where(RouterModel.name == identity))
+            router_obj = router_result.scalar_one_or_none()
+            if router_obj:
+                agent_service = RouterAgentService(db)
+                agent_token = await agent_service.generate_agent_token(router_obj.id)
+                router_obj.agent_installed = True
+                router_obj.agent_version = settings.agent_script_version
+                await db.commit()
+                logger.info(f"Generated agent token for router {router_obj.id} ({identity})")
+        except Exception as e:
+            logger.warning(f"Could not generate agent token for {identity}: {e}")
 
         # Get API user credentials from settings
         api_username = settings.mikrotik_api_username
@@ -511,6 +533,31 @@ async def get_bootstrap_script(
             "}",
         ]
 
+        # POST scan data to backend scan-report endpoint
+        try:
+            base_scan = settings.backend_url or (request.url.scheme + '://' + request.url.netloc)
+            scan_report_url = f"{base_scan}/api/v1/provisioning/bootstrap/scan-report?token={token}&identity={identity}"
+            if session_id:
+                scan_report_url += f"&session_id={session_id}"
+            scan_mode = "https" if scan_report_url.startswith("https://") else "http"
+            lines.extend([
+                "# POST scan data to backend",
+                ":local scanPostData (\"interfaces=\" . $ifList . \"&version=\" . $sysVersion . \"&board=\" . $sysBoard . \"&arch=\" . $sysArch . \"&cpu_count=\" . $sysCpu . \"&uptime=\" . $sysUptime . \"&total_memory=\" . $sysTotalMem . \"&free_memory=\" . $sysFreeMem . \"&wan_interface=\" . $wanIf . \"&hotspot_active=\" . $hotspotActive . \"&pppoe_active=\" . $pppoeActive . \"&dhcp_active=\" . $dhcpActive . \"&ip_addresses=\" . $ipAddresses . \"&dns_servers=\" . $dnsServers)",
+                ":do {",
+                f"  /tool/fetch mode={scan_mode} url=\"{scan_report_url}\" http-method=post http-data=$scanPostData dst-path=scan-report.result",
+                "  :put \"[OK] Scan data sent to backend\"",
+                "  :log info \"[BOOTSTRAP] Scan data sent to backend\"",
+                "} on-error={ :put \"[WARN] Failed to send scan data (non-critical)\"; :log warning \"[BOOTSTRAP] Failed to send scan data\" }",
+                "",
+            ])
+        except Exception:
+            lines.append(":put \"[WARN] Could not build scan-report URL\"")
+            lines.append("")
+
+        lines.append(
+            "# [STEP 11/13] Download hotspot templates from backend",
+        )
+
         # Add template download commands only if org_slug is available
         if org_slug and settings.backend_url:
             lines.extend([
@@ -562,6 +609,211 @@ async def get_bootstrap_script(
     except Exception as e:
         logger.error(f"Failed to generate bootstrap script: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate bootstrap script")
+
+
+@router.post('/scan-report')
+async def bootstrap_scan_report(
+    request: Request,
+    token: str = Query(..., description="Provisioning token (required)"),
+    identity: Optional[str] = Query(None, description="Router identity"),
+    session_id: Optional[str] = Query(None, description="Provisioning session ID"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Receive device scan data collected by the bootstrap script running on the router.
+
+    The bootstrap script collects interface names, service status, system info, and
+    network configuration from the router itself, then POSTs this data here. This
+    eliminates the need for the cloud backend to connect directly to the router's
+    API port (which is impossible when the router is on a private/NAT'd network).
+
+    The scan data is stored via store_scanned_config() so the frontend's device scan
+    endpoint can return cached data without needing a direct connection.
+    """
+    from app.core.security import verify_token
+    from app.services.router_provisioning import store_scanned_config
+
+    # Verify token
+    try:
+        token_data = verify_token(token, token_type='access')
+    except Exception as e:
+        logger.warning(f'Scan report: token verification failed: {e}')
+        raise HTTPException(status_code=401, detail='Invalid token')
+
+    # Parse POST body (form-encoded from RouterOS /tool/fetch http-data=)
+    try:
+        body = await request.body()
+        body_str = body.decode('utf-8', errors='replace')
+        # Parse URL-encoded form data
+        from urllib.parse import parse_qs
+        form_data = parse_qs(body_str, keep_blank_values=True)
+        # parse_qs returns lists; flatten to single values
+        data = {k: v[0] if v else '' for k, v in form_data.items()}
+    except Exception as e:
+        logger.error(f'Scan report: failed to parse body: {e}')
+        raise HTTPException(status_code=400, detail='Failed to parse scan data')
+
+    logger.info(f"Scan report received: identity={identity}, interfaces={data.get('interfaces', '')}, version={data.get('version', '')}")
+
+    # Build structured scan data
+    interfaces_str = data.get('interfaces', '')
+    interfaces = [i.strip() for i in interfaces_str.split(',') if i.strip()] if interfaces_str else []
+
+    # Parse IP addresses (format: addr@iface|addr@iface)
+    ip_addresses_str = data.get('ip_addresses', '')
+    ip_entries = []
+    wan_interface = data.get('wan_interface', 'ether1')
+    router_ip = ''
+    router_ip_cidr = ''
+    if ip_addresses_str:
+        for entry in ip_addresses_str.split('|'):
+            if '@' in entry:
+                addr, iface = entry.split('@', 1)
+                ip_entries.append({'address': addr, 'interface': iface})
+                # Use first non-WAN address as router_ip
+                if iface != wan_interface and not router_ip:
+                    router_ip_cidr = addr
+                    router_ip = addr.split('/')[0] if '/' in addr else addr
+
+    # If no non-WAN IP found, use first available
+    if not router_ip and ip_entries:
+        router_ip_cidr = ip_entries[0]['address']
+        router_ip = router_ip_cidr.split('/')[0] if '/' in router_ip_cidr else router_ip_cidr
+
+    # Calculate network config from router IP CIDR
+    cidr = 24
+    network_address = ''
+    gateway = ''
+    subnet_mask = '255.255.255.0'
+    if '/' in router_ip_cidr:
+        ip_part, cidr_str = router_ip_cidr.split('/')
+        cidr = int(cidr_str)
+        parts = ip_part.split('.')
+        if cidr == 24:
+            network_address = f"{parts[0]}.{parts[1]}.{parts[2]}.0"
+            gateway = f"{parts[0]}.{parts[1]}.{parts[2]}.1"
+            subnet_mask = '255.255.255.0'
+        elif cidr == 16:
+            network_address = f"{parts[0]}.{parts[1]}.0.0"
+            gateway = f"{parts[0]}.{parts[1]}.0.1"
+            subnet_mask = '255.255.0.0'
+        else:
+            network_address = f"{parts[0]}.{parts[1]}.{parts[2]}.0"
+            gateway = f"{parts[0]}.{parts[1]}.{parts[2]}.1"
+
+    # Parse DNS servers
+    dns_str = data.get('dns_servers', '')
+    dns_servers = [d.strip() for d in dns_str.split(',') if d.strip()] if dns_str else []
+
+    # Build service status
+    services = [
+        {
+            'name': 'hotspot',
+            'active': data.get('hotspot_active', 'false').lower() == 'true',
+            'available': True,
+        },
+        {
+            'name': 'pppoe',
+            'active': data.get('pppoe_active', 'false').lower() == 'true',
+            'available': True,
+        },
+        {
+            'name': 'dhcp',
+            'active': data.get('dhcp_active', 'false').lower() == 'true',
+            'available': True,
+        },
+    ]
+
+    # Build network config
+    network_config = {
+        'router_ip': router_ip,
+        'router_ip_cidr': router_ip_cidr,
+        'network': f"{network_address}/{cidr}" if network_address else '',
+        'network_address': network_address,
+        'gateway': gateway,
+        'broadcast': '',
+        'dhcp_start': '',
+        'dhcp_end': '',
+        'dhcp_pool': '',
+        'subnet_mask': subnet_mask,
+        'cidr': cidr,
+        'total_hosts': (2 ** (32 - cidr)) - 2 if cidr < 32 else 1,
+        'dns_servers': dns_servers,
+        'current_subnet': router_ip_cidr,
+        'wan_interface': wan_interface,
+        'ip_addresses': ip_entries,
+    }
+
+    # Build system info
+    system_info = {
+        'identity': identity or data.get('identity', ''),
+        'board_name': data.get('board', ''),
+        'model': data.get('board', ''),
+        'version': data.get('version', ''),
+        'architecture': data.get('arch', ''),
+        'cpu_count': int(data.get('cpu_count', '0') or '0'),
+        'cpu_load': None,
+        'total_memory': data.get('total_memory', ''),
+        'free_memory': data.get('free_memory', ''),
+        'uptime': data.get('uptime', ''),
+        'time': '',
+        'timezone': '',
+    }
+
+    # Find router by identity or IP
+    from app.models.router import Router as RouterModel
+    client_ip = request.client.host if request.client else None
+    router_obj = None
+
+    if identity:
+        result = await db.execute(select(RouterModel).where(RouterModel.name == identity))
+        router_obj = result.scalar_one_or_none()
+
+    if not router_obj and client_ip:
+        result = await db.execute(select(RouterModel).where(RouterModel.ip_address == client_ip))
+        router_obj = result.scalar_one_or_none()
+
+    if router_obj:
+        try:
+            await store_scanned_config(
+                db=db,
+                router_id=router_obj.id,
+                interfaces=interfaces,
+                services=services,
+                network_config=network_config,
+                system_info=system_info,
+            )
+            logger.info(f"Scan report: stored config for router {router_obj.id} ({identity}): {len(interfaces)} interfaces")
+
+            # Broadcast scan_complete via WebSocket if session_id provided
+            if session_id:
+                try:
+                    from app.api.v1.provisioning.stream import manager
+                    await manager.send_message(session_id, {
+                        'type': 'scan_complete',
+                        'session_id': session_id,
+                        'data': {
+                            'interfaces': interfaces,
+                            'wan_interface': wan_interface,
+                            'version': system_info.get('version', ''),
+                            'board': system_info.get('board_name', ''),
+                            'message': 'Device scan data received from bootstrap',
+                        }
+                    })
+                except Exception:
+                    pass  # WebSocket broadcast is best-effort
+
+        except Exception as e:
+            logger.error(f"Scan report: failed to store config: {e}")
+            # Don't fail - the data was received, just couldn't persist
+    else:
+        logger.warning(f"Scan report: no router found for identity={identity}, ip={client_ip}")
+
+    return {
+        'success': True,
+        'router_id': router_obj.id if router_obj else None,
+        'interfaces_count': len(interfaces),
+        'version': system_info.get('version', ''),
+    }
 
 
 @router.post('/notify')
@@ -810,31 +1062,53 @@ async def check_direct_api_access(
     current_user: User = Depends(require_technician_or_admin()),
 ):
     """Check if router has stored credentials for direct API reprovisioning.
-    
+
     Returns:
         {
             "can_use_direct_api": bool,
             "bootstrap_completed": bool,
-            "provisioning_status": str
+            "provisioning_status": str,
+            "agent_installed": bool,
+            "agent_online": bool,
+            "has_cached_scan": bool
         }
     """
     try:
         has_access = await can_use_direct_api(db, router_id)
-        
+
         # Get router details
         from sqlalchemy import select
         from app.models.router import Router
         result = await db.execute(select(Router).where(Router.id == router_id))
         router = result.scalar_one_or_none()
-        
+
         if not router:
             raise HTTPException(status_code=404, detail="Router not found")
-        
+
+        # Determine if agent is online based on last_poll_at
+        agent_online = False
+        if router.agent_installed and router.last_poll_at:
+            elapsed = (datetime.utcnow() - router.last_poll_at).total_seconds()
+            threshold = (router.agent_poll_interval or 30) * 3  # 3x poll interval
+            agent_online = elapsed < threshold
+
+        # Check if we have cached scan data in router.config
+        has_cached_scan = False
+        try:
+            if router.config:
+                config_data = json.loads(router.config) if isinstance(router.config, str) else router.config
+                has_cached_scan = bool(config_data.get("scanned_data"))
+        except Exception:
+            pass
+
         return {
             "can_use_direct_api": has_access,
             "bootstrap_completed": router.bootstrap_completed or False,
             "provisioning_status": router.provisioning_status or 'pending',
-            "last_provisioned_at": router.last_provisioned_at.isoformat() if router.last_provisioned_at else None
+            "last_provisioned_at": router.last_provisioned_at.isoformat() if router.last_provisioned_at else None,
+            "agent_installed": router.agent_installed or False,
+            "agent_online": agent_online,
+            "has_cached_scan": has_cached_scan,
         }
     
     except HTTPException:
