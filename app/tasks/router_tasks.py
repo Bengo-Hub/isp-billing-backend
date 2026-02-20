@@ -18,47 +18,67 @@ logger = get_logger(__name__)
 
 @celery_app.task(bind=True)
 def sync_router_status(self):
-    """Sync router status and update database."""
+    """Sync router status using agent poll data.
+
+    For routers with the polling agent installed, status is determined
+    by the last poll timestamp (no direct connection needed).
+    For routers without the agent, falls back to direct connectivity check.
+    """
     logger.info("Starting router status sync")
-    
+
     try:
         async def _sync_routers():
             async with AsyncSessionLocal() as db:
-                router_service = RouterService(db)
-                
-                # Get all active routers
+                from app.core.config import settings
+
                 result = await db.execute(
                     select(Router).where(Router.is_active == True)
                 )
                 routers = result.scalars().all()
-                
+
                 synced_count = 0
+                online_count = 0
                 for router in routers:
                     try:
-                        # Check router connectivity
-                        is_online = await router_service.check_router_connectivity(router.id)
-                        
-                        if is_online:
-                            router.status = RouterStatus.ONLINE
-                            router.last_seen = datetime.utcnow()
+                        if router.agent_installed and router.last_poll_at:
+                            # Agent-based status: online if polled within threshold
+                            elapsed = (datetime.utcnow() - router.last_poll_at).total_seconds()
+                            threshold = router.agent_poll_interval * settings.agent_offline_threshold_multiplier
+                            if elapsed < threshold:
+                                router.status = RouterStatus.ONLINE
+                                online_count += 1
+                            else:
+                                router.status = RouterStatus.OFFLINE
                         else:
-                            router.status = RouterStatus.OFFLINE
-                        
+                            # Fallback: direct connectivity check
+                            router_service = RouterService(db)
+                            is_online = await router_service.check_router_connectivity(router.id)
+                            if is_online:
+                                router.status = RouterStatus.ONLINE
+                                router.last_seen = datetime.utcnow()
+                                online_count += 1
+                            else:
+                                router.status = RouterStatus.OFFLINE
+
                         synced_count += 1
                     except Exception as e:
                         logger.error(f"Failed to sync router {router.id}: {e}")
                         router.status = RouterStatus.OFFLINE
-                
+
                 await db.commit()
-                return synced_count
-        
+                return synced_count, online_count
+
         import asyncio
-        synced_count = asyncio.run(_sync_routers())
-        
-        logger.info(f"Router status sync completed. Synced {synced_count} routers")
+        synced_count, online_count = asyncio.run(_sync_routers())
+
+        logger.info(
+            f"Router status sync completed. "
+            f"Synced {synced_count} routers ({online_count} online)"
+        )
         return {
-            "status": "success", 
-            "synced_count": synced_count
+            "status": "success",
+            "synced_count": synced_count,
+            "online_count": online_count,
         }
     except Exception as exc:
         logger.error(f"Router status sync failed: {exc}")
@@ -226,4 +246,34 @@ def cleanup_old_router_logs(self, days_old: int = 30):
         }
     except Exception as exc:
         logger.error(f"Router logs cleanup failed: {exc}")
+        raise self.retry(exc=exc, countdown=60, max_retries=3)
+
+
+@celery_app.task(bind=True)
+def cleanup_expired_commands(self):
+    """Clean up expired router agent commands and reset stale sent commands."""
+    logger.info("Starting expired command cleanup")
+
+    try:
+        async def _cleanup():
+            async with AsyncSessionLocal() as db:
+                from app.services.router_agent import RouterAgentService
+                agent_service = RouterAgentService(db)
+                expired = await agent_service.cleanup_expired_commands()
+                stale = await agent_service.reset_stale_sent_commands()
+                return expired, stale
+
+        import asyncio
+        expired, stale = asyncio.run(_cleanup())
+
+        logger.info(
+            f"Command cleanup completed: {expired} expired, {stale} stale reset"
+        )
+        return {
+            "status": "success",
+            "expired_count": expired,
+            "stale_reset_count": stale,
+        }
+    except Exception as exc:
+        logger.error(f"Command cleanup failed: {exc}")
         raise self.retry(exc=exc, countdown=60, max_retries=3)
