@@ -177,6 +177,13 @@ class Settings(BaseSettings):
     mikrotik_api_username: str = "codevertex_api"
     mikrotik_api_password: str = "Vertex2020!"  # MUST be changed via env variable
 
+    # Router Agent (polling agent installed on MikroTik routers)
+    agent_default_poll_interval: int = 30  # seconds between agent polls
+    agent_offline_threshold_multiplier: int = 3  # offline if no poll in interval * multiplier
+    agent_command_expiry_hours: int = 1  # default command expiry
+    agent_max_commands_per_poll: int = 10  # max commands returned per poll
+    agent_script_version: str = "1.0"  # current agent script version
+
     # Rate Limiting
     rate_limit_enabled: bool = True
     rate_limit_requests: int = 100

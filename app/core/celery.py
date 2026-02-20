@@ -44,6 +44,10 @@ celery_app.conf.update(
             "task": "app.tasks.router_tasks.sync_router_status",
             "schedule": 60.0 * 5,  # Every 5 minutes
         },
+        "cleanup-expired-commands": {
+            "task": "app.tasks.router_tasks.cleanup_expired_commands",
+            "schedule": 60.0 * 15,  # Every 15 minutes
+        },
         "send-payment-reminders": {
             "task": "app.tasks.notification_tasks.send_payment_reminders",
             "schedule": 60.0 * 60 * 12,  # Twice daily

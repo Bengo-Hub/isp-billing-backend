@@ -13,7 +13,7 @@ from app.core.database import Base
 from app.core.config import settings
 # Import all models for autogenerate support
 from app.models import (
-    user, router, plan, subscription, billing, notification, provisioning,
+    user, router, router_command, plan, subscription, billing, notification, provisioning,
     organization, payment_gateway, platform_billing, customer_portal, rbac
 )
 

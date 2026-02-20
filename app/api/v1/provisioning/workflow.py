@@ -4,14 +4,17 @@ Handles the main provisioning workflow and session management.
 """
 import logging
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.models.user import User
 from app.api.deps import require_technician_or_admin, get_db
 from app.modules.provisioning import ProvisioningService
-from app.models.provisioning import ServiceType, ProvisioningStatus
+from app.models.provisioning import ServiceType, ProvisioningStatus, ProvisioningSession
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -593,4 +596,213 @@ async def check_device_status(
     except Exception as e:
         logger.error(f"Failed to check device status: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to check device status: {str(e)}")
+
+
+# ============================================================================
+# SCRIPT-BASED PROVISIONING (for routers unreachable from cloud backend)
+# ============================================================================
+# When the backend cannot directly connect to the router (e.g., cloud backend
+# + router on private LAN), provisioning is done via a RouterOS script that
+# the user pastes on the router. The script executes all commands locally and
+# POSTs a completion callback to the backend.
+# ============================================================================
+
+
+@router.get("/provision-script/{session_id}", response_class=PlainTextResponse)
+async def get_provisioning_script(
+    session_id: str,
+    token: str = Query(..., description="Provisioning token"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a RouterOS RSC script containing all provisioning commands.
+
+    This endpoint is used when the cloud backend cannot directly reach the router.
+    Instead of the backend executing commands via the RouterOS API, the user pastes
+    a command on the router that fetches and executes this script.
+
+    Flow:
+    1. Frontend calls POST /workflow to create a session
+    2. Backend detects it can't reach the router, returns script_url
+    3. User pastes the /tool/fetch command on the router
+    4. Router fetches this script and executes it
+    5. Script POSTs completion to /provision-script/{session_id}/complete
+    """
+    from app.core.security import verify_token
+    from app.modules.provisioning.commands import (
+        generate_configuration_commands,
+        generate_hotspot_commands,
+        generate_pppoe_commands,
+    )
+
+    # Verify token
+    try:
+        token_data = verify_token(token, token_type='access')
+    except Exception as e:
+        logger.warning(f'Provision script: token verification failed: {e}')
+        raise HTTPException(status_code=401, detail='Invalid token')
+
+    # Find the provisioning session
+    result = await db.execute(
+        select(ProvisioningSession).where(ProvisioningSession.session_id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Provisioning session not found")
+
+    # Get the session configuration
+    config = session.configuration or {}
+    service_type = session.service_type
+    routeros_version = config.get('routeros_version')
+
+    # Generate commands
+    all_commands = []
+
+    # Basic configuration commands (bridge, IP, DHCP, DNS, NAT)
+    config_commands = generate_configuration_commands(config, service_type, routeros_version)
+    all_commands.extend(config_commands)
+
+    # Service-specific commands
+    if service_type in (ServiceType.HOTSPOT, ServiceType('both')):
+        hotspot_commands = generate_hotspot_commands(config, routeros_version)
+        all_commands.extend(hotspot_commands)
+
+    if service_type in (ServiceType.PPPOE_SERVER, ServiceType('both')):
+        pppoe_commands = generate_pppoe_commands(config, routeros_version)
+        all_commands.extend(pppoe_commands)
+
+    # Build the RouterOS script
+    lines = [
+        "# Codevertex ISP Billing - Provisioning Script",
+        "# Generated for session: " + session_id,
+        f"# RouterOS version: {routeros_version or 'auto-detect'}",
+        "# All operations are logged to /log and displayed in terminal",
+        "",
+        ":put \"\"",
+        ":put \"=========================================\"",
+        ":put \"Codevertex Provisioning - Starting\"",
+        ":put \"=========================================\"",
+        "",
+    ]
+
+    # Convert each command dict to a RouterOS script line with error handling
+    total = len(all_commands)
+    for idx, cmd in enumerate(all_commands, 1):
+        command_str = cmd.get("command", "")
+        description = cmd.get("description", f"Command {idx}")
+        is_critical = cmd.get("critical", False)
+
+        if not command_str:
+            continue
+
+        lines.append(f"# [{idx}/{total}] {description}")
+
+        if is_critical:
+            # Critical commands: abort on failure
+            lines.append(f":do {{ {command_str}; :put \"[OK] {description}\"; :log info \"[PROVISION] {description}\" }} on-error={{ :put \"[FAIL] {description}\"; :log error \"[PROVISION] CRITICAL FAILURE: {description}\"; :error \"Provisioning aborted: {description}\" }}")
+        else:
+            # Non-critical commands: log warning and continue
+            lines.append(f":do {{ {command_str}; :put \"[OK] {description}\"; :log info \"[PROVISION] {description}\" }} on-error={{ :put \"[WARN] {description} (non-critical)\"; :log warning \"[PROVISION] {description} failed (non-critical)\" }}")
+
+        lines.append("")
+
+    # Completion summary
+    lines.extend([
+        ":put \"\"",
+        ":put \"=========================================\"",
+        ":put \"Provisioning completed successfully\"",
+        ":put \"=========================================\"",
+        "",
+    ])
+
+    # Completion callback to backend
+    try:
+        base_url = settings.backend_url or ''
+        complete_url = f"{base_url}/api/v1/provisioning/provision-script/{session_id}/complete?token={token}&status=completed"
+        complete_mode = "https" if complete_url.startswith("https://") else "http"
+        lines.extend([
+            "# Notify backend of completion",
+            ":do {",
+            f"  /tool/fetch mode={complete_mode} url=\"{complete_url}\" http-method=post dst-path=provision-complete.result",
+            "  :put \"[OK] Backend notified of provisioning completion\"",
+            "  :log info \"[PROVISION] Backend notified of completion\"",
+            "} on-error={ :put \"[WARN] Failed to notify backend (non-critical)\"; :log warning \"[PROVISION] Failed to notify backend\" }",
+        ])
+    except Exception:
+        lines.append(":put \"[WARN] Could not build completion callback URL\"")
+
+    return "\n".join(lines) + "\n"
+
+
+@router.post("/provision-script/{session_id}/complete")
+async def provisioning_script_complete(
+    request: Request,
+    session_id: str,
+    token: str = Query(..., description="Provisioning token"),
+    status: str = Query('completed', description="Provisioning status"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Callback endpoint: router reports that the provisioning script completed.
+
+    Called by the router after executing the provisioning script. Updates the
+    session status and broadcasts completion via WebSocket.
+    """
+    from app.core.security import verify_token
+    from datetime import datetime
+
+    # Verify token
+    try:
+        token_data = verify_token(token, token_type='access')
+    except Exception as e:
+        logger.warning(f'Provision complete: token verification failed: {e}')
+        raise HTTPException(status_code=401, detail='Invalid token')
+
+    # Find and update the session
+    result = await db.execute(
+        select(ProvisioningSession).where(ProvisioningSession.session_id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Provisioning session not found")
+
+    # Update session status
+    if status == 'completed':
+        session.status = ProvisioningStatus.COMPLETED
+        session.completed_at = datetime.utcnow()
+        session.progress = 100
+    elif status == 'failed':
+        session.status = ProvisioningStatus.FAILED
+        session.completed_at = datetime.utcnow()
+        session.error_message = "Script-based provisioning reported failure"
+    else:
+        session.status = ProvisioningStatus.COMPLETED
+        session.completed_at = datetime.utcnow()
+
+    await db.commit()
+
+    # Mark router as provisioned
+    if status == 'completed' and session.router_id:
+        try:
+            from app.services.router_provisioning import mark_provisioning_complete
+            service_type_str = session.service_type.value if hasattr(session.service_type, 'value') else str(session.service_type)
+            await mark_provisioning_complete(db, session.router_id, service_type_str)
+        except Exception as e:
+            logger.warning(f"Failed to mark router {session.router_id} as provisioned: {e}")
+
+    # Broadcast completion via WebSocket
+    try:
+        from app.api.v1.provisioning.stream import manager
+        await manager.send_message(session_id, {
+            'type': 'provisioning_complete',
+            'session_id': session_id,
+            'data': {
+                'status': status,
+                'message': 'Provisioning completed via script execution',
+                'timestamp': datetime.utcnow().isoformat(),
+            }
+        })
+    except Exception:
+        pass  # Best-effort
+
+    logger.info(f"Script-based provisioning completed for session {session_id} (status={status})")
+    return {'success': True, 'session_id': session_id, 'status': status}
 

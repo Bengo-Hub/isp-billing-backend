@@ -407,6 +407,13 @@ class ProvisioningService:
                 "connection_test": "successful"
             }
 
+            # Store routeros_version in session configuration for v6/v7 command branching
+            ros_version = system_info.get("version", "") if isinstance(system_info, dict) else ""
+            if ros_version:
+                config = session.configuration or {}
+                config["routeros_version"] = ros_version
+                session.configuration = config
+
             # Sub-step 4: Validate compatibility (100%)
             await self._update_step_progress(step_log, 100.0, "Validating compatibility...", session)
             await self._validate_router_compatibility(system_info, version_info)
@@ -461,8 +468,9 @@ class ProvisioningService:
             await self._update_step_progress(step_log, 10.0, "Creating configuration backup...", session)
             await backup_router_configuration(self.db, session, client, connection, self.logger)
 
-            # Apply basic configuration commands
-            commands = generate_configuration_commands(config, session.service_type)
+            # Apply basic configuration commands (pass routeros_version for v6/v7 branching)
+            routeros_version = config.get('routeros_version') or getattr(router, 'routeros_version', None)
+            commands = generate_configuration_commands(config, session.service_type, routeros_version=routeros_version)
             total_commands = len(commands)
 
             for i, command_data in enumerate(commands):
@@ -530,14 +538,15 @@ class ProvisioningService:
                 "port": router.port
             }
 
-            # Generate service-specific commands
+            # Generate service-specific commands (pass routeros_version for v6/v7 branching)
+            routeros_version = config.get('routeros_version') or getattr(router, 'routeros_version', None)
             if session.service_type == ServiceType.HOTSPOT:
-                commands = generate_hotspot_commands(config)
+                commands = generate_hotspot_commands(config, routeros_version=routeros_version)
             elif session.service_type == ServiceType.PPPOE_SERVER:
-                commands = generate_pppoe_commands(config)
+                commands = generate_pppoe_commands(config, routeros_version=routeros_version)
             else:  # BOTH
-                hotspot_commands = generate_hotspot_commands(config)
-                pppoe_commands = generate_pppoe_commands(config)
+                hotspot_commands = generate_hotspot_commands(config, routeros_version=routeros_version)
+                pppoe_commands = generate_pppoe_commands(config, routeros_version=routeros_version)
                 commands = hotspot_commands + pppoe_commands
 
             total_commands = len(commands)
