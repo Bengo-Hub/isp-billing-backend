@@ -379,14 +379,21 @@ async def get_bootstrap_script(
             ":do { /ip/service/set ssh port=2222; :put \"[OK] SSH configured on port 2222\"; :log info \"[BOOTSTRAP] SSH configured on port 2222\" } on-error={ :put \"[FAIL] Failed to configure SSH\"; :log error \"[BOOTSTRAP] Failed to configure SSH\" }",
             "",
             "# [STEP 6/8] Create API user group with full permissions",
+            "# Try v7 policies first (includes romon,rest-api), fall back to v6 if unsupported",
             ":put \"Creating codevertex-api user group...\"",
             ":log info \"[BOOTSTRAP] Creating codevertex-api user group...\"",
             ":if ([:len [/user/group/find name=\"codevertex-api\"]] = 0) do={",
             "  :do {",
             "    /user/group/add name=\"codevertex-api\" policy=local,telnet,ssh,ftp,reboot,read,write,policy,test,winbox,password,web,sniff,sensitive,api,romon,rest-api;",
-            "    :put \"[OK] User group 'codevertex-api' created successfully\";",
-            "    :log info \"[BOOTSTRAP] User group 'codevertex-api' created successfully\"",
-            "  } on-error={ :put \"[FAIL] Failed to create user group\"; :log error \"[BOOTSTRAP] Failed to create user group\" }",
+            "    :put \"[OK] User group 'codevertex-api' created (v7 policies)\";",
+            "    :log info \"[BOOTSTRAP] User group 'codevertex-api' created with v7 policies\"",
+            "  } on-error={",
+            "    :do {",
+            "      /user/group/add name=\"codevertex-api\" policy=local,telnet,ssh,ftp,reboot,read,write,policy,test,winbox,password,web,sniff,sensitive,api;",
+            "      :put \"[OK] User group 'codevertex-api' created (v6 policies)\";",
+            "      :log info \"[BOOTSTRAP] User group 'codevertex-api' created with v6 policies (romon/rest-api not available)\"",
+            "    } on-error={ :put \"[FAIL] Failed to create user group\"; :log error \"[BOOTSTRAP] Failed to create user group\" }",
+            "  }",
             "} else={",
             "  :put \"[SKIP] User group 'codevertex-api' already exists\";",
             "  :log info \"[BOOTSTRAP] User group 'codevertex-api' already exists\"",
@@ -433,8 +440,116 @@ async def get_bootstrap_script(
             "  :log info \"[BOOTSTRAP] Added script/fetch logging to memory\"",
             "} on-error={ :put \"[WARN] Failed to add script/fetch logging\" }",
             "",
-            "# [STEP 10/11] Download hotspot templates from backend",
+            "# [STEP 10/13] Collect device scan data and report to backend",
+            "# This allows the cloud backend to know the router's interfaces, services,",
+            "# and system info without needing direct API connectivity to the router.",
+            ":put \"Collecting device scan data...\"",
+            ":log info \"[BOOTSTRAP] Collecting device scan data...\"",
+            "",
+            "# Collect ethernet interface names",
+            ":local ifList \"\"",
+            ":do {",
+            "  :foreach i in=[/interface/ethernet/find] do={",
+            "    :local ifName [/interface/ethernet/get $i name]",
+            "    :if ([:len $ifList] > 0) do={ :set ifList ($ifList . \",\") }",
+            "    :set ifList ($ifList . $ifName)",
+            "  }",
+            "  :put (\"[OK] Ethernet interfaces: \" . $ifList)",
+            "} on-error={ :put \"[WARN] Failed to collect ethernet interfaces\" }",
+            "",
+            "# Collect SFP interface names",
+            ":do {",
+            "  :foreach i in=[/interface/sfp/find] do={",
+            "    :local ifName [/interface/sfp/get $i name]",
+            "    :if ([:len $ifList] > 0) do={ :set ifList ($ifList . \",\") }",
+            "    :set ifList ($ifList . $ifName)",
+            "  }",
+            "} on-error={}",
+            "",
+            "# Collect system info",
+            ":local sysVersion \"\"",
+            ":local sysBoard \"\"",
+            ":local sysArch \"\"",
+            ":local sysCpu \"0\"",
+            ":local sysUptime \"\"",
+            ":local sysTotalMem \"0\"",
+            ":local sysFreeMem \"0\"",
+            ":do {",
+            "  :set sysVersion [/system/resource/get version]",
+            "  :set sysBoard [/system/resource/get board-name]",
+            "  :set sysArch [/system/resource/get architecture-name]",
+            "  :set sysCpu [:tostr [/system/resource/get cpu-count]]",
+            "  :set sysUptime [/system/resource/get uptime]",
+            "  :set sysTotalMem [:tostr [/system/resource/get total-memory]]",
+            "  :set sysFreeMem [:tostr [/system/resource/get free-memory]]",
+            "  :put (\"[OK] System: \" . $sysBoard . \" / RouterOS \" . $sysVersion . \" / \" . $sysArch)",
+            "} on-error={ :put \"[WARN] Failed to collect system info\" }",
+            "",
+            "# Detect WAN interface (interface with default route)",
+            ":local wanIf \"ether1\"",
+            ":do {",
+            "  :foreach i in=[/ip/route/find where dst-address=\"0.0.0.0/0\" active=yes] do={",
+            "    :local gw [/ip/route/get $i gateway]",
+            "    :foreach a in=[/ip/address/find] do={",
+            "      :local addr [/ip/address/get $a address]",
+            "      :local net [/ip/address/get $a network]",
+            "      :local iface [/ip/address/get $a interface]",
+            "      :if ($net = [:pick $gw 0 [:find $gw \"/\"]]) do={ :set wanIf $iface }",
+            "    }",
+            "  }",
+            "  :put (\"[OK] WAN interface: \" . $wanIf)",
+            "} on-error={ :put \"[WARN] WAN detection failed, defaulting to ether1\" }",
+            "",
+            "# Check service status",
+            ":local hotspotActive \"false\"",
+            ":local pppoeActive \"false\"",
+            ":local dhcpActive \"false\"",
+            ":do { :if ([:len [/ip/hotspot/find]] > 0) do={ :set hotspotActive \"true\" } } on-error={}",
+            ":do { :if ([:len [/interface/pppoe-server/server/find]] > 0) do={ :set pppoeActive \"true\" } } on-error={}",
+            ":do { :if ([:len [/ip/dhcp-server/find]] > 0) do={ :set dhcpActive \"true\" } } on-error={}",
+            ":put (\"[OK] Services - Hotspot: \" . $hotspotActive . \", PPPoE: \" . $pppoeActive . \", DHCP: \" . $dhcpActive)",
+            "",
+            "# Collect IP addresses (format: addr@iface separated by |)",
+            ":local ipAddresses \"\"",
+            ":do {",
+            "  :foreach i in=[/ip/address/find] do={",
+            "    :local addr [/ip/address/get $i address]",
+            "    :local iface [/ip/address/get $i interface]",
+            "    :if ([:len $ipAddresses] > 0) do={ :set ipAddresses ($ipAddresses . \"|\") }",
+            "    :set ipAddresses ($ipAddresses . $addr . \"@\" . $iface)",
+            "  }",
+            "} on-error={ :put \"[WARN] Failed to collect IP addresses\" }",
+            "",
+            "# Collect DNS servers",
+            ":local dnsServers \"\"",
+            ":do { :set dnsServers [/ip/dns/get servers] } on-error={}",
+            "",
         ]
+
+        # POST scan data to backend scan-report endpoint
+        try:
+            base_scan = settings.backend_url or (request.url.scheme + '://' + request.url.netloc)
+            scan_report_url = f"{base_scan}/api/v1/provisioning/bootstrap/scan-report?token={token}&identity={identity}"
+            if session_id:
+                scan_report_url += f"&session_id={session_id}"
+            scan_mode = "https" if scan_report_url.startswith("https://") else "http"
+            lines.extend([
+                "# POST scan data to backend",
+                ":local scanPostData (\"interfaces=\" . $ifList . \"&version=\" . $sysVersion . \"&board=\" . $sysBoard . \"&arch=\" . $sysArch . \"&cpu_count=\" . $sysCpu . \"&uptime=\" . $sysUptime . \"&total_memory=\" . $sysTotalMem . \"&free_memory=\" . $sysFreeMem . \"&wan_interface=\" . $wanIf . \"&hotspot_active=\" . $hotspotActive . \"&pppoe_active=\" . $pppoeActive . \"&dhcp_active=\" . $dhcpActive . \"&ip_addresses=\" . $ipAddresses . \"&dns_servers=\" . $dnsServers)",
+                ":do {",
+                f"  /tool/fetch mode={scan_mode} url=\"{scan_report_url}\" http-method=post http-data=$scanPostData dst-path=scan-report.result",
+                "  :put \"[OK] Scan data sent to backend\"",
+                "  :log info \"[BOOTSTRAP] Scan data sent to backend\"",
+                "} on-error={ :put \"[WARN] Failed to send scan data (non-critical)\"; :log warning \"[BOOTSTRAP] Failed to send scan data\" }",
+                "",
+            ])
+        except Exception:
+            lines.append(":put \"[WARN] Could not build scan-report URL\"")
+            lines.append("")
+
+        lines.append(
+            "# [STEP 11/13] Download hotspot templates from backend",
+        )
 
         # Add template download commands only if org_slug is available
         if org_slug and settings.backend_url:
@@ -516,6 +631,211 @@ async def get_bootstrap_script(
     except Exception as e:
         logger.error(f"Failed to generate bootstrap script: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate bootstrap script")
+
+
+@router.post('/scan-report')
+async def bootstrap_scan_report(
+    request: Request,
+    token: str = Query(..., description="Provisioning token (required)"),
+    identity: Optional[str] = Query(None, description="Router identity"),
+    session_id: Optional[str] = Query(None, description="Provisioning session ID"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Receive device scan data collected by the bootstrap script running on the router.
+
+    The bootstrap script collects interface names, service status, system info, and
+    network configuration from the router itself, then POSTs this data here. This
+    eliminates the need for the cloud backend to connect directly to the router's
+    API port (which is impossible when the router is on a private/NAT'd network).
+
+    The scan data is stored via store_scanned_config() so the frontend's device scan
+    endpoint can return cached data without needing a direct connection.
+    """
+    from app.core.security import verify_token
+    from app.services.router_provisioning import store_scanned_config
+
+    # Verify token
+    try:
+        token_data = verify_token(token, token_type='access')
+    except Exception as e:
+        logger.warning(f'Scan report: token verification failed: {e}')
+        raise HTTPException(status_code=401, detail='Invalid token')
+
+    # Parse POST body (form-encoded from RouterOS /tool/fetch http-data=)
+    try:
+        body = await request.body()
+        body_str = body.decode('utf-8', errors='replace')
+        # Parse URL-encoded form data
+        from urllib.parse import parse_qs
+        form_data = parse_qs(body_str, keep_blank_values=True)
+        # parse_qs returns lists; flatten to single values
+        data = {k: v[0] if v else '' for k, v in form_data.items()}
+    except Exception as e:
+        logger.error(f'Scan report: failed to parse body: {e}')
+        raise HTTPException(status_code=400, detail='Failed to parse scan data')
+
+    logger.info(f"Scan report received: identity={identity}, interfaces={data.get('interfaces', '')}, version={data.get('version', '')}")
+
+    # Build structured scan data
+    interfaces_str = data.get('interfaces', '')
+    interfaces = [i.strip() for i in interfaces_str.split(',') if i.strip()] if interfaces_str else []
+
+    # Parse IP addresses (format: addr@iface|addr@iface)
+    ip_addresses_str = data.get('ip_addresses', '')
+    ip_entries = []
+    wan_interface = data.get('wan_interface', 'ether1')
+    router_ip = ''
+    router_ip_cidr = ''
+    if ip_addresses_str:
+        for entry in ip_addresses_str.split('|'):
+            if '@' in entry:
+                addr, iface = entry.split('@', 1)
+                ip_entries.append({'address': addr, 'interface': iface})
+                # Use first non-WAN address as router_ip
+                if iface != wan_interface and not router_ip:
+                    router_ip_cidr = addr
+                    router_ip = addr.split('/')[0] if '/' in addr else addr
+
+    # If no non-WAN IP found, use first available
+    if not router_ip and ip_entries:
+        router_ip_cidr = ip_entries[0]['address']
+        router_ip = router_ip_cidr.split('/')[0] if '/' in router_ip_cidr else router_ip_cidr
+
+    # Calculate network config from router IP CIDR
+    cidr = 24
+    network_address = ''
+    gateway = ''
+    subnet_mask = '255.255.255.0'
+    if '/' in router_ip_cidr:
+        ip_part, cidr_str = router_ip_cidr.split('/')
+        cidr = int(cidr_str)
+        parts = ip_part.split('.')
+        if cidr == 24:
+            network_address = f"{parts[0]}.{parts[1]}.{parts[2]}.0"
+            gateway = f"{parts[0]}.{parts[1]}.{parts[2]}.1"
+            subnet_mask = '255.255.255.0'
+        elif cidr == 16:
+            network_address = f"{parts[0]}.{parts[1]}.0.0"
+            gateway = f"{parts[0]}.{parts[1]}.0.1"
+            subnet_mask = '255.255.0.0'
+        else:
+            network_address = f"{parts[0]}.{parts[1]}.{parts[2]}.0"
+            gateway = f"{parts[0]}.{parts[1]}.{parts[2]}.1"
+
+    # Parse DNS servers
+    dns_str = data.get('dns_servers', '')
+    dns_servers = [d.strip() for d in dns_str.split(',') if d.strip()] if dns_str else []
+
+    # Build service status
+    services = [
+        {
+            'name': 'hotspot',
+            'active': data.get('hotspot_active', 'false').lower() == 'true',
+            'available': True,
+        },
+        {
+            'name': 'pppoe',
+            'active': data.get('pppoe_active', 'false').lower() == 'true',
+            'available': True,
+        },
+        {
+            'name': 'dhcp',
+            'active': data.get('dhcp_active', 'false').lower() == 'true',
+            'available': True,
+        },
+    ]
+
+    # Build network config
+    network_config = {
+        'router_ip': router_ip,
+        'router_ip_cidr': router_ip_cidr,
+        'network': f"{network_address}/{cidr}" if network_address else '',
+        'network_address': network_address,
+        'gateway': gateway,
+        'broadcast': '',
+        'dhcp_start': '',
+        'dhcp_end': '',
+        'dhcp_pool': '',
+        'subnet_mask': subnet_mask,
+        'cidr': cidr,
+        'total_hosts': (2 ** (32 - cidr)) - 2 if cidr < 32 else 1,
+        'dns_servers': dns_servers,
+        'current_subnet': router_ip_cidr,
+        'wan_interface': wan_interface,
+        'ip_addresses': ip_entries,
+    }
+
+    # Build system info
+    system_info = {
+        'identity': identity or data.get('identity', ''),
+        'board_name': data.get('board', ''),
+        'model': data.get('board', ''),
+        'version': data.get('version', ''),
+        'architecture': data.get('arch', ''),
+        'cpu_count': int(data.get('cpu_count', '0') or '0'),
+        'cpu_load': None,
+        'total_memory': data.get('total_memory', ''),
+        'free_memory': data.get('free_memory', ''),
+        'uptime': data.get('uptime', ''),
+        'time': '',
+        'timezone': '',
+    }
+
+    # Find router by identity or IP
+    from app.models.router import Router as RouterModel
+    client_ip = request.client.host if request.client else None
+    router_obj = None
+
+    if identity:
+        result = await db.execute(select(RouterModel).where(RouterModel.name == identity))
+        router_obj = result.scalar_one_or_none()
+
+    if not router_obj and client_ip:
+        result = await db.execute(select(RouterModel).where(RouterModel.ip_address == client_ip))
+        router_obj = result.scalar_one_or_none()
+
+    if router_obj:
+        try:
+            await store_scanned_config(
+                db=db,
+                router_id=router_obj.id,
+                interfaces=interfaces,
+                services=services,
+                network_config=network_config,
+                system_info=system_info,
+            )
+            logger.info(f"Scan report: stored config for router {router_obj.id} ({identity}): {len(interfaces)} interfaces")
+
+            # Broadcast scan_complete via WebSocket if session_id provided
+            if session_id:
+                try:
+                    from app.api.v1.provisioning.stream import manager
+                    await manager.send_message(session_id, {
+                        'type': 'scan_complete',
+                        'session_id': session_id,
+                        'data': {
+                            'interfaces': interfaces,
+                            'wan_interface': wan_interface,
+                            'version': system_info.get('version', ''),
+                            'board': system_info.get('board_name', ''),
+                            'message': 'Device scan data received from bootstrap',
+                        }
+                    })
+                except Exception:
+                    pass  # WebSocket broadcast is best-effort
+
+        except Exception as e:
+            logger.error(f"Scan report: failed to store config: {e}")
+            # Don't fail - the data was received, just couldn't persist
+    else:
+        logger.warning(f"Scan report: no router found for identity={identity}, ip={client_ip}")
+
+    return {
+        'success': True,
+        'router_id': router_obj.id if router_obj else None,
+        'interfaces_count': len(interfaces),
+        'version': system_info.get('version', ''),
+    }
 
 
 @router.post('/notify')

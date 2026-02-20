@@ -27,6 +27,7 @@ router = APIRouter()
 
 class DeviceScanRequest(BaseModel):
     router_id: int
+    force_rescan: bool = False  # Skip cached data and connect directly to router
 
 
 class ServiceStatus(BaseModel):
@@ -101,10 +102,14 @@ async def scan_device(
 
     Scanned data is persisted to the router's config JSON field to avoid
     re-scanning once provisioning is complete.
-    """
-    from app.services.router_provisioning import get_router_credentials, store_scanned_config
 
-    logger.info(f"Device scan request for router_id={request.router_id} by user={current_user.username}")
+    For cloud deployments where the backend cannot directly reach the router,
+    the bootstrap script collects scan data and POSTs it to /bootstrap/scan-report.
+    This endpoint checks for that cached data first before attempting a direct connection.
+    """
+    from app.services.router_provisioning import get_router_credentials, store_scanned_config, get_scanned_config
+
+    logger.info(f"Device scan request for router_id={request.router_id} by user={current_user.username} (force_rescan={request.force_rescan})")
 
     # Get router from database
     result = await db.execute(select(Router).where(Router.id == request.router_id))
@@ -113,6 +118,77 @@ async def scan_device(
     if not router_obj:
         raise HTTPException(status_code=404, detail="Router not found")
 
+    # =========================================================================
+    # CHECK CACHED SCAN DATA FIRST (from bootstrap scan-report callback)
+    # This is the primary path for cloud deployments where the backend cannot
+    # directly reach the router's API port on a private/NAT'd network.
+    # =========================================================================
+    if not request.force_rescan:
+        cached = await get_scanned_config(db, request.router_id)
+        if cached:
+            logger.info(f"Returning cached scan data for router {request.router_id}")
+            try:
+                cached_interfaces = cached.get('interfaces', [])
+                cached_services = cached.get('services', [])
+                cached_network = cached.get('network_config', {})
+                cached_sysinfo = cached.get('system_info', {})
+
+                # Detect WAN from cached data
+                wan_interface = cached_network.get('wan_interface', 'ether1')
+                if not wan_interface and cached_interfaces:
+                    wan_interface = cached_interfaces[0] if cached_interfaces else 'ether1'
+
+                # Build response from cached data with safe defaults
+                return DeviceScanResponse(
+                    interfaces=cached_interfaces,
+                    wan_interface=wan_interface,
+                    services=[ServiceStatus(
+                        name=s.get('name', ''),
+                        active=s.get('active', False),
+                        available=s.get('available', True),
+                    ) for s in cached_services],
+                    network_config=NetworkConfiguration(
+                        router_ip=cached_network.get('router_ip', ''),
+                        router_ip_cidr=cached_network.get('router_ip_cidr', cached_network.get('current_subnet', '')),
+                        network=cached_network.get('network', ''),
+                        network_address=cached_network.get('network_address', ''),
+                        gateway=cached_network.get('gateway', ''),
+                        broadcast=cached_network.get('broadcast', ''),
+                        dhcp_start=cached_network.get('dhcp_start', ''),
+                        dhcp_end=cached_network.get('dhcp_end', ''),
+                        dhcp_pool=cached_network.get('dhcp_pool', ''),
+                        subnet_mask=cached_network.get('subnet_mask', '255.255.255.0'),
+                        cidr=cached_network.get('cidr', 24),
+                        total_hosts=cached_network.get('total_hosts', 254),
+                        dns_servers=cached_network.get('dns_servers', []),
+                        existing_dhcp_pool=cached_network.get('existing_dhcp_pool'),
+                        existing_dhcp_range=cached_network.get('existing_dhcp_range'),
+                        current_subnet=cached_network.get('current_subnet', ''),
+                    ),
+                    system_info=SystemInfo(
+                        identity=cached_sysinfo.get('identity', ''),
+                        board_name=cached_sysinfo.get('board_name', ''),
+                        model=cached_sysinfo.get('model', cached_sysinfo.get('board_name', '')),
+                        version=cached_sysinfo.get('version', ''),
+                        architecture=cached_sysinfo.get('architecture', ''),
+                        cpu_count=cached_sysinfo.get('cpu_count'),
+                        cpu_load=cached_sysinfo.get('cpu_load'),
+                        total_memory=cached_sysinfo.get('total_memory'),
+                        free_memory=cached_sysinfo.get('free_memory'),
+                        uptime=cached_sysinfo.get('uptime'),
+                        time=cached_sysinfo.get('time', ''),
+                        timezone=cached_sysinfo.get('timezone', ''),
+                    ),
+                    current_subnet=cached_network.get('current_subnet', ''),
+                    available_services=[s.get('name', '') for s in cached_services if s.get('available') and not s.get('active')],
+                )
+            except Exception as e:
+                logger.warning(f"Failed to build response from cached data for router {request.router_id}: {e}")
+                # Fall through to direct connection attempt
+
+    # =========================================================================
+    # DIRECT CONNECTION (fallback for local/same-network deployments)
+    # =========================================================================
     # Get credentials from DB (encrypted) with fallback to env settings
     credentials = await get_router_credentials(db, request.router_id)
     if not credentials:
