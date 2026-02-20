@@ -475,14 +475,8 @@ async def get_bootstrap_script(
             "  :put (\"[OK] Ethernet interfaces: \" . $ifList)",
             "} on-error={ :put \"[WARN] Failed to collect ethernet interfaces\" }",
             "",
-            "# Collect SFP interface names",
-            ":do {",
-            "  :foreach i in=[/interface/sfp/find] do={",
-            "    :local ifName [/interface/sfp/get $i name]",
-            "    :if ([:len $ifList] > 0) do={ :set ifList ($ifList . \",\") }",
-            "    :set ifList ($ifList . $ifName)",
-            "  }",
-            "} on-error={}",
+            "# Note: SFP interfaces are included under /interface/ethernet/ on RouterOS v7",
+            "# No separate SFP collection needed (avoids parse error on routers without SFP menu)",
             "",
             "# Collect system info",
             ":local sysVersion \"\"",
@@ -597,7 +591,9 @@ async def get_bootstrap_script(
                 "",
             ])
 
-        # [STEP 12/14] Install CodeVertex polling agent via fetch + import
+        # [STEP 12/14] Install CodeVertex polling agent
+        # Downloads agent code as a standalone .rsc file, then creates a scheduler
+        # that runs /import on it every N seconds. No complex escaping needed.
         if agent_token and settings.backend_url and router_obj:
             agent_script_url = f"{settings.backend_url}/api/v1/router-agent/script/{router_obj.id}?token={agent_token}"
             agent_fetch_mode = "https" if agent_script_url.startswith("https://") else "http"
@@ -608,16 +604,27 @@ async def get_bootstrap_script(
                 ":put \"Installing CodeVertex billing agent...\"",
                 ":log info \"[BOOTSTRAP] Installing CodeVertex billing agent...\"",
                 "",
-                "# Download and install the agent script from backend",
+                "# Download agent code to router filesystem",
                 ":do {",
-                f"  /tool/fetch mode={agent_fetch_mode} url=\"{agent_script_url}\" dst-path=codevertex-agent-install.rsc",
-                "  :delay 1s",
-                "  /import codevertex-agent-install.rsc",
-                "  :put \"[OK] Billing agent installed successfully\"",
-                "  :log info \"[BOOTSTRAP] Billing agent installed successfully\"",
+                f"  /tool/fetch mode={agent_fetch_mode} url=\"{agent_script_url}\" dst-path=codevertex-agent.rsc",
+                "  :put \"[OK] Agent code downloaded\"",
+                "  :log info \"[BOOTSTRAP] Agent code downloaded\"",
                 "} on-error={",
-                "  :put \"[WARN] Failed to install billing agent (non-critical)\"",
-                "  :log warning \"[BOOTSTRAP] Failed to install billing agent\"",
+                "  :put \"[WARN] Failed to download agent code\"",
+                "  :log warning \"[BOOTSTRAP] Failed to download agent code\"",
+                "}",
+                "",
+                "# Remove existing agent scheduler",
+                ":do { /system/scheduler/remove [find name=\"codevertex-agent\"] } on-error={}",
+                "",
+                f"# Create scheduler to run agent every {poll_interval} seconds",
+                ":do {",
+                f"  /system/scheduler/add name=\"codevertex-agent\" interval={poll_interval}s on-event=\"/import codevertex-agent.rsc\" policy=ftp,reboot,read,write,policy,test,password,sniff,sensitive,api",
+                f"  :put \"[OK] Agent scheduler created (every {poll_interval}s)\"",
+                f"  :log info \"[BOOTSTRAP] Agent scheduler created (every {poll_interval}s)\"",
+                "} on-error={",
+                "  :put \"[WARN] Failed to create agent scheduler\"",
+                "  :log warning \"[BOOTSTRAP] Failed to create agent scheduler\"",
                 "}",
                 "",
             ])
@@ -1139,31 +1146,53 @@ async def check_direct_api_access(
     current_user: User = Depends(require_technician_or_admin()),
 ):
     """Check if router has stored credentials for direct API reprovisioning.
-    
+
     Returns:
         {
             "can_use_direct_api": bool,
             "bootstrap_completed": bool,
-            "provisioning_status": str
+            "provisioning_status": str,
+            "agent_installed": bool,
+            "agent_online": bool,
+            "has_cached_scan": bool
         }
     """
     try:
         has_access = await can_use_direct_api(db, router_id)
-        
+
         # Get router details
         from sqlalchemy import select
         from app.models.router import Router
         result = await db.execute(select(Router).where(Router.id == router_id))
         router = result.scalar_one_or_none()
-        
+
         if not router:
             raise HTTPException(status_code=404, detail="Router not found")
-        
+
+        # Determine if agent is online based on last_poll_at
+        agent_online = False
+        if router.agent_installed and router.last_poll_at:
+            elapsed = (datetime.utcnow() - router.last_poll_at).total_seconds()
+            threshold = (router.agent_poll_interval or 30) * 3  # 3x poll interval
+            agent_online = elapsed < threshold
+
+        # Check if we have cached scan data in router.config
+        has_cached_scan = False
+        try:
+            if router.config:
+                config_data = json.loads(router.config) if isinstance(router.config, str) else router.config
+                has_cached_scan = bool(config_data.get("scanned_data"))
+        except Exception:
+            pass
+
         return {
             "can_use_direct_api": has_access,
             "bootstrap_completed": router.bootstrap_completed or False,
             "provisioning_status": router.provisioning_status or 'pending',
-            "last_provisioned_at": router.last_provisioned_at.isoformat() if router.last_provisioned_at else None
+            "last_provisioned_at": router.last_provisioned_at.isoformat() if router.last_provisioned_at else None,
+            "agent_installed": router.agent_installed or False,
+            "agent_online": agent_online,
+            "has_cached_scan": has_cached_scan,
         }
     
     except HTTPException:
