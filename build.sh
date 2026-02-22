@@ -201,6 +201,7 @@ fi
 # =============================================================================
 # SECRETS SETUP (via centralized devops-k8s script)
 # ============================================================================= 
+# Create service secrets using devops-k8s script if not exists
 if ! kubectl -n "$NAMESPACE" get secret "$ENV_SECRET_NAME" >/dev/null 2>&1; then
   if [[ -d "$DEVOPS_DIR" && -f "$DEVOPS_DIR/scripts/infrastructure/create-service-secrets.sh" ]]; then
     info "Creating secrets for ${APP_NAME} using devops-k8s script..."
