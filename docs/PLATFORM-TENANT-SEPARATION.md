@@ -4,6 +4,8 @@
 
 This document explains the clear separation between **Platform-level settings** and **Tenant-specific settings** in the ISP Billing system. This separation ensures proper access control, data isolation, and maintainability.
 
+**Payment gateways: same gateway, two config levels.** Paystack and M-Pesa are not "platform gateways" vs "tenant gateways" as separate records — they are **one gateway type** with **platform-level config** (API keys, webhook URL, Daraja consumer key/secret/passkey) and **tenant-level config** (payout recipient, schedule, M-Pesa short code where tenant-specific). Platform holds technical credentials; tenants configure only business-facing settings (payout destination, threshold, cycle). Treasury service follows this same pattern; see treasury-api `docs/paystack-and-platform-admin.md`.
+
 ---
 
 ## Design Principles
