@@ -9,7 +9,7 @@ const { data, error } = async () => {
     },
     {
       headers: {
-        'Authorization': 'Bearer 4a1bab46af94dd9266a4a070715ed3fdf4ad57679e7ce80ed82a3962e5891714'
+        'Authorization': 'Bearer <YOUR_APIWAP_API_KEY>'
       },
     })
     return {
