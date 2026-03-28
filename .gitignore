@@ -158,3 +158,9 @@ uploads/
 # Backup files
 *.bak
 *.backup
+
+# Kubernetes secrets
+KubeSecrets/
+
+# Certificates
+*.pem
