@@ -1,4 +1,4 @@
-# Authentication Implementation - Backend
+﻿# Authentication Implementation - Backend
 
 ## Overview
 This document details the backend authentication implementation, including support for both email and username login.
@@ -448,5 +448,5 @@ login: async (usernameOrEmail: string, password: string) => {
 
 **Last Updated**: October 21, 2025  
 **Version**: 1.0.0  
-**Author**: Codevertex IT Solutions
+**Author**: Codevertex Africa Limited
 

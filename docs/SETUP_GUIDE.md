@@ -1,4 +1,4 @@
-# ISP Billing Software - Complete Setup Guide
+﻿# ISP Billing Software - Complete Setup Guide
 
 ## Table of Contents
 1. [Quick Start (One-Command Setup)](#quick-start-one-command-setup)
@@ -979,5 +979,5 @@ For issues, questions, or contributions:
 
 **Last Updated**: October 21, 2025
 **Version**: 1.0.0
-**Author**: Codevertex IT Solutions
+**Author**: Codevertex Africa Limited
 

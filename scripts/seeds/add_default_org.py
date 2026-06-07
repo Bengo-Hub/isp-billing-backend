@@ -1,4 +1,4 @@
-"""Quick script to add the default organization for portal access."""
+﻿"""Quick script to add the default organization for portal access."""
 
 import asyncio
 import sys
@@ -34,7 +34,7 @@ async def add_default_organizations():
 
         if not platform_org:
             platform_org = Organization(
-                name="Codevertex IT Solutions",  # Fixed typo
+                name="Codevertex Africa Limited",  # Fixed typo
                 slug="codevertex",
                 organization_type=OrganizationType.HOTSPOT,
                 status=OrganizationStatus.ACTIVE,
