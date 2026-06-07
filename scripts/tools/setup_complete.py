@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Complete Setup Script for Codevertex ISP Billing System
 
@@ -216,7 +216,7 @@ def create_admin_accounts(db: Session, roles: dict):
                 email="superuser@codevertexitsolutions.com",
                 first_name="Super",
                 last_name="User",
-                company_name="Codevertex IT Solutions",
+                company_name="Codevertex Africa Limited",
                 hashed_password=superuser_password_hash,
                 role=UserRole.SUPERUSER,
                 status=UserStatus.ACTIVE,
