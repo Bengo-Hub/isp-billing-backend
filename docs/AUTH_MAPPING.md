@@ -1,4 +1,4 @@
-# Authentication API Mapping - Frontend to Backend
+﻿# Authentication API Mapping - Frontend to Backend
 
 ## Overview
 This document explains how the frontend authentication forms map to the backend API endpoints and database models.
@@ -571,5 +571,5 @@ describe('Auth Store', () => {
 
 **Last Updated**: October 21, 2025  
 **Version**: 1.0.0  
-**Author**: Codevertex IT Solutions
+**Author**: Codevertex Africa Limited
 

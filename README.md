@@ -1,4 +1,4 @@
-# Codevertex ISP Billing System - Backend
+﻿# Codevertex ISP Billing System - Backend
 
 A comprehensive, production-ready ISP billing and management system built with FastAPI, supporting MikroTik router integration, M-PESA payments, RBAC, and multi-tenant architecture.
 
@@ -267,9 +267,9 @@ For issues, questions, or contributions:
 
 MIT License - See LICENSE file for details
 
-## 🏢 About Codevertex IT Solutions
+## 🏢 About Codevertex Africa Limited
 
-Codevertex IT Solutions specializes in ISP management software, network automation, and billing systems.
+Codevertex Africa Limited specializes in ISP management software, network automation, and billing systems.
 
 ---
 

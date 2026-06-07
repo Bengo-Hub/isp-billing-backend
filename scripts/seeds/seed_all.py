@@ -1,4 +1,4 @@
-"""Master seed script for seeding all demo data with configurable options.
+﻿"""Master seed script for seeding all demo data with configurable options.
 
 Supports environment-aware seeding:
   --env dev         (default) Seeds everything including demo data
@@ -327,7 +327,7 @@ class MasterSeeder:
                 await _seed_platform_settings(db, admin)
                 await _seed_subscription_tiers(db)
 
-                # Ensure platform org (Codevertex IT Solutions) exists
+                # Ensure platform org (Codevertex Africa Limited) exists
                 await self._seed_platform_org(db)
 
                 await db.commit()
@@ -338,7 +338,7 @@ class MasterSeeder:
                 raise
 
     async def _seed_platform_org(self, db: AsyncSession):
-        """Ensure the platform organization (Codevertex IT Solutions) exists."""
+        """Ensure the platform organization (Codevertex Africa Limited) exists."""
         from app.models.organization import Organization, OrganizationType, OrganizationStatus
 
         result = await db.execute(
@@ -347,9 +347,9 @@ class MasterSeeder:
         if result.scalar_one_or_none():
             return
 
-        self.logger.info("Creating platform organization: Codevertex IT Solutions")
+        self.logger.info("Creating platform organization: Codevertex Africa Limited")
         org = Organization(
-            name="Codevertex IT Solutions",
+            name="Codevertex Africa Limited",
             slug="codevertex",
             organization_type=OrganizationType.HOTSPOT,
             status=OrganizationStatus.ACTIVE,
@@ -764,7 +764,7 @@ class MasterSeeder:
             print("\n[DATA] PRODUCTION DATA SEEDED:")
             print("  * RBAC roles and permissions")
             print("  * Platform superuser (credentials from env vars)")
-            print("  * Platform organization (Codevertex IT Solutions)")
+            print("  * Platform organization (Codevertex Africa Limited)")
             print("  * Platform settings")
             print("  * Subscription tiers (Hotspot Starter, PPPoE Starter)")
             print("  * Package categories and templates")

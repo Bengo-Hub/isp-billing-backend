@@ -1,4 +1,4 @@
-# MikroTik Router Provisioning - Complete Technical Guide
+﻿# MikroTik Router Provisioning - Complete Technical Guide
 
 ## Table of Contents
 1. [Introduction](#introduction)
@@ -1238,5 +1238,5 @@ telnet <router-ip> 8728
 
 **Last Updated**: October 21, 2025  
 **Version**: 1.0.0  
-**Author**: Codevertex IT Solutions
+**Author**: Codevertex Africa Limited
 
