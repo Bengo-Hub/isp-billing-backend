@@ -496,6 +496,23 @@ def _generate_routeros_agent_script(
             }} on-error={{ :set cs "failed"; :set cm "create error" }}
 {report}
           }}
+
+          # --- FETCH + IMPORT (full provisioning / arbitrary .rsc via agent) ---
+          # Lets the cloud deliver Step-3 service setup to a NAT'd router: the
+          # agent downloads a generated .rsc (provision-script) and imports it.
+          :if ($action = "fetch_import") do={{
+            :local sep2 [:find $rest "|"]
+            :local furl [:pick $rest 0 $sep2]
+            :local cid [:pick $rest ($sep2 + 1) [:len $rest]]
+            :local cs "success"
+            :local cm ""
+            :do {{
+              /tool/fetch url=$furl dst-path=cvcmd.rsc
+              :delay 2s
+              /import file-name=cvcmd.rsc
+            }} on-error={{ :set cs "failed"; :set cm "fetch_import error" }}
+{report}
+          }}
         }}
       }}
     }}
