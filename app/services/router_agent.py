@@ -134,6 +134,10 @@ class RouterAgentService:
             router.free_memory = telemetry["free_memory"]
         if telemetry.get("total_memory") is not None:
             router.total_memory = telemetry["total_memory"]
+        if telemetry.get("free_hdd_space") is not None:
+            router.free_hdd_space = telemetry["free_hdd_space"]
+        if telemetry.get("total_hdd_space") is not None:
+            router.total_hdd_space = telemetry["total_hdd_space"]
         if telemetry.get("uptime") is not None:
             router.uptime = self._parse_uptime(telemetry["uptime"])
         if telemetry.get("version"):
@@ -427,13 +431,47 @@ class RouterAgentService:
 
     @staticmethod
     def _parse_uptime(uptime_str: str) -> int:
-        """Parse RouterOS uptime string to seconds.
+        """Parse a RouterOS uptime string to seconds.
 
-        Examples: "3d12h45m30s", "12h30m", "45m10s", "30s"
+        Handles BOTH formats RouterOS emits:
+        - letter format: "3d12h45m30s", "12h30m", "45m10s", "30s", "1w2d3h"
+        - colon format:  "00:10:04", "5:18:57", "1d 02:03:04"
         """
         if isinstance(uptime_str, (int, float)):
             return int(uptime_str)
 
+        s = str(uptime_str).strip()
+        if not s:
+            return 0
+
+        # Colon format (optionally prefixed with "<days>d "), e.g. "1d 02:03:04"
+        if ":" in s:
+            total = 0
+            day_part = ""
+            time_part = s
+            if "d" in s:
+                # split "1d 02:03:04" or "1d02:03:04"
+                idx = s.find("d")
+                day_part = s[:idx].strip()
+                time_part = s[idx + 1:].strip()
+                try:
+                    total += int(day_part) * 86400
+                except ValueError:
+                    pass
+            bits = time_part.split(":")
+            try:
+                nums = [int(b) for b in bits]
+                if len(nums) == 3:
+                    total += nums[0] * 3600 + nums[1] * 60 + nums[2]
+                elif len(nums) == 2:
+                    total += nums[0] * 60 + nums[1]
+                elif len(nums) == 1:
+                    total += nums[0]
+            except ValueError:
+                pass
+            return total
+
+        # Letter format
         total = 0
         current = ""
         for char in str(uptime_str):

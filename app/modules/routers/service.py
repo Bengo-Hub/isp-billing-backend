@@ -229,8 +229,11 @@ class RouterService:
         if not router or not router.winbox_port:
             return None
 
-        # Get VPN domain from organization settings
-        vpn_domain = "vpn.codevertex.com"  # Default
+        # No hardcoded fake default: a remote Winbox URL only exists once a real
+        # VPN domain is configured (per-org). Returns None otherwise so callers
+        # fall back to the local URL instead of an unresolvable vpn.* host.
+        from app.core.config import settings as app_settings
+        vpn_domain = (getattr(app_settings, "vpn_domain", "") or "vpn.codevertexitsolutions.com").strip()
 
         if router.organization_id:
             result = await self.db.execute(
@@ -238,10 +241,12 @@ class RouterService:
                     OrganizationSettings.organization_id == router.organization_id
                 )
             )
-            settings = result.scalar_one_or_none()
-            if settings and settings.vpn_domain:
-                vpn_domain = settings.vpn_domain
+            org_settings = result.scalar_one_or_none()
+            if org_settings and getattr(org_settings, "vpn_domain", None):
+                vpn_domain = org_settings.vpn_domain
 
+        if not vpn_domain:
+            return None
         return f"{vpn_domain}:{router.winbox_port}"
 
     async def get_by_id(self, router_id: int) -> Optional[Router]:

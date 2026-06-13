@@ -16,6 +16,8 @@ class AgentPollRequest(BaseModel):
     cpu_load: int = Field(0, ge=0, le=100, description="CPU load percentage")
     free_memory: int = Field(0, ge=0, description="Free memory in bytes")
     total_memory: int = Field(0, ge=0, description="Total memory in bytes")
+    free_hdd_space: int = Field(0, ge=0, description="Free storage in bytes")
+    total_hdd_space: int = Field(0, ge=0, description="Total storage in bytes")
     active_pppoe: int = Field(0, ge=0, description="Active PPPoE sessions")
     active_hotspot: int = Field(0, ge=0, description="Active hotspot sessions")
 
