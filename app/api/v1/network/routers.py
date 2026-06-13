@@ -390,6 +390,25 @@ async def get_router_action_script(
             ":log info \"CVACTION: time synced\"\n"
         )
 
+    if action == "reboot":
+        # NAT-safe reboot: the agent imports this .rsc which schedules a reboot a
+        # few seconds out so the import (and its result report) completes first.
+        return (
+            ":log info \"CVACTION: reboot requested by CodeVertex\"\n"
+            ":delay 3s\n"
+            "/system/reboot\n"
+        )
+
+    if action == "backup":
+        # NAT-safe backup: run /system/backup/save locally on the router. The
+        # file stays on the router (downloadable via winbox/ftp); the backend
+        # records the request + timestamp in router_backups.
+        return (
+            ":local bname (\"codevertex-\" . [:pick [/system/clock/get date] 0 11])\n"
+            ":do { /system/backup/save name=$bname } on-error={ :log warning \"CVACTION: backup failed\" }\n"
+            ":log info \"CVACTION: backup saved\"\n"
+        )
+
     if action == "sync_hotspot":
         org_slug = ""
         if router_obj.organization_id:
@@ -543,20 +562,52 @@ async def get_active_connections(
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> List[Dict[str, Any]]:
-    """Get active hotspot and PPPoE connections directly from MikroTik."""
-    from app.integrations.mikrotik import get_mikrotik_client
-    from app.services.router_provisioning import get_router_credentials
+    """Get active hotspot + PPPoE connections — NAT-safe (agent-sourced).
+
+    Routers are behind NAT so the cloud cannot query them directly. The polling
+    agent reports its active hotspot/PPPoE user list on each poll (stored on the
+    router row); we serve that here. For non-agent (locally reachable) routers we
+    fall back to a direct RouterOS query.
+
+    Each entry: {user, type, address, mac-address, uptime}. Key names mirror the
+    frontend's expectations (``user`` / ``mac-address``).
+    """
+    import json as _json
 
     service = RouterService(db, organization_id=_get_org_id(current_user))
     router_obj = await service.get_by_id(router_id)
     if not router_obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
 
-    # Get credentials from DB (encrypted) with fallback to env settings
+    # NAT-safe path: serve the agent-reported list.
+    if getattr(router_obj, "agent_installed", False):
+        raw = getattr(router_obj, "active_users_json", None)
+        if not raw:
+            return []
+        try:
+            users = _json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+        return [
+            {
+                "user": u.get("username", ""),
+                "name": u.get("username", ""),
+                "type": u.get("type", ""),
+                "address": u.get("address", ""),
+                "mac-address": u.get("mac", ""),
+                "uptime": u.get("uptime", ""),
+            }
+            for u in users
+            if isinstance(u, dict)
+        ]
+
+    # Non-agent router: attempt a direct RouterOS query (reachable nets only).
+    from app.integrations.mikrotik import get_mikrotik_client
+    from app.services.router_provisioning import get_router_credentials
+
     credentials = await get_router_credentials(db, router_id)
     if not credentials:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No credentials available for router")
-
+        return []
     client = get_mikrotik_client()
     connection = await client.connect(
         ip_address=router_obj.ip_address,
@@ -565,7 +616,8 @@ async def get_active_connections(
         port=router_obj.port
     )
     if not connection:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to connect to router")
+        # NAT-safe contract: never raise a 502 here, just report no live data.
+        return []
     try:
         connections = await client.get_active_connections(connection)
         return connections
@@ -581,20 +633,45 @@ async def disconnect_user(
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Disable a hotspot or PPPoE user on the router (soft disconnect)."""
-    from app.integrations.mikrotik import get_mikrotik_client
-    from app.services.router_provisioning import get_router_credentials
+    """Disconnect a hotspot or PPPoE user — NAT-safe (queues an agent command).
+
+    The agent body already supports the ``disconnect`` action (removes the active
+    hotspot/PPPoE session locally). For non-agent routers we fall back to a direct
+    RouterOS call.
+    """
+    from app.services.router_agent import RouterAgentService
 
     service = RouterService(db, organization_id=_get_org_id(current_user))
     router_obj = await service.get_by_id(router_id)
     if not router_obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
 
-    # Get credentials from DB (encrypted) with fallback to env settings
+    # NAT-safe path: queue a disconnect command the agent picks up on next poll.
+    if getattr(router_obj, "agent_installed", False):
+        agent_service = RouterAgentService(db)
+        cmd = await agent_service.queue_command(
+            router_id=router_id,
+            action="disconnect",
+            params={"username": username, "type": user_type},
+            priority=2,
+            source="manual",
+        )
+        await db.commit()
+        return {
+            "message": "Disconnect queued to the router agent (applies on next poll, ~30s)",
+            "queued": True,
+            "command_id": cmd.id,
+            "username": username,
+            "type": user_type,
+        }
+
+    # Non-agent router: direct RouterOS call.
+    from app.integrations.mikrotik import get_mikrotik_client
+    from app.services.router_provisioning import get_router_credentials
+
     credentials = await get_router_credentials(db, router_id)
     if not credentials:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No credentials available for router")
-
     client = get_mikrotik_client()
     connection = await client.connect(
         ip_address=router_obj.ip_address,
@@ -759,6 +836,319 @@ async def sync_hotspot_files(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to sync hotspot files: {str(e)}")
     finally:
         await client.disconnect(connection)
+
+
+@router.post("/{router_id}/test", response_model=Dict[str, Any])
+async def test_router_connection(
+    router_id: int,
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Test router reachability — NAT-safe (agent liveness, no direct connect).
+
+    A router behind NAT can never be reached by an outbound cloud connection, so
+    "test connection" reports whether the polling agent has phoned home recently
+    (within 3x the poll interval). Non-agent routers fall back to a direct probe.
+    """
+    from datetime import datetime as _dt
+
+    service = RouterService(db, organization_id=_get_org_id(current_user))
+    router_obj = await service.get_by_id(router_id)
+    if not router_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    if getattr(router_obj, "agent_installed", False):
+        interval = router_obj.agent_poll_interval or 30
+        seconds_since = None
+        online = False
+        if router_obj.last_poll_at:
+            seconds_since = int((_dt.utcnow() - router_obj.last_poll_at).total_seconds())
+            online = seconds_since < interval * 3
+        if online:
+            return {
+                "success": True,
+                "online": True,
+                "mode": "agent",
+                "message": f"Polling agent is online (last poll {seconds_since}s ago)",
+                "last_poll_at": router_obj.last_poll_at.isoformat() if router_obj.last_poll_at else None,
+                "seconds_since_last_poll": seconds_since,
+            }
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Polling agent has not reported recently"
+                + (f" (last poll {seconds_since}s ago)" if seconds_since is not None else " (never polled)")
+            ),
+        )
+
+    # Non-agent router: direct reachability probe (reachable nets only).
+    from app.integrations.mikrotik import get_mikrotik_client
+    from app.services.router_provisioning import get_router_credentials
+
+    credentials = await get_router_credentials(db, router_id)
+    if not credentials:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No credentials available for router")
+    client = get_mikrotik_client()
+    connection = await client.connect(
+        ip_address=router_obj.ip_address,
+        username=credentials["username"],
+        password=credentials["password"],
+        port=router_obj.port,
+    )
+    if not connection:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to connect to router")
+    await client.disconnect(connection)
+    return {"success": True, "online": True, "mode": "direct", "message": "Router connection successful"}
+
+
+@router.post("/{router_id}/reboot", response_model=Dict[str, Any])
+async def reboot_router(
+    router_id: int,
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Reboot the router — NAT-safe (queues an agent action-script).
+
+    The agent downloads + imports the ``reboot`` action-script (which delays a
+    few seconds, then runs ``/system/reboot``). Non-agent routers reboot via a
+    direct RouterOS command.
+    """
+    service = RouterService(db, organization_id=_get_org_id(current_user))
+    router_obj = await service.get_by_id(router_id)
+    if not router_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    if getattr(router_obj, "agent_installed", False):
+        cmd_id = await _queue_agent_action(db, router_obj, "reboot", current_user.id)
+        return {
+            "success": True,
+            "queued": True,
+            "command_id": cmd_id,
+            "message": "Reboot queued to the router agent (applies on next poll, ~30s)",
+        }
+
+    from app.integrations.mikrotik import get_mikrotik_client
+    from app.services.router_provisioning import get_router_credentials
+
+    credentials = await get_router_credentials(db, router_id)
+    if not credentials:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No credentials available for router")
+    client = get_mikrotik_client()
+    connection = await client.connect(
+        ip_address=router_obj.ip_address,
+        username=credentials["username"],
+        password=credentials["password"],
+        port=router_obj.port,
+    )
+    if not connection:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to connect to router")
+    try:
+        await client.execute_command(connection, "/system/reboot", method="call")
+        return {"success": True, "message": "Router reboot initiated"}
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to reboot: {str(e)}")
+    finally:
+        await client.disconnect(connection)
+
+
+@router.get("/{router_id}/events", response_model=List[Dict[str, Any]])
+async def get_router_events(
+    router_id: int,
+    limit: int = Query(100, ge=1, le=500),
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """Device events timeline — merges RouterLog + RouterCommand history.
+
+    NAT-safe: built purely from stored data (operation logs + the agent command
+    queue), no direct router connection. Returns a unified, newest-first list.
+    """
+    from app.models.router import RouterLog as RouterLogModel
+    from app.models.router_command import RouterCommand
+
+    service = RouterService(db, organization_id=_get_org_id(current_user))
+    router_obj = await service.get_by_id(router_id)
+    if not router_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    events: List[Dict[str, Any]] = []
+
+    # Operation logs
+    log_res = await db.execute(
+        select(RouterLogModel)
+        .where(RouterLogModel.router_id == router_id)
+        .order_by(RouterLogModel.created_at.desc())
+        .limit(limit)
+    )
+    for log in log_res.scalars().all():
+        events.append({
+            "id": f"log-{log.id}",
+            "kind": "log",
+            "action": log.action,
+            "details": log.details or log.error_message or "",
+            "success": log.success,
+            "status": "success" if log.success else "failed",
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+        })
+
+    # Agent command history
+    cmd_res = await db.execute(
+        select(RouterCommand)
+        .where(RouterCommand.router_id == router_id)
+        .order_by(RouterCommand.created_at.desc())
+        .limit(limit)
+    )
+    for cmd in cmd_res.scalars().all():
+        events.append({
+            "id": f"cmd-{cmd.id}",
+            "kind": "command",
+            "action": cmd.action,
+            "details": cmd.result_message or (cmd.source or ""),
+            "success": cmd.status == "success",
+            "status": cmd.status,
+            "created_at": cmd.created_at.isoformat() if cmd.created_at else None,
+        })
+
+    # Merge newest-first
+    events.sort(key=lambda e: e["created_at"] or "", reverse=True)
+    return events[:limit]
+
+
+@router.get("/{router_id}/payments", response_model=List[Dict[str, Any]])
+async def get_router_payments(
+    router_id: int,
+    limit: int = Query(100, ge=1, le=500),
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """Payments for subscriptions on this router (NAT-safe, DB-only).
+
+    Joins subscriptions.router_id -> invoices -> payments, newest-first.
+    """
+    from app.models.subscription import Subscription
+    from app.models.billing import Invoice, Payment
+    from app.models.user import User as UserModel
+
+    service = RouterService(db, organization_id=_get_org_id(current_user))
+    router_obj = await service.get_by_id(router_id)
+    if not router_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    res = await db.execute(
+        select(Payment, Invoice, Subscription, UserModel)
+        .join(Invoice, Payment.invoice_id == Invoice.id)
+        .join(Subscription, Invoice.subscription_id == Subscription.id)
+        .outerjoin(UserModel, Payment.user_id == UserModel.id)
+        .where(Subscription.router_id == router_id)
+        .order_by(Payment.created_at.desc())
+        .limit(limit)
+    )
+
+    payments: List[Dict[str, Any]] = []
+    for payment, invoice, subscription, user in res.all():
+        customer = None
+        if user:
+            customer = getattr(user, "full_name", None) or getattr(user, "username", None) or getattr(user, "email", None)
+        payments.append({
+            "id": payment.id,
+            "payment_number": payment.payment_number,
+            "amount": float(payment.amount) if payment.amount is not None else 0,
+            "currency": payment.currency,
+            "payment_method": payment.payment_method.value if payment.payment_method else None,
+            "status": payment.status.value if payment.status else None,
+            "payment_date": payment.payment_date.isoformat() if payment.payment_date else None,
+            "created_at": payment.created_at.isoformat() if payment.created_at else None,
+            "invoice_number": invoice.invoice_number,
+            "subscription_id": subscription.id,
+            "subscription_username": subscription.username,
+            "customer": customer,
+        })
+    return payments
+
+
+@router.get("/{router_id}/backups", response_model=List[Dict[str, Any]])
+async def list_router_backups(
+    router_id: int,
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """List backup history for a router (NAT-safe, DB-only)."""
+    from app.models.router import RouterBackup
+
+    service = RouterService(db, organization_id=_get_org_id(current_user))
+    router_obj = await service.get_by_id(router_id)
+    if not router_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    res = await db.execute(
+        select(RouterBackup)
+        .where(RouterBackup.router_id == router_id)
+        .order_by(RouterBackup.created_at.desc())
+    )
+    return [
+        {
+            "id": b.id,
+            "name": b.name,
+            "status": b.status,
+            "backup_type": b.backup_type,
+            "size_bytes": b.size_bytes,
+            "message": b.message,
+            "created_at": b.created_at.isoformat() if b.created_at else None,
+            "completed_at": b.completed_at.isoformat() if b.completed_at else None,
+        }
+        for b in res.scalars().all()
+    ]
+
+
+@router.post("/{router_id}/backup", response_model=Dict[str, Any])
+async def create_router_backup(
+    router_id: int,
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Create a router backup — NAT-safe (queues an agent action-script).
+
+    Queues the ``backup`` action-script (runs ``/system/backup/save`` locally on
+    the router) and records a RouterBackup history row tied to the queued command
+    so its status reconciles when the agent reports back. Returns JSON (the
+    frontend now renders history rather than downloading a blob).
+    """
+    from app.models.router import RouterBackup
+
+    service = RouterService(db, organization_id=_get_org_id(current_user))
+    router_obj = await service.get_by_id(router_id)
+    if not router_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    if not getattr(router_obj, "agent_installed", False):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Backups require the polling agent (router is behind NAT and not directly reachable)",
+        )
+
+    cmd_id = await _queue_agent_action(db, router_obj, "backup", current_user.id)
+
+    backup = RouterBackup(
+        router_id=router_id,
+        name=f"codevertex-{datetime.utcnow().strftime('%Y-%m-%d-%H%M')}",
+        status="pending",
+        backup_type="binary",
+        command_id=cmd_id,
+        requested_by=current_user.id,
+    )
+    db.add(backup)
+    await db.commit()
+    await db.refresh(backup)
+
+    return {
+        "success": True,
+        "queued": True,
+        "command_id": cmd_id,
+        "backup_id": backup.id,
+        "name": backup.name,
+        "status": backup.status,
+        "message": "Backup queued to the router agent (runs /system/backup/save on next poll, ~30s)",
+    }
 
 
 @router.post("/{router_id}/regenerate-winbox", response_model=Dict[str, Any])

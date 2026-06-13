@@ -143,6 +143,33 @@ class RouterAgentService:
         if telemetry.get("version"):
             router.routeros_version = telemetry["version"]
 
+        # Store the agent-reported active user list (NAT-safe live data). The
+        # cloud cannot query the router, so this is the only source for the
+        # Active Users tab. Persist as JSON text on the router row.
+        active_users = telemetry.get("active_users")
+        if active_users is not None:
+            import json as _json
+
+            try:
+                # Normalise keys the agent may emit (mac-address -> mac, etc.)
+                normalised = []
+                for u in active_users:
+                    if not isinstance(u, dict):
+                        continue
+                    normalised.append(
+                        {
+                            "username": u.get("username") or u.get("user") or u.get("name") or "",
+                            "type": u.get("type") or "",
+                            "address": u.get("address") or u.get("ip") or "",
+                            "mac": u.get("mac") or u.get("mac-address") or "",
+                            "uptime": u.get("uptime") or "",
+                        }
+                    )
+                router.active_users_json = _json.dumps(normalised)
+                router.active_users_at = now
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(f"Failed to store active users for router {router_id}: {e}")
+
         # Store telemetry in Redis for fast dashboard access
         try:
             redis = await get_redis()
@@ -231,6 +258,9 @@ class RouterAgentService:
                     command.source_id, synced=True
                 )
 
+            # Reconcile a pending backup history row tied to this command.
+            await self._update_backup_status(command_id, "completed", message or "OK")
+
             logger.info(
                 f"Command {command_id} ({command.action}) succeeded "
                 f"on router {command.router_id}"
@@ -243,6 +273,7 @@ class RouterAgentService:
             if command.retry_count >= command.max_retries:
                 command.status = CommandStatus.FAILED
                 command.completed_at = now
+                await self._update_backup_status(command_id, "failed", message)
                 logger.error(
                     f"Command {command_id} ({command.action}) failed permanently "
                     f"on router {command.router_id}: {message}"
@@ -255,6 +286,28 @@ class RouterAgentService:
                     f"Command {command_id} ({command.action}) failed, "
                     f"retry {command.retry_count}/{command.max_retries}: {message}"
                 )
+
+    async def _update_backup_status(
+        self, command_id: str, status: str, message: str
+    ) -> None:
+        """Reconcile a RouterBackup row whose backup action just resolved.
+
+        The backup is queued as a ``fetch_import`` command; the RouterBackup row
+        stores that command's id in ``command_id``. When the agent reports the
+        command result we flip the backup to completed/failed.
+        """
+        from app.models.router import RouterBackup
+
+        result = await self.db.execute(
+            select(RouterBackup).where(RouterBackup.command_id == command_id)
+        )
+        backup = result.scalar_one_or_none()
+        if not backup or backup.status != "pending":
+            return
+        backup.status = status
+        backup.message = message
+        backup.completed_at = datetime.utcnow()
+        logger.info(f"Router backup {backup.id} marked {status}")
 
     async def _update_subscription_sync_status(
         self, subscription_id: str, synced: bool

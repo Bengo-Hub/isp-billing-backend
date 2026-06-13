@@ -104,7 +104,13 @@ class Router(Base):
     agent_poll_interval = Column(Integer, default=30, nullable=False)  # seconds
     last_poll_at = Column(DateTime, nullable=True)  # Last successful poll from agent
     agent_version = Column(String(20), nullable=True)  # Agent script version on router
-    
+
+    # Agent-reported active hotspot + PPPoE user list (NAT-safe live data).
+    # Stored as a JSON array of {username,type,address,mac,uptime} dicts; the
+    # cloud cannot query the router directly, so the polling agent reports this.
+    active_users_json = Column(Text, nullable=True)
+    active_users_at = Column(DateTime, nullable=True)  # When the list was last reported
+
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -115,6 +121,7 @@ class Router(Base):
     devices = relationship("RouterDevice", back_populates="router", cascade="all, delete-orphan")
     logs = relationship("RouterLog", back_populates="router", cascade="all, delete-orphan")
     commands = relationship("RouterCommand", back_populates="router", cascade="all, delete-orphan")
+    backups = relationship("RouterBackup", back_populates="router", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         """String representation."""
@@ -177,3 +184,43 @@ class RouterLog(Base):
     def __repr__(self) -> str:
         """String representation."""
         return f"<RouterLog(id={self.id}, router_id={self.router_id}, action='{self.action}')>"
+
+
+class RouterBackup(Base):
+    """Router configuration backup history.
+
+    A backup is requested NAT-safely: the cloud queues an agent action that runs
+    ``/system/backup/save`` on the router locally. This row records the request,
+    its lifecycle (pending -> completed/failed) and metadata. The agent command
+    id links the row to the queued ``router_commands`` entry so the status can be
+    reconciled from the agent's report.
+    """
+
+    __tablename__ = "router_backups"
+
+    # Primary key
+    id = Column(Integer, primary_key=True, index=True)
+
+    router_id = Column(Integer, ForeignKey("routers.id"), nullable=False, index=True)
+    name = Column(String(150), nullable=False)  # backup file name on the router
+    status = Column(String(20), default="pending", nullable=False)  # pending, completed, failed
+    backup_type = Column(String(20), default="binary", nullable=False)  # binary (.backup) / export (.rsc)
+
+    # Link to the queued agent command (so we can reconcile status on report)
+    command_id = Column(String(36), nullable=True)
+
+    # Result / metadata
+    size_bytes = Column(BigInteger, nullable=True)
+    message = Column(Text, nullable=True)
+    requested_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    router = relationship("Router", back_populates="backups")
+
+    def __repr__(self) -> str:
+        """String representation."""
+        return f"<RouterBackup(id={self.id}, router_id={self.router_id}, status='{self.status}')>"
