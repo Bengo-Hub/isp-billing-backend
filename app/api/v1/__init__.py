@@ -69,6 +69,7 @@ from .tenant import router as tenant_router
 from .onboarding import router as onboarding_router
 from .payments import router as payments_router
 from .router_agent import router as router_agent_router
+from .vpn import router as vpn_router
 
 api_router = APIRouter()
 
@@ -153,4 +154,14 @@ api_router.include_router(
     router_agent_router,
     prefix="/router-agent",
     tags=["Router Agent"],
+)
+
+# =============================================================================
+# 14. WireGuard VPN overlay (control-plane; WG server reconcile loop only —
+#     auth via WG_PEER_SYNC_TOKEN, not user JWT)
+# =============================================================================
+api_router.include_router(
+    vpn_router,
+    prefix="/vpn",
+    tags=["VPN"],
 )

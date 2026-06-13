@@ -188,6 +188,27 @@ class Settings(BaseSettings):
     # OrganizationSettings.vpn_domain; this is the platform-wide default.
     vpn_domain: str = "vpn.codevertexitsolutions.com"
 
+    # ── WireGuard VPN overlay (router management tunnel) ──
+    # The WG server runs in k8s ns `vpn`; routers dial it outbound (NAT-safe).
+    # The server keypair lives ONLY in the k8s Secret `wg-server-keys`; the
+    # PUBLIC key is injected here so the backend can hand it to routers during
+    # bootstrap. The router generates + keeps its OWN private key — it is never
+    # transmitted. Empty WG_SERVER_PUBLIC_KEY disables VPN enrollment (the
+    # bootstrap script then skips the WireGuard block and routers stay on the
+    # polling-agent fallback).
+    wg_server_public_key: str = ""  # base64 server pubkey (from wg-server-keys Secret)
+    wg_endpoint: str = "vpn.codevertexitsolutions.com:51820"  # host:port routers dial
+    wg_subnet: str = "10.8.0.0/16"  # tunnel subnet; server is .1, routers .2+
+    # Shared bearer token authenticating the WG server's reconcile loop when it
+    # pulls the authoritative peer list (GET /api/v1/vpn/peers). Stored in the
+    # backend Secret and the WG server Secret. Empty => peer-list endpoint 503s.
+    wg_peer_sync_token: str = ""
+
+    @property
+    def wg_enabled(self) -> bool:
+        """True when VPN enrollment is configured (server pubkey present)."""
+        return bool(self.wg_server_public_key.strip())
+
     # Rate Limiting
     rate_limit_enabled: bool = True
     rate_limit_requests: int = 100
