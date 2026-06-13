@@ -3,10 +3,12 @@
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_technician_or_admin, PaginationParams
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.exceptions import ValidationError, RouterOperationError
 from app.models.user import User, UserRole
@@ -26,6 +28,39 @@ def _get_org_id(current_user: User) -> Optional[int]:
     if current_user.role == UserRole.PLATFORM_OWNER:
         return None  # No filter for platform owners
     return current_user.organization_id
+
+
+async def _queue_agent_action(db: AsyncSession, router_obj, action: str, user_id: Optional[int]) -> str:
+    """Queue a NAT-safe action for a router via its polling agent.
+
+    The agent downloads a generated per-action .rsc (see /action-script) and
+    imports it locally. Returns the queued command id.
+    """
+    from datetime import timedelta
+    from app.core.security import create_access_token
+    from app.services.router_agent import RouterAgentService
+
+    token = create_access_token(
+        {
+            "sub": str(user_id or 0),
+            "type": "access",
+            "permissions": ["provisioning.execute", "router.configure"],
+        },
+        expires_delta=timedelta(hours=2),
+    )
+    base = (settings.backend_url or "").rstrip("/")
+    url = f"{base}/api/v1/routers/{router_obj.id}/action-script/{action}?token={token}"
+    agent_service = RouterAgentService(db)
+    cmd = await agent_service.queue_command(
+        router_id=router_obj.id,
+        action="fetch_import",
+        params={"url": url},
+        priority=2,
+        source="router_action",
+        source_id=action,
+    )
+    await db.commit()
+    return cmd.id
 
 
 @router.get("/", response_model=RouterList)
@@ -236,10 +271,41 @@ async def sync_router(
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> RouterSyncResponse:
-    """Sync router status with MikroTik."""
+    """Sync router status.
+
+    NAT-safe: agent-managed routers continuously report telemetry via the
+    polling agent, so there is no direct connection to make from the cloud —
+    return the latest agent-sourced status from the DB (with a freshness-derived
+    online/offline). Non-agent (locally reachable) routers fall back to a direct
+    RouterOS API sync.
+    """
+    from datetime import datetime as _dt
     service = RouterService(db, organization_id=_get_org_id(current_user))
+    router = await service.get_by_id(router_id)
+    if not router:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    if getattr(router, "agent_installed", False):
+        online = False
+        if router.last_poll_at:
+            elapsed = (_dt.utcnow() - router.last_poll_at).total_seconds()
+            online = elapsed < (router.agent_poll_interval or 30) * 3
+        return RouterSyncResponse(
+            success=True,
+            message="Status updated from polling agent" if online else "Polling agent has not reported recently",
+            router_id=router_id,
+            status="online" if online else "offline",
+            uptime=router.uptime,
+            last_seen=router.last_seen,
+            routeros_version=router.routeros_version,
+            board_name=router.board_name,
+            cpu_load=router.cpu_load,
+            total_memory=router.total_memory,
+            free_memory=router.free_memory,
+        )
+
+    # Non-agent router: attempt a direct API sync (works only on reachable nets)
     success = await service.sync_router_status(router_id)
-    
     if success:
         router = await service.get_by_id(router_id)
         return RouterSyncResponse(
@@ -250,12 +316,96 @@ async def sync_router(
             uptime=router.uptime if router else None,
             last_seen=router.last_seen if router else None,
         )
-    else:
-        return RouterSyncResponse(
-            success=False,
-            message="Failed to sync router",
-            router_id=router_id,
+    return RouterSyncResponse(
+        success=False,
+        message="Failed to sync router (no polling agent and direct API unreachable)",
+        router_id=router_id,
+    )
+
+
+@router.get("/{router_id}/resources", response_model=Dict[str, Any])
+async def get_router_resources(
+    router_id: int,
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Return the router's system resources from stored agent telemetry.
+
+    NAT-safe: serves the latest values reported by the polling agent (CPU,
+    memory, uptime, version, board) plus board/arch captured at bootstrap —
+    no direct RouterOS connection is attempted. This is what the device-detail
+    page renders, so it no longer shows N/A for NAT'd routers.
+    """
+    from app.schemas.router import format_uptime_mikrotik
+
+    service = RouterService(db, organization_id=_get_org_id(current_user))
+    router_obj = await service.get_by_id(router_id)
+    if not router_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    rtype = router_obj.router_type.value if router_obj.router_type else "mikrotik"
+    return {
+        "cpu_load": router_obj.cpu_load or 0,
+        "free_memory": router_obj.free_memory or 0,
+        "total_memory": router_obj.total_memory or 0,
+        "free_hdd_space": router_obj.free_hdd_space or 0,
+        "total_hdd_space": router_obj.total_hdd_space or 0,
+        "uptime": format_uptime_mikrotik(router_obj.uptime) or "0s",
+        "version": router_obj.routeros_version or "",
+        "board_name": router_obj.board_name or "",
+        "platform": "MikroTik" if rtype == "mikrotik" else rtype,
+        "architecture_name": router_obj.architecture or "",
+        "cpu_count": router_obj.cpu_count,
+    }
+
+
+@router.get("/{router_id}/action-script/{action}", response_class=PlainTextResponse)
+async def get_router_action_script(
+    router_id: int,
+    action: str,
+    token: str = Query(..., description="Provisioning/access token"),
+    db: AsyncSession = Depends(get_db),
+) -> str:
+    """Return a RouterOS .rsc for an agent-delivered router action.
+
+    Fetched + imported by the polling agent (queued via fetch_import). Auth uses
+    the access token embedded in the queued URL (the router has no user JWT).
+    """
+    from app.core.security import verify_token
+
+    try:
+        verify_token(token, token_type="access")
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    service = RouterService(db)
+    router_obj = await service.get_by_id(router_id)
+    if not router_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    if action == "sync_time":
+        return (
+            "/system/ntp/client/set enabled=yes servers=time.google.com,time.cloudflare.com\n"
+            ":do { /system/clock/set time-zone-name=Africa/Nairobi } on-error={}\n"
+            ":log info \"CVACTION: time synced\"\n"
         )
+
+    if action == "sync_hotspot":
+        org_slug = ""
+        if router_obj.organization_id:
+            from app.models.organization import Organization
+            res = await db.execute(select(Organization).where(Organization.id == router_obj.organization_id))
+            org = res.scalar_one_or_none()
+            org_slug = org.slug if org else ""
+        base = (settings.backend_url or "").rstrip("/")
+        return (
+            f":do {{ /tool/fetch url=\"{base}/api/v1/provisioning/templates/login.html?org_slug={org_slug}\" dst-path=hotspot/login.html }} on-error={{}}\n"
+            f":do {{ /tool/fetch url=\"{base}/api/v1/provisioning/templates/alogin.html?org_slug={org_slug}\" dst-path=hotspot/alogin.html }} on-error={{}}\n"
+            ":do { /ip/hotspot/profile/set [find] html-directory=hotspot } on-error={}\n"
+            ":log info \"CVACTION: hotspot files synced\"\n"
+        )
+
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown action: {action}")
 
 
 @router.post("/sync-all", response_model=Dict[str, Any])
@@ -495,6 +645,17 @@ async def sync_router_time(
     if not router_obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
 
+    # NAT-safe path: deliver via the polling agent (no direct connection).
+    if getattr(router_obj, "agent_installed", False):
+        cmd_id = await _queue_agent_action(db, router_obj, "sync_time", current_user.id)
+        return {
+            "success": True,
+            "queued": True,
+            "command_id": cmd_id,
+            "message": "Time sync queued to the router agent (applies on next poll, ~30s)",
+            "ntp_servers": ["time.google.com", "time.cloudflare.com"],
+        }
+
     # Get credentials from DB (encrypted) with fallback to env settings
     credentials = await get_router_credentials(db, router_id)
     if not credentials:
@@ -549,6 +710,17 @@ async def sync_hotspot_files(
     router_obj = await service.get_by_id(router_id)
     if not router_obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    # NAT-safe path: deliver via the polling agent (re-downloads templates +
+    # points the hotspot profile at them) — no direct connection / FTP needed.
+    if getattr(router_obj, "agent_installed", False):
+        cmd_id = await _queue_agent_action(db, router_obj, "sync_hotspot", current_user.id)
+        return {
+            "success": True,
+            "queued": True,
+            "command_id": cmd_id,
+            "message": "Hotspot file sync queued to the router agent (applies on next poll, ~30s)",
+        }
 
     # Get credentials from DB (encrypted) with fallback to env settings
     credentials = await get_router_credentials(db, router_id)
@@ -651,30 +823,35 @@ async def get_winbox_url(
     if not router_obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
 
-    # Get VPN domain from organization settings
-    vpn_domain = "vpn.codevertex.com"  # Default
+    # Resolve the VPN domain. There is no hardcoded fake default: a remote
+    # Winbox URL only exists once a real VPN domain is configured (globally via
+    # settings.vpn_domain or per-org via OrganizationSettings.vpn_domain).
+    # Until the VPN overlay is deployed, we surface the LOCAL winbox URL instead
+    # of a misleading 'vpn.codevertex.com' that resolves nowhere.
+    vpn_domain = (getattr(settings, "vpn_domain", "") or "").strip()
     if router_obj.organization_id:
         result = await db.execute(
             select(OrganizationSettings).where(
                 OrganizationSettings.organization_id == router_obj.organization_id
             )
         )
-        settings = result.scalar_one_or_none()
-        if settings and settings.vpn_domain:
-            vpn_domain = settings.vpn_domain
+        org_settings = result.scalar_one_or_none()
+        if org_settings and getattr(org_settings, "vpn_domain", None):
+            vpn_domain = org_settings.vpn_domain
 
-    # Build URLs
     winbox_port = router_obj.winbox_port
-    remote_winbox_url = f"{vpn_domain}:{winbox_port}" if winbox_port else None
+    vpn_configured = bool(vpn_domain and winbox_port)
+    remote_winbox_url = f"{vpn_domain}:{winbox_port}" if vpn_configured else None
     local_winbox_url = f"{router_obj.ip_address}:8291"
 
     return {
         "router_id": router_id,
         "router_name": router_obj.name,
         "winbox_port": winbox_port,
-        "winbox_url": remote_winbox_url,
+        # Prefer the remote VPN URL when configured; otherwise the local URL.
+        "winbox_url": remote_winbox_url or local_winbox_url,
         "local_winbox_url": local_winbox_url,
         "vpn_domain": vpn_domain,
-        "is_configured": winbox_port is not None,
+        "is_configured": vpn_configured,
         "tooltip": "Click to copy. Ensure port 8291 is open on the device. After copying, paste this to the Winbox connect field."
     }

@@ -374,13 +374,17 @@ def _generate_routeros_agent_script(
 :local totalMem [/system/resource/get total-memory]
 :local uptime [/system/resource/get uptime]
 :local ver [/system/resource/get version]
+:local freeHdd 0
+:local totalHdd 0
+:do {{ :set freeHdd [/system/resource/get free-hdd-space] }} on-error={{}}
+:do {{ :set totalHdd [/system/resource/get total-hdd-space] }} on-error={{}}
 :local activePppoe 0
 :local activeHotspot 0
 :do {{ :set activePppoe [:len [/ppp/active/find]] }} on-error={{}}
 :do {{ :set activeHotspot [:len [/ip/hotspot/active/find]] }} on-error={{}}
 
 # Build JSON payload
-:local payload ("{{\\\"router_id\\\": " . $routerId . ", \\\"version\\\": \\\"" . $ver . "\\\", \\\"uptime\\\": \\\"" . $uptime . "\\\", \\\"cpu_load\\\": " . $cpu . ", \\\"free_memory\\\": " . $freeMem . ", \\\"total_memory\\\": " . $totalMem . ", \\\"active_pppoe\\\": " . $activePppoe . ", \\\"active_hotspot\\\": " . $activeHotspot . "}}")
+:local payload ("{{\\\"router_id\\\": " . $routerId . ", \\\"version\\\": \\\"" . $ver . "\\\", \\\"uptime\\\": \\\"" . $uptime . "\\\", \\\"cpu_load\\\": " . $cpu . ", \\\"free_memory\\\": " . $freeMem . ", \\\"total_memory\\\": " . $totalMem . ", \\\"free_hdd_space\\\": " . $freeHdd . ", \\\"total_hdd_space\\\": " . $totalHdd . ", \\\"active_pppoe\\\": " . $activePppoe . ", \\\"active_hotspot\\\": " . $activeHotspot . "}}")
 
 # Poll backend
 :do {{

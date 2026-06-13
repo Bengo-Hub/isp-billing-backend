@@ -308,12 +308,32 @@ class Router(BaseModel):
     provisioning_status: Optional[str] = None
     bootstrap_completed: Optional[bool] = None
     last_provisioned_at: Optional[datetime] = None
+    # Polling-agent liveness (used to derive a real-time status)
+    agent_installed: Optional[bool] = None
+    agent_poll_interval: Optional[int] = None
+    last_poll_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
     @model_validator(mode='after')
     def compute_formatted_fields(self):
-        """Compute MikroTik-formatted display values from raw values."""
+        """Compute MikroTik-formatted display values + derive live status.
+
+        The stored `status` field is only as fresh as the last write (the agent
+        sets it 'online' on every poll but nothing flips it 'offline' between
+        the 5-min Celery sweeps), so a disconnected router would show 'online'
+        indefinitely. Derive status here from agent heartbeat freshness so every
+        list/detail response reflects reality in real time.
+        """
+        if self.agent_installed and self.last_poll_at:
+            try:
+                elapsed = (datetime.utcnow() - self.last_poll_at).total_seconds()
+                threshold = (self.agent_poll_interval or 30) * 3
+                self.status = (
+                    RouterStatus.ONLINE if elapsed < threshold else RouterStatus.OFFLINE
+                )
+            except Exception:
+                pass
         self.uptime_formatted = format_uptime_mikrotik(self.uptime)
         self.cpu_frequency_formatted = format_frequency_mikrotik(self.cpu_frequency)
         self.cpu_load_formatted = format_percentage_mikrotik(self.cpu_load)
