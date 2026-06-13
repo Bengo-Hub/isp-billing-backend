@@ -405,6 +405,10 @@ class RouterAgentService:
                     f"{params.get('max_limit', '')}|{cmd_id}"
                 )
 
+            elif action == "fetch_import":
+                # url must not contain a pipe (JWT/base64url + query string is safe)
+                lines.append(f"fetch_import|{params.get('url', '')}|{cmd_id}")
+
             elif action == "run_script":
                 # For run_script, base64 encode the script content
                 import base64
