@@ -184,6 +184,10 @@ class Settings(BaseSettings):
     agent_max_commands_per_poll: int = 10  # max commands returned per poll
     agent_script_version: str = "1.0"  # current agent script version
 
+    # VPN overlay (remote Winbox / management). Per-org overrides live in
+    # OrganizationSettings.vpn_domain; this is the platform-wide default.
+    vpn_domain: str = "vpn.codevertexitsolutions.com"
+
     # Rate Limiting
     rate_limit_enabled: bool = True
     rate_limit_requests: int = 100
