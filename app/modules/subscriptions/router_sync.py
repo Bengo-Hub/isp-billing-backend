@@ -630,7 +630,7 @@ class SubscriptionRouterSyncService:
         upload = plan.upload_speed if plan.upload_speed else 0
 
         if download == 0 and upload == 0:
-            return "0/0"  # Unlimited
+            return ""  # Unlimited — empty rate-limit is valid RouterOS for "no shaping"
 
         return f"{download}M/{upload}M"
 
