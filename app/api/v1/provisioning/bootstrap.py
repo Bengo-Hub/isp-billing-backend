@@ -584,6 +584,35 @@ async def get_bootstrap_script(
                 ":put \"[SKIP] Template download skipped (FTP fallback during provisioning)\"",
             ])
 
+        # Install the CodeVertex polling agent so the router phones home for
+        # commands on a recurring schedule. Without this, queued subscriber
+        # commands (create_user on payment, disable on expiry) are NEVER
+        # delivered to a NAT'd router — which was the case in production
+        # (agent_installed=true was set but nothing actually installed it).
+        if router_obj and agent_token and settings.backend_url:
+            agent_install_url = (
+                f"{settings.backend_url}/api/v1/router-agent/script/{router_obj.id}"
+                f"?token={agent_token}"
+            )
+            agent_mode = "https" if agent_install_url.startswith("https://") else "http"
+            lines.extend([
+                "",
+                "# Install CodeVertex polling agent (NAT-safe command channel)",
+                ":put \"Installing CodeVertex polling agent...\"",
+                ":do {",
+                f"  /tool/fetch mode={agent_mode} url=\"{agent_install_url}\" dst-path=cvagent-install.rsc",
+                "  :delay 2s",
+                "  /import file-name=cvagent-install.rsc",
+                "  :put \"[OK] Polling agent installed\"",
+                "  :log info \"BOOTSTRAP: polling agent installed\"",
+                "} on-error={",
+                "  :put \"[WARN] Failed to install polling agent (non-critical)\"",
+                "  :log warning \"BOOTSTRAP: agent install failed\"",
+                "}",
+            ])
+        else:
+            lines.append(":put \"[SKIP] Polling agent install skipped (no router record/token)\"")
+
         # Completion summary
         lines.extend([
             "",
@@ -965,94 +994,6 @@ async def provisioning_notify(
     except Exception as e:
         logger.error(f'Provisioning notify failed: {e}')
         raise HTTPException(status_code=500, detail='Failed to handle notify')
-
-
-@router.get("/complete", response_class=PlainTextResponse)
-async def get_complete_script(
-    current_user: User = Depends(require_technician_or_admin()),
-):
-    """Return the complete RouterOS configuration script.
-
-    This is the comprehensive script that configures all services
-    after the initial bootstrap is complete.
-    """
-    try:
-        # Parse default IP and subnet from config
-        gateway_ip = DEFAULT_ROUTER_IP  # e.g., 192.168.88.1
-        subnet = DEFAULT_SUBNET  # e.g., 192.168.88.0/24
-
-        # Extract network base from subnet (e.g., 192.168.88 from 192.168.88.0/24)
-        subnet_base = subnet.split('/')[0].rsplit('.', 1)[0]
-
-        script_content = f"""
-# Codevertex Complete Configuration Script
-# This script configures all services after bootstrap
-# Default Router IP: {gateway_ip}
-# Default Subnet: {subnet}
-
-# System logging
-/system logging add topics=info action=memory
-/system logging add topics=error action=memory
-
-# Bridge configuration
-/interface bridge add name=codevertex-bridge protocol-mode=none
-/interface bridge port add bridge=codevertex-bridge interface=ether2
-/interface bridge port add bridge=codevertex-bridge interface=ether3
-/interface bridge port add bridge=codevertex-bridge interface=ether4
-/interface bridge port add bridge=codevertex-bridge interface=ether5
-/interface bridge port add bridge=codevertex-bridge interface=ether6
-/interface bridge port add bridge=codevertex-bridge interface=ether7
-/interface bridge port add bridge=codevertex-bridge interface=ether8
-
-# IP configuration
-/ip address add address={gateway_ip}/24 interface=codevertex-bridge
-
-# DHCP Server
-/ip dhcp-server add interface=codevertex-bridge address-pool=codevertex-pool disabled=no
-/ip dhcp-server network add address={subnet} gateway={gateway_ip} dns-server=8.8.8.8,8.8.4.4
-/ip pool add name=codevertex-pool ranges={subnet_base}.100-{subnet_base}.200
-
-# DNS configuration
-/ip dns set servers=8.8.8.8,8.8.4.4 allow-remote-requests=yes
-
-# Hotspot configuration
-/ip hotspot setup add name=codevertex-hotspot interface=codevertex-bridge address-pool=codevertex-pool profile=codevertex-profile
-/ip hotspot profile add name=codevertex-profile use-radius=no
-/ip hotspot ip-binding add address={gateway_ip} to-address={gateway_ip} type=bypassed
-
-# PPPoE Server configuration
-/interface pppoe-server server add interface=codevertex-bridge service-name=codevertex-pppoe authentication=pap,chap,mschap1,mschap2
-/ppp profile add name=codevertex-pppoe local-address={gateway_ip} remote-address=codevertex-pppoe-pool
-
-# Firewall rules
-/ip firewall filter add chain=input action=accept connection-state=established,related
-/ip firewall filter add chain=input action=accept src-address={subnet}
-/ip firewall filter add chain=input action=drop
-
-# NAT configuration
-/ip firewall nat add chain=srcnat action=masquerade out-interface=ether1
-
-# Anti-sharing rules (TTL modification)
-/ip firewall mangle add chain=forward action=change-ttl new-ttl=64 ttl=65 protocol=tcp dst-port=80,443,53,21,22,23,25,110,143,993,995,8080,8443
-/ip firewall mangle add chain=forward action=change-ttl new-ttl=64 ttl=65 protocol=udp dst-port=53,67,68,123,161,162,500,4500
-
-# Queue tree for bandwidth management
-/queue tree add name=codevertex-main parent=global max-limit=100M
-/queue tree add name=codevertex-hotspot parent=codevertex-main max-limit=50M
-
-# System configuration
-/system clock set time-zone-name=UTC
-/system ntp client set enabled=yes primary-ntp=pool.ntp.org
-
-# Final system message
-:log info message="Codevertex ISP Billing System - Router configured successfully"
-"""
-        
-        return script_content
-    
-    except Exception as e:
-        logger.error(f"Failed to generate complete script: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate complete script")
 
 
 @router.get("/can-use-direct-api/{router_id}")

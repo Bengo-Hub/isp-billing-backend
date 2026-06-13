@@ -415,6 +415,13 @@ class BillingService:
         # Generate payment number
         payment_number = await self._generate_payment_number()
 
+        # Offline methods (cash / bank transfer) are recorded by an admin AFTER
+        # the funds were physically received, so they are immediately COMPLETED
+        # and reconciled. Online methods (M-PESA / card) stay PENDING until the
+        # gateway callback confirms them.
+        offline_methods = {PaymentMethod.CASH, PaymentMethod.BANK_TRANSFER}
+        is_offline = payment_method in offline_methods
+
         payment = Payment(
             user_id=user_id,
             invoice_id=invoice_id,
@@ -424,12 +431,21 @@ class BillingService:
             transaction_id=transaction_id,
             reference_number=reference_number,
             notes=notes,
-            status=PaymentStatus.PENDING,
+            status=PaymentStatus.COMPLETED if is_offline else PaymentStatus.PENDING,
+            is_manual_payment=is_offline,
+            payment_date=datetime.utcnow(),
+            processed_date=datetime.utcnow() if is_offline else None,
         )
 
         self.db.add(payment)
         await self.db.commit()
         await self.db.refresh(payment)
+
+        # Reconcile offline payments immediately: apply to the invoice, which
+        # marks it paid and activates + router-syncs the linked subscription.
+        if is_offline and invoice_id:
+            await self._apply_payment_to_invoice(invoice_id, amount)
+            await self.db.refresh(payment)
 
         return payment
 
@@ -1025,7 +1041,14 @@ class BillingService:
         return f"{prefix}-{timestamp}-{random_part}"
 
     async def _apply_payment_to_invoice(self, invoice_id: int, amount: Decimal) -> None:
-        """Apply payment to invoice."""
+        """Apply payment to invoice.
+
+        When the invoice becomes fully paid and is linked to a subscription,
+        activate that subscription (and sync it to the router). This makes the
+        activation behaviour identical across ALL payment paths — M-PESA,
+        Paystack, and manual/cash reconciliation — instead of only the gateway
+        webhooks. Activation is idempotent (no-op if already ACTIVE).
+        """
         invoice = await self.get_invoice_by_id(invoice_id)
         if not invoice:
             return
@@ -1035,11 +1058,16 @@ class BillingService:
         invoice.balance = invoice.total_amount - invoice.paid_amount
 
         # Update status if fully paid
-        if invoice.balance <= 0:
+        fully_paid = invoice.balance <= 0
+        if fully_paid:
             invoice.status = InvoiceStatus.PAID
             invoice.paid_date = datetime.utcnow()
 
         await self.db.commit()
+
+        # Activate the linked subscription once the invoice is fully settled.
+        if fully_paid and getattr(invoice, "subscription_id", None):
+            await self._activate_subscription_on_payment(invoice.subscription_id)
 
     async def get_user_payment_history(
         self, 
