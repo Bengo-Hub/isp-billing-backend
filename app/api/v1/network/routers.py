@@ -1166,6 +1166,18 @@ async def regenerate_winbox_credentials(
     if not router_obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
 
+    # Ensure a real VPN-mapped winbox port. Legacy/seeded routers may still be
+    # on the local 8291 (no VPN port); assign one from the VPN range so the
+    # remote winbox URL becomes valid once the router is provisioned onto the VPN.
+    if not RouterService._is_vpn_winbox_port(router_obj.winbox_port):
+        try:
+            new_port = await service._assign_winbox_port()
+            router_obj.winbox_port = new_port
+            await db.commit()
+            await db.refresh(router_obj)
+        except Exception:
+            await db.rollback()
+
     # Generate new secure password
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
     new_password = ''.join(secrets.choice(alphabet) for _ in range(16))
@@ -1206,42 +1218,25 @@ async def get_winbox_url(
     The remote URL uses the organization's VPN domain and the router's
     assigned Winbox port (e.g., vpn.codevertex.com:51255).
     """
-    from app.models.organization import OrganizationSettings
-
     service = RouterService(db, organization_id=_get_org_id(current_user))
     router_obj = await service.get_by_id(router_id)
     if not router_obj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
 
-    # Resolve the VPN domain. There is no hardcoded fake default: a remote
-    # Winbox URL only exists once a real VPN domain is configured (globally via
-    # settings.vpn_domain or per-org via OrganizationSettings.vpn_domain).
-    # Until the VPN overlay is deployed, we surface the LOCAL winbox URL instead
-    # of a misleading 'vpn.codevertex.com' that resolves nowhere.
-    vpn_domain = (getattr(settings, "vpn_domain", "") or "").strip()
-    if router_obj.organization_id:
-        result = await db.execute(
-            select(OrganizationSettings).where(
-                OrganizationSettings.organization_id == router_obj.organization_id
-            )
-        )
-        org_settings = result.scalar_one_or_none()
-        if org_settings and getattr(org_settings, "vpn_domain", None):
-            vpn_domain = org_settings.vpn_domain
-
-    winbox_port = router_obj.winbox_port
-    vpn_configured = bool(vpn_domain and winbox_port)
-    remote_winbox_url = f"{vpn_domain}:{winbox_port}" if vpn_configured else None
+    # Single source of truth (service): a remote URL is returned ONLY when the
+    # router has a real VPN-mapped port + configured domain — otherwise None and
+    # we present the honest LOCAL URL (no fake vpn.* host that resolves nowhere).
+    remote_winbox_url = await service.get_winbox_url(router_id)
+    vpn_domain = await service.resolve_vpn_domain(router_obj)
     local_winbox_url = f"{router_obj.ip_address}:8291"
 
     return {
         "router_id": router_id,
         "router_name": router_obj.name,
-        "winbox_port": winbox_port,
-        # Prefer the remote VPN URL when configured; otherwise the local URL.
+        "winbox_port": router_obj.winbox_port,
         "winbox_url": remote_winbox_url or local_winbox_url,
         "local_winbox_url": local_winbox_url,
         "vpn_domain": vpn_domain,
-        "is_configured": vpn_configured,
+        "is_configured": remote_winbox_url is not None,
         "tooltip": "Click to copy. Ensure port 8291 is open on the device. After copying, paste this to the Winbox connect field."
     }
