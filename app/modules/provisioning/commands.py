@@ -265,34 +265,13 @@ def generate_configuration_commands(
     # =========================================================================
     # CLEAN UP DEFAULT BRIDGE (prevent port conflicts)
     # =========================================================================
-    # MikroTik routers ship with a default 'bridge' that binds all ethernet
-    # ports. If those ports remain in the default bridge, they won't work
-    # properly in our codevertex-bridge (a port can only be in one bridge).
-    # We remove ports from the default bridge and disable its DHCP server.
-    commands.append(
-        {
-            "type": "api_call",
-            "command": ":foreach i in=[/interface/bridge/port/find where bridge=bridge] do={ /interface/bridge/port/remove $i }",
-            "description": "Removing ports from default bridge to prevent conflicts",
-            "critical": False,
-        }
-    )
-    commands.append(
-        {
-            "type": "api_call",
-            "command": ":foreach i in=[/ip/dhcp-server/find where interface=bridge] do={ /ip/dhcp-server/disable $i }",
-            "description": "Disabling default DHCP server on default bridge",
-            "critical": False,
-        }
-    )
-    commands.append(
-        {
-            "type": "api_call",
-            "command": ":do { /interface/bridge/set [find name=bridge] disabled=yes } on-error={}",
-            "description": "Disabling default bridge interface",
-            "critical": False,
-        }
-    )
+    # SAFETY: do NOT strip or disable the default 'bridge'. On many routers the
+    # management IP and WiFi live on the default bridge, so disabling it (or
+    # yanking all its ports) would lock the operator out. A port can only live
+    # in one bridge, so we instead move ONLY the selected customer ports into
+    # codevertex-bridge individually (each port is removed from whatever bridge
+    # it currently sits in, just before it's added below). Management ports are
+    # never touched.
 
     # Bridge configuration - required for all service types
     commands.append(
@@ -331,7 +310,7 @@ def generate_configuration_commands(
         commands.append(
             {
                 "type": "api_call",
-                "command": f"/interface/bridge/port/add interface={port} bridge={bridge_name}",
+                "command": f":do {{ /interface/bridge/port/remove [find interface={port}] }} on-error={{}}; /interface/bridge/port/add interface={port} bridge={bridge_name}",
                 "description": f"Adding port {port} to bridge",
                 "critical": True,
                 "rollback": f"/interface/bridge/port/remove [find interface={port}]",
@@ -500,7 +479,7 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
     commands.append(
         {
             "type": "api_call",
-            "command": f"/certificate/sign .id={ca_cert_name}",
+            "command": f"/certificate/sign [find name={ca_cert_name}]",
             "description": "Self-signing CA certificate",
             "critical": False,
         }
@@ -517,7 +496,7 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
     commands.append(
         {
             "type": "api_call",
-            "command": f"/certificate/sign .id={cert_name} ca={ca_cert_name}",
+            "command": f"/certificate/sign [find name={cert_name}] ca={ca_cert_name}",
             "description": "Signing hotspot certificate with CA",
             "critical": False,
         }

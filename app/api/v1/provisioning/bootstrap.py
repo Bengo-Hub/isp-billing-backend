@@ -644,6 +644,43 @@ async def get_bootstrap_script(
         else:
             lines.append(":put \"[SKIP] Polling agent install skipped (no router record/token)\"")
 
+        # ── WireGuard VPN overlay enrollment ──
+        # If the platform has a WG server pubkey configured AND we have a router
+        # record, allocate a tunnel IP and emit the RouterOS WireGuard client
+        # config. The router generates + keeps its own private key and POSTs its
+        # public key back to /bootstrap/wg-register. Skipped entirely (router
+        # stays on the polling-agent fallback) when WG is not configured.
+        try:
+            from app.services.wireguard import WireGuardService
+
+            wg_service = WireGuardService(db)
+            if router_obj and wg_service.enabled and settings.backend_url:
+                tunnel_ip = await wg_service.allocate_ip(router_obj)
+                # Pre-assign the tunnel IP so the reconcile loop and the
+                # register callback agree on the address (idempotent allocate).
+                router_obj.vpn_address = tunnel_ip
+                await db.commit()
+
+                wg_register_url = (
+                    f"{settings.backend_url}/api/v1/provisioning/bootstrap/wg-register"
+                    f"?token={token}&identity={identity}"
+                )
+                lines.extend(
+                    wg_service.build_bootstrap_lines(
+                        tunnel_ip=tunnel_ip,
+                        wg_register_url=wg_register_url,
+                    )
+                )
+                logger.info(
+                    f"Bootstrap: emitted WG VPN config for router {router_obj.id} "
+                    f"(tunnel_ip={tunnel_ip})"
+                )
+            elif not wg_service.enabled:
+                lines.append(":put \"[SKIP] VPN tunnel skipped (WireGuard not configured on platform)\"")
+        except Exception as e:
+            logger.warning(f"Bootstrap: could not emit WG VPN config: {e}")
+            lines.append(":put \"[WARN] VPN tunnel config skipped (error)\"")
+
         # Completion summary
         lines.extend([
             "",
@@ -1025,6 +1062,85 @@ async def provisioning_notify(
     except Exception as e:
         logger.error(f'Provisioning notify failed: {e}')
         raise HTTPException(status_code=500, detail='Failed to handle notify')
+
+
+@router.post('/wg-register')
+async def bootstrap_wg_register(
+    request: Request,
+    token: str = Query(..., description="Provisioning token (required)"),
+    identity: Optional[str] = Query(None, description="Router identity name"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Receive a router's WireGuard PUBLIC key during bootstrap.
+
+    The router generated and KEPT its own private key (RouterOS auto-generates
+    it); only the public key is POSTed here (form-encoded ``public_key=…`` from
+    RouterOS ``/tool/fetch http-data=``). We store the public key + tunnel IP and
+    flip ``vpn_enabled`` so the WG server reconcile loop picks the peer up and
+    the backend starts addressing the router over the tunnel.
+
+    Auth: the provisioning token (same as the other bootstrap callbacks). No
+    private key material is ever transmitted or stored.
+    """
+    from app.core.security import verify_token
+    from urllib.parse import parse_qs
+
+    try:
+        verify_token(token, token_type='access')
+    except Exception as e:
+        logger.warning(f'wg-register: token verification failed: {e}')
+        raise HTTPException(status_code=401, detail='Invalid token')
+
+    # Parse the form body for public_key
+    public_key = None
+    try:
+        body = await request.body()
+        form = parse_qs(body.decode('utf-8', errors='replace'), keep_blank_values=True)
+        public_key = (form.get('public_key', [''])[0] or '').strip()
+    except Exception as e:
+        logger.error(f'wg-register: failed to parse body: {e}')
+    if not public_key:
+        # Fall back to a query param (some RouterOS fetch variants send it there)
+        public_key = (request.query_params.get('public_key') or '').strip()
+    if not public_key:
+        raise HTTPException(status_code=400, detail='Missing public_key')
+
+    from app.models.router import Router as RouterModel
+    from app.services.wireguard import WireGuardService
+
+    # Correlate the router by identity (name) then by reporting IP.
+    router_obj = None
+    if identity:
+        result = await db.execute(select(RouterModel).where(RouterModel.name == identity))
+        router_obj = result.scalar_one_or_none()
+    if not router_obj and request.client:
+        result = await db.execute(
+            select(RouterModel).where(RouterModel.ip_address == request.client.host)
+        )
+        router_obj = result.scalar_one_or_none()
+
+    if not router_obj:
+        logger.warning(f'wg-register: no router found for identity={identity}')
+        raise HTTPException(status_code=404, detail='Router not found')
+
+    try:
+        svc = WireGuardService(db)
+        await svc.register_peer(router_obj, public_key)
+        await db.commit()
+        logger.info(
+            f'wg-register: router {router_obj.id} enrolled '
+            f'(vpn_address={router_obj.vpn_address})'
+        )
+        return {
+            'status': 'ok',
+            'router_id': router_obj.id,
+            'vpn_address': router_obj.vpn_address,
+            'vpn_enabled': router_obj.vpn_enabled,
+        }
+    except Exception as e:
+        await db.rollback()
+        logger.error(f'wg-register failed: {e}')
+        raise HTTPException(status_code=500, detail='Failed to register WireGuard peer')
 
 
 @router.get("/can-use-direct-api/{router_id}")

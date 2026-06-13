@@ -63,6 +63,15 @@ class Router(Base):
 
     # Remote Winbox access (VPN tunnel)
     winbox_port = Column(Integer, nullable=True, unique=True)  # Unique VPN port for remote Winbox (e.g., 51255)
+
+    # WireGuard VPN overlay (router management tunnel).
+    # Routers dial our WG server outbound (NAT-safe) and keep their OWN private
+    # key — only the PUBLIC key is stored here (no secret material at rest).
+    # vpn_address is the per-router tunnel IP (e.g. 10.8.0.7); once vpn_enabled
+    # the backend addresses the router over the tunnel (direct API + winbox).
+    vpn_address = Column(String(45), nullable=True, unique=True)  # tunnel IP 10.8.0.<n>
+    vpn_public_key = Column(String(64), nullable=True)  # router's WG public key (base64)
+    vpn_enabled = Column(Boolean, default=False, nullable=False)  # tunnel established + usable
     
     # Status and monitoring
     status = Column(Enum(RouterStatus), default=RouterStatus.OFFLINE, nullable=False)
