@@ -373,11 +373,20 @@ async def get_bootstrap_script(
             router_obj = router_result.scalar_one_or_none()
             if router_obj:
                 agent_service = RouterAgentService(db)
-                agent_token = await agent_service.generate_agent_token(router_obj.id)
+                # IMPORTANT: reuse the existing agent token if one is already
+                # provisioned. Regenerating on every bootstrap-script fetch would
+                # invalidate the token embedded in the agent already running on
+                # the router (its polls would start returning 401), which breaks
+                # a working device merely by re-previewing the bootstrap command.
+                if router_obj.agent_token and router_obj.agent_token_plain:
+                    agent_token = router_obj.agent_token_plain
+                    logger.info(f"Reusing existing agent token for router {router_obj.id} ({identity})")
+                else:
+                    agent_token = await agent_service.generate_agent_token(router_obj.id)
+                    logger.info(f"Generated agent token for router {router_obj.id} ({identity})")
                 router_obj.agent_installed = True
                 router_obj.agent_version = settings.agent_script_version
                 await db.commit()
-                logger.info(f"Generated agent token for router {router_obj.id} ({identity})")
         except Exception as e:
             logger.warning(f"Could not generate agent token for {identity}: {e}")
 

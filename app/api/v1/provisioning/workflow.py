@@ -500,6 +500,24 @@ async def check_device_status(
         if not router:
             raise HTTPException(status_code=404, detail="Router not found")
 
+        # ── Agent-liveness fast path (NAT-safe) ──
+        # If the polling agent is installed and has phoned home recently, the
+        # device is online. The cloud cannot (and need not) open a direct API
+        # connection to a NAT'd router, so trust the agent heartbeat instead.
+        if getattr(router, "agent_installed", False) and getattr(router, "last_poll_at", None):
+            elapsed = (dt.utcnow() - router.last_poll_at).total_seconds()
+            threshold = (router.agent_poll_interval or 30) * 3
+            if elapsed < threshold:
+                return DeviceStatusResponse(
+                    online=True,
+                    details={
+                        "identity": router.name,
+                        "version": router.routeros_version or "Unknown",
+                        "via": "polling-agent",
+                        "last_poll_secs": int(elapsed),
+                    },
+                )
+
         # Check if router has stored API credentials
         if not router.api_credentials_encrypted:
             return DeviceStatusResponse(
