@@ -220,6 +220,70 @@ class ProvisioningService:
                 self.logger.error(f"Database error while updating session {session_id}: {e}")
                 raise
 
+            # ── NAT-safe delivery via the polling agent ──
+            # When the router has the polling agent installed (cloud + NAT'd
+            # router), the cloud backend cannot open a direct RouterOS API
+            # connection to router.ip_address. Instead of the unreachable
+            # direct-API workflow, queue ONE fetch_import command: the agent
+            # downloads the generated provision-script .rsc and runs it locally.
+            # The provision-script's own /complete callback marks the session done.
+            try:
+                agent_router = await self.router_service.get_by_id(session.router_id)
+                if (
+                    agent_router
+                    and getattr(agent_router, "agent_installed", False)
+                    and getattr(agent_router, "agent_token", None)
+                ):
+                    from datetime import timedelta
+                    from app.core.config import settings
+                    from app.core.security import create_access_token
+                    from app.services.router_agent import RouterAgentService
+
+                    prov_token = create_access_token(
+                        {
+                            "sub": str(getattr(session, "user_id", 0) or 0),
+                            "type": "access",
+                            "permissions": ["provisioning.execute", "router.configure"],
+                        },
+                        expires_delta=timedelta(hours=2),
+                    )
+                    base = (settings.backend_url or "").rstrip("/")
+                    script_url = (
+                        f"{base}/api/v1/provisioning/provision-script/"
+                        f"{session.session_id}?token={prov_token}"
+                    )
+
+                    agent_service = RouterAgentService(self.db)
+                    await agent_service.queue_command(
+                        router_id=agent_router.id,
+                        action="fetch_import",
+                        params={"url": script_url},
+                        priority=1,
+                        source="provisioning",
+                        source_id=session.session_id,
+                    )
+                    await self.db.commit()
+
+                    from .live_streaming import streaming_manager
+                    await streaming_manager.log_provisioning_step(
+                        session.session_id,
+                        "service_setup",
+                        "Provisioning queued to the router agent (NAT-safe). The "
+                        "router will fetch and apply the configuration on its next "
+                        "poll (~30s).",
+                        "info",
+                    )
+                    self.logger.info(
+                        f"Queued fetch_import provisioning for session "
+                        f"{session.session_id} via agent (router {agent_router.id})"
+                    )
+                    return True
+            except Exception as e:
+                self.logger.warning(
+                    f"Agent-delivery path failed for session {session_id}, "
+                    f"falling back to direct API: {e}"
+                )
+
             # Check for any prior device check-in recorded by the ping monitor.
             # If the router already called the backend notify (e.g. router executed
             # the bootstrap script before the UI started the session), consume
