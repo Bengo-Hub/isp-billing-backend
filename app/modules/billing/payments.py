@@ -92,19 +92,36 @@ class PaymentManagementService:
             payment.verification_notes = verification_notes
 
             # If payment is verified as completed, update related invoice
+            invoice_to_activate = None
             if verification_status == PaymentStatus.CHECKED and payment.invoice_id:
                 invoice = await self.db.get(Invoice, payment.invoice_id)
                 if invoice:
                     # Update invoice paid amount
                     invoice.paid_amount += payment.amount
                     invoice.balance = invoice.total_amount - invoice.paid_amount
-                    
+
                     # Update invoice status if fully paid
                     if invoice.balance <= 0:
                         invoice.status = InvoiceStatus.PAID
                         invoice.paid_date = datetime.utcnow()
+                        # Remember to activate the linked subscription after commit
+                        if getattr(invoice, "subscription_id", None):
+                            invoice_to_activate = invoice.subscription_id
 
             await self.db.commit()
+
+            # Activate + router-sync the subscription for a fully-paid manual/cash
+            # payment. Previously this never happened, so cash-reconciled
+            # customers were marked paid but never provisioned on the router.
+            if invoice_to_activate:
+                try:
+                    from app.modules.billing.service import BillingService
+                    await BillingService(self.db)._activate_subscription_on_payment(invoice_to_activate)
+                except Exception as e:
+                    self.logger.error(
+                        f"Failed to activate subscription {invoice_to_activate} "
+                        f"after manual payment verification: {e}"
+                    )
 
             self.logger.info(f"Verified payment {payment.payment_number} as {verification_status.value}")
             return True
