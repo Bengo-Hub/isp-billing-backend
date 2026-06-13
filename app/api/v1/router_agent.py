@@ -215,12 +215,22 @@ async def get_router_commands(
 async def get_agent_script(
     router_id: int,
     token: str = Query(..., description="Agent token for verification"),
+    mode: str = Query("installer", description="'installer' (default) installs the scheduler; 'body' returns the polling logic the scheduler imports each tick"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate the RouterOS polling agent installer script for a router.
+    """Generate the RouterOS polling agent script for a router.
 
     Downloaded by the bootstrap script via /tool/fetch, then /import'd.
-    This script creates the codevertex-agent system script and scheduler.
+
+    Two modes:
+    - ``installer`` (default): a small script that downloads the agent *body*
+      to ``cvagent.rsc`` and registers a ``/system/scheduler`` entry that
+      ``/import``s it every N seconds. THIS is what makes the agent actually
+      poll on a recurring basis (previously the endpoint only returned the body,
+      so importing it ran a single poll and never scheduled anything).
+    - ``body``: the actual polling logic (collect telemetry, POST /poll-text,
+      execute pipe-delimited commands, POST /report). Fetched + imported by the
+      scheduler on every tick.
 
     Auth: uses the agent token (not user JWT) since this is called from the router.
     """
@@ -240,20 +250,76 @@ async def get_agent_script(
     poll_interval = router_obj.agent_poll_interval or settings.agent_default_poll_interval
     agent_token_plain = router_obj.agent_token_plain or token
 
-    # Generate the RouterOS script that will be /import'd
-    # This script:
-    #   1. Removes any existing agent script + scheduler
-    #   2. Creates the polling agent script with embedded config
-    #   3. Creates a scheduler to run it every N seconds
-    script = _generate_routeros_agent_script(
+    if mode == "body":
+        # The polling logic imported by the scheduler on every tick.
+        return _generate_routeros_agent_script(
+            router_id=router_id,
+            agent_token=agent_token_plain,
+            poll_url=poll_url,
+            report_url=report_url,
+            poll_interval=poll_interval,
+        )
+
+    # Default: the installer that downloads the body + registers the scheduler.
+    body_url = (
+        f"{backend_url}/api/v1/router-agent/script/{router_id}"
+        f"?token={agent_token_plain}&mode=body"
+    )
+    return _generate_agent_installer_script(
         router_id=router_id,
-        agent_token=agent_token_plain,
-        poll_url=poll_url,
-        report_url=report_url,
+        body_url=body_url,
         poll_interval=poll_interval,
     )
 
-    return script
+
+def _generate_agent_installer_script(
+    router_id: int,
+    body_url: str,
+    poll_interval: int = 30,
+) -> str:
+    """Generate the RouterOS installer that registers the recurring polling agent.
+
+    Imported once by the bootstrap script. It:
+      1. Removes any previous codevertex-agent scheduler + cached body file.
+      2. Downloads the agent body to ``cvagent.rsc``.
+      3. Creates a ``/system/scheduler`` entry that ``/import``s the body every
+         ``poll_interval`` seconds (this is the recurring poll loop).
+      4. Runs the body once immediately so the first poll happens right away.
+
+    This is a top-level .rsc (NOT embedded in source="..."), so standard
+    RouterOS syntax applies — only Python f-string braces are doubled.
+    """
+    return f"""# CodeVertex Billing Agent Installer
+# Router ID: {router_id}
+# Registers the polling agent scheduler (runs every {poll_interval}s).
+
+:put "[CVAGENT] Installing CodeVertex polling agent..."
+
+# Remove any previous agent scheduler + cached body file
+:do {{ /system/scheduler/remove [find name="codevertex-agent"] }} on-error={{}}
+:do {{ /file/remove [find name="cvagent.rsc"] }} on-error={{}}
+
+# Download the agent body to a local file
+:do {{
+  /tool/fetch mode=https url="{body_url}" dst-path=cvagent.rsc
+  :delay 2s
+  :put "[CVAGENT] Agent body downloaded"
+}} on-error={{ :put "[CVAGENT] ERROR: failed to download agent body" }}
+
+# Create the recurring scheduler that imports the agent body every {poll_interval}s
+:do {{
+  /system/scheduler/add name="codevertex-agent" interval={poll_interval}s \\
+    on-event="/import file-name=cvagent.rsc" \\
+    policy=ftp,read,write,test,policy,sensitive \\
+    comment="CodeVertex billing agent - DO NOT DELETE"
+  :put "[CVAGENT] Scheduler created (every {poll_interval}s)"
+}} on-error={{ :put "[CVAGENT] ERROR: failed to create scheduler" }}
+
+# Run once immediately so the first poll happens now
+:do {{ /import file-name=cvagent.rsc }} on-error={{ :put "[CVAGENT] First run will happen on next schedule tick" }}
+
+:put "[CVAGENT] Install complete"
+"""
 
 
 def _generate_routeros_agent_script(
@@ -409,9 +475,21 @@ def _generate_routeros_agent_script(
             :local cm ""
             :do {{
               :if ($utype = "hotspot") do={{
+                # Ensure the plan profile exists with the correct bandwidth limit
+                :if ([:len [/ip/hotspot/user/profile/find name=$uprof]] = 0) do={{
+                  :if ([:len $urate] > 0) do={{ /ip/hotspot/user/profile/add name=$uprof rate-limit=$urate }} else={{ /ip/hotspot/user/profile/add name=$uprof }}
+                }} else={{
+                  :if ([:len $urate] > 0) do={{ /ip/hotspot/user/profile/set [find name=$uprof] rate-limit=$urate }}
+                }}
                 :do {{ /ip/hotspot/user/remove [find name=$uname] }} on-error={{}}
                 /ip/hotspot/user/add name=$uname password=$upass profile=$uprof
               }} else={{
+                # Ensure the PPP profile exists with the correct bandwidth limit
+                :if ([:len [/ppp/profile/find name=$uprof]] = 0) do={{
+                  :if ([:len $urate] > 0) do={{ /ppp/profile/add name=$uprof rate-limit=$urate }} else={{ /ppp/profile/add name=$uprof }}
+                }} else={{
+                  :if ([:len $urate] > 0) do={{ /ppp/profile/set [find name=$uprof] rate-limit=$urate }}
+                }}
                 :do {{ /ppp/secret/remove [find name=$uname] }} on-error={{}}
                 /ppp/secret/add name=$uname password=$upass profile=$uprof service=pppoe
               }}
