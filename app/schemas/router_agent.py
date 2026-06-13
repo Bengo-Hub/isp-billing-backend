@@ -20,6 +20,12 @@ class AgentPollRequest(BaseModel):
     total_hdd_space: int = Field(0, ge=0, description="Total storage in bytes")
     active_pppoe: int = Field(0, ge=0, description="Active PPPoE sessions")
     active_hotspot: int = Field(0, ge=0, description="Active hotspot sessions")
+    # NAT-safe live user list reported by the agent. Each entry:
+    # {"username": str, "type": "hotspot"|"pppoe", "address": str, "mac": str, "uptime": str}
+    active_users: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Active hotspot + PPPoE user list reported by the agent",
+    )
 
 
 class AgentCommand(BaseModel):
@@ -93,3 +99,5 @@ class RouterAgentStatus(BaseModel):
     poll_interval: int = 30
     is_online: bool = False
     pending_commands: int = 0
+    seconds_since_last_poll: Optional[int] = None
+    recent_commands: List[Dict[str, Any]] = Field(default_factory=list)

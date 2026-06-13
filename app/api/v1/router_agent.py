@@ -160,10 +160,29 @@ async def get_agent_status(
 
     # Determine if online based on last poll
     is_online = False
+    seconds_since = None
     if router_obj.last_poll_at:
         elapsed = (datetime.utcnow() - router_obj.last_poll_at).total_seconds()
+        seconds_since = int(elapsed)
         threshold = router_obj.agent_poll_interval * settings.agent_offline_threshold_multiplier
         is_online = elapsed < threshold
+
+    # Recent command history (for the dashboard timeline)
+    recent_res = await db.execute(
+        select(RouterCommand)
+        .where(RouterCommand.router_id == router_id)
+        .order_by(RouterCommand.created_at.desc())
+        .limit(10)
+    )
+    recent_commands = [
+        {
+            "id": cmd.id,
+            "action": cmd.action,
+            "status": cmd.status,
+            "created_at": cmd.created_at.isoformat() if cmd.created_at else None,
+        }
+        for cmd in recent_res.scalars().all()
+    ]
 
     return RouterAgentStatus(
         router_id=router_id,
@@ -173,6 +192,8 @@ async def get_agent_status(
         poll_interval=router_obj.agent_poll_interval,
         is_online=is_online,
         pending_commands=pending_count,
+        seconds_since_last_poll=seconds_since,
+        recent_commands=recent_commands,
     )
 
 
@@ -383,8 +404,35 @@ def _generate_routeros_agent_script(
 :do {{ :set activePppoe [:len [/ppp/active/find]] }} on-error={{}}
 :do {{ :set activeHotspot [:len [/ip/hotspot/active/find]] }} on-error={{}}
 
+# Build the active-users JSON array (NAT-safe live data for the dashboard).
+# Each element: {{"username","type","address","mac","uptime"}}.
+:local users ""
+:do {{
+  :foreach h in=[/ip/hotspot/active/find] do={{
+    :local hu [/ip/hotspot/active/get $h user]
+    :local ha [/ip/hotspot/active/get $h address]
+    :local hm ""
+    :do {{ :set hm [/ip/hotspot/active/get $h mac-address] }} on-error={{}}
+    :local ht ""
+    :do {{ :set ht [/ip/hotspot/active/get $h uptime] }} on-error={{}}
+    :if ([:len $users] > 0) do={{ :set users ($users . ",") }}
+    :set users ($users . "{{\\\"username\\\":\\\"" . $hu . "\\\",\\\"type\\\":\\\"hotspot\\\",\\\"address\\\":\\\"" . $ha . "\\\",\\\"mac\\\":\\\"" . $hm . "\\\",\\\"uptime\\\":\\\"" . $ht . "\\\"}}")
+  }}
+}} on-error={{}}
+:do {{
+  :foreach p in=[/ppp/active/find] do={{
+    :local pu [/ppp/active/get $p name]
+    :local pa ""
+    :do {{ :set pa [/ppp/active/get $p address] }} on-error={{}}
+    :local pt ""
+    :do {{ :set pt [/ppp/active/get $p uptime] }} on-error={{}}
+    :if ([:len $users] > 0) do={{ :set users ($users . ",") }}
+    :set users ($users . "{{\\\"username\\\":\\\"" . $pu . "\\\",\\\"type\\\":\\\"pppoe\\\",\\\"address\\\":\\\"" . $pa . "\\\",\\\"mac\\\":\\\"\\\",\\\"uptime\\\":\\\"" . $pt . "\\\"}}")
+  }}
+}} on-error={{}}
+
 # Build JSON payload
-:local payload ("{{\\\"router_id\\\": " . $routerId . ", \\\"version\\\": \\\"" . $ver . "\\\", \\\"uptime\\\": \\\"" . $uptime . "\\\", \\\"cpu_load\\\": " . $cpu . ", \\\"free_memory\\\": " . $freeMem . ", \\\"total_memory\\\": " . $totalMem . ", \\\"free_hdd_space\\\": " . $freeHdd . ", \\\"total_hdd_space\\\": " . $totalHdd . ", \\\"active_pppoe\\\": " . $activePppoe . ", \\\"active_hotspot\\\": " . $activeHotspot . "}}")
+:local payload ("{{\\\"router_id\\\": " . $routerId . ", \\\"version\\\": \\\"" . $ver . "\\\", \\\"uptime\\\": \\\"" . $uptime . "\\\", \\\"cpu_load\\\": " . $cpu . ", \\\"free_memory\\\": " . $freeMem . ", \\\"total_memory\\\": " . $totalMem . ", \\\"free_hdd_space\\\": " . $freeHdd . ", \\\"total_hdd_space\\\": " . $totalHdd . ", \\\"active_pppoe\\\": " . $activePppoe . ", \\\"active_hotspot\\\": " . $activeHotspot . ", \\\"active_users\\\": [" . $users . "]}}")
 
 # Poll backend
 :do {{
