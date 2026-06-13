@@ -241,6 +241,27 @@ else
 fi
 
 # =============================================================================
+# WIREGUARD VPN OVERLAY SETUP (idempotent; safe to re-run every deploy)
+# =============================================================================
+# Ensures the WG server keypair Secret (vpn/wg-server-keys) exists and the
+# backend Secret carries WG_SERVER_PUBLIC_KEY + WG_PEER_SYNC_TOKEN so the
+# bootstrap script can enroll routers onto the tunnel. The server PRIVATE key
+# never leaves the cluster Secret. The WG server Deployment itself is owned by
+# the ArgoCD `wireguard` app (apps/wireguard/manifests) — this only does key/
+# secret setup. Skips cleanly if the devops-k8s repo or setup.sh is absent.
+if [[ ${DEPLOY} == "true" ]]; then
+  WG_SETUP="$DEVOPS_DIR/apps/wireguard/setup.sh"
+  if [[ -f "$WG_SETUP" ]]; then
+    info "Running idempotent WireGuard VPN overlay setup..."
+    VPN_NS=vpn BACKEND_NS="$NAMESPACE" BACKEND_SECRET="$ENV_SECRET_NAME" \
+      bash "$WG_SETUP" || warn "WireGuard setup reported an issue (non-fatal)"
+  else
+    warn "WireGuard setup script not found at $WG_SETUP — skipping VPN key setup"
+    warn "Run apps/wireguard/setup.sh from the devops-k8s repo to enable the VPN overlay"
+  fi
+fi
+
+# =============================================================================
 # HELM VALUES UPDATE (via centralized script)
 # =============================================================================
 source "${HOME}/devops-k8s/scripts/helm/update-values.sh" 2>/dev/null || {

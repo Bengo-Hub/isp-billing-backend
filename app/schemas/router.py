@@ -274,6 +274,10 @@ class Router(BaseModel):
     username: str
     # password is intentionally excluded from response
     winbox_port: Optional[int] = None  # VPN port for remote Winbox access
+    # WireGuard VPN overlay enrollment (vpn_public_key intentionally excluded
+    # from the response; vpn_address/vpn_enabled are operational status fields).
+    vpn_address: Optional[str] = None
+    vpn_enabled: Optional[bool] = None
     location: Optional[str] = None
     latitude: Optional[str] = None
     longitude: Optional[str] = None
