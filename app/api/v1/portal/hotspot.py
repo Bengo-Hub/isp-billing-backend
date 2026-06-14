@@ -510,6 +510,20 @@ async def _sync_hotspot_user_to_router(
             logger.info(
                 f"Queued create_user hotspot {username} -> router {router_obj.name} (agent, {source})"
             )
+            # Router-side hard limits (defense-in-depth): queue a set_limits action
+            # right after create_user so the router self-enforces time/data caps even
+            # if the cloud reconciler is down. Canonical units: time_limit=HOURS,
+            # data_limit=GB. Skipped when the plan is unlimited.
+            limit_uptime = f"{plan.time_limit}h" if (plan.time_limit and plan.time_limit > 0) else ""
+            limit_bytes = ""
+            if plan.data_limit and plan.data_limit > 0 and not plan.is_unlimited_data:
+                limit_bytes = str(plan.data_limit * 1024 * 1024 * 1024)  # GB -> bytes
+            if limit_uptime or limit_bytes:
+                from app.api.v1.network.routers import _queue_agent_action
+                await _queue_agent_action(
+                    db, router_obj, "set_limits", None,
+                    extra_query={"u": username, "lu": limit_uptime, "lb": limit_bytes},
+                )
         except Exception as e:
             logger.error(f"Failed to queue hotspot user {username} for router {router_obj.name}: {e}")
         # Even on the agent (NAT) path, hand back the hotspot gateway login URL so
@@ -532,10 +546,11 @@ async def _sync_hotspot_user_to_router(
             port=router_obj.port,
         )
 
-        time_limit_seconds = plan.time_limit if plan.time_limit > 0 else None
+        # Canonical units: time_limit=HOURS, data_limit=GB.
+        limit_uptime = f"{plan.time_limit}h" if (plan.time_limit and plan.time_limit > 0) else None
         data_limit_bytes = None
         if plan.data_limit > 0 and not plan.is_unlimited_data:
-            data_limit_bytes = plan.data_limit * 1024 * 1024  # MB → bytes
+            data_limit_bytes = plan.data_limit * 1024 * 1024 * 1024  # GB → bytes
 
         await client.create_hotspot_user(
             connection=connection,
@@ -545,7 +560,7 @@ async def _sync_hotspot_user_to_router(
             **{
                 k: v
                 for k, v in {
-                    "limit-uptime": f"{time_limit_seconds}s" if time_limit_seconds else None,
+                    "limit-uptime": limit_uptime,
                     "limit-bytes-total": data_limit_bytes,
                     "comment": comment,
                 }.items()
