@@ -69,8 +69,17 @@ class SubscriptionService:
             return {"success": False, "error": str(e)}
 
     async def get_by_id(self, subscription_id: int) -> Optional[Subscription]:
-        """Get subscription by ID."""
-        return await self.db.get(Subscription, subscription_id)
+        """Get subscription by ID (eager-loads relationships the response schema
+        serializes, so async serialization never lazy-loads -> MissingGreenlet)."""
+        result = await self.db.execute(
+            select(Subscription).options(
+                selectinload(Subscription.usage_logs),
+                selectinload(Subscription.history),
+                selectinload(Subscription.plan),
+                selectinload(Subscription.router),
+            ).where(Subscription.id == subscription_id)
+        )
+        return result.scalar_one_or_none()
 
     async def get_all(
         self,
@@ -361,8 +370,13 @@ class SubscriptionService:
         active_only: bool = False
     ) -> List[Subscription]:
         """Get subscriptions for a specific user."""
-        query = select(Subscription).where(Subscription.user_id == user_id)
-        
+        query = select(Subscription).options(
+            selectinload(Subscription.usage_logs),
+            selectinload(Subscription.history),
+            selectinload(Subscription.plan),
+            selectinload(Subscription.router),
+        ).where(Subscription.user_id == user_id)
+
         if active_only:
             query = query.where(Subscription.status == SubscriptionStatus.ACTIVE)
         
@@ -375,7 +389,15 @@ class SubscriptionService:
         """Get expired subscriptions."""
         now = datetime.utcnow()
         result = await self.db.execute(
-            select(Subscription).where(
+            # Eager-load the same relationships the Subscription response schema
+            # serializes (usage_logs/history/plan/router); without this the async
+            # response serialization triggers a lazy load -> MissingGreenlet 500.
+            select(Subscription).options(
+                selectinload(Subscription.usage_logs),
+                selectinload(Subscription.history),
+                selectinload(Subscription.plan),
+                selectinload(Subscription.router),
+            ).where(
                 and_(
                     Subscription.end_date < now,
                     Subscription.status.in_([
@@ -393,7 +415,12 @@ class SubscriptionService:
         expiry_date = now + timedelta(days=days)
         
         result = await self.db.execute(
-            select(Subscription).where(
+            select(Subscription).options(
+                selectinload(Subscription.usage_logs),
+                selectinload(Subscription.history),
+                selectinload(Subscription.plan),
+                selectinload(Subscription.router),
+            ).where(
                 and_(
                     Subscription.end_date <= expiry_date,
                     Subscription.end_date > now,

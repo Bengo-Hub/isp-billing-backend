@@ -1,1242 +1,430 @@
-﻿# MikroTik Router Provisioning - Complete Technical Guide
+# MikroTik Router Provisioning — Technical Guide
+
+> **Accuracy note (2026-06):** This guide describes the system as it is actually
+> implemented today: a **NAT-safe, agent-polling** model with an **external
+> captive portal**. There is **no RADIUS, no User Manager, and no direct
+> cloud→router API requirement** in production. Earlier revisions of this doc
+> described a RADIUS / direct-API / queue-tree design that the code never shipped;
+> that content has been removed. The authoritative connectivity audit is
+> [`AUDIT-AND-REMEDIATION-2026-06.md`](./AUDIT-AND-REMEDIATION-2026-06.md).
 
 ## Table of Contents
-1. [Introduction](#introduction)
-2. [Architecture Overview](#architecture-overview)
-3. [Provisioning Workflow](#provisioning-workflow)
-4. [Technical Implementation](#technical-implementation)
-5. [Command Generation](#command-generation)
-6. [Script Execution](#script-execution)
-7. [Device Communication](#device-communication)
-8. [Network Configuration](#network-configuration)
-9. [Security Implementation](#security-implementation)
-10. [Error Handling & Recovery](#error-handling--recovery)
-11. [Live Log Streaming](#live-log-streaming)
-12. [Reprovisioning](#reprovisioning)
-13. [Best Practices](#best-practices)
-14. [Troubleshooting](#troubleshooting)
+1. [The core constraint: routers are behind NAT](#1-the-core-constraint-routers-are-behind-nat)
+2. [The three NAT-safe channels](#2-the-three-nat-safe-channels)
+3. [End-to-end provisioning workflow](#3-end-to-end-provisioning-workflow)
+4. [Step 1 — Bootstrap (one-liner)](#4-step-1--bootstrap-one-liner)
+5. [Step 2 — Device scan](#5-step-2--device-scan)
+6. [Step 3 — Service provisioning (the generated .rsc)](#6-step-3--service-provisioning-the-generated-rsc)
+7. [The polling agent](#7-the-polling-agent)
+8. [Captive-portal flow](#8-captive-portal-flow)
+9. [Subscriber lifecycle (create / disable / enable)](#9-subscriber-lifecycle-create--disable--enable)
+10. [Payments → activation](#10-payments--activation)
+11. [Network defaults & RouterOS v6/v7](#11-network-defaults--routeros-v6v7)
+12. [Tenant timezone](#12-tenant-timezone)
+13. [Reprovisioning & clean-slate idempotency](#13-reprovisioning--clean-slate-idempotency)
+14. [Captive-portal troubleshooting](#14-captive-portal-troubleshooting)
+15. [General troubleshooting](#15-general-troubleshooting)
+16. [Code map](#16-code-map)
 
 ---
 
-## Introduction
+## 1. The core constraint: routers are behind NAT
 
-This guide explains in detail how the Codevertex ISP Billing System provisions MikroTik routers, from the initial connection to the final service configuration. Understanding this process is crucial for system administrators, developers, and technical support staff.
+In production the cloud backend (`ispbillingapi.codevertexitsolutions.com`) **cannot
+open a connection to a router's API** (`192.168.x.x:8728`) because the router sits
+behind NAT on a customer LAN. Every integration is therefore **router-initiated
+(outbound)**: the router fetches scripts and polls the backend; the backend never
+dials the router.
 
-### What is Router Provisioning?
-
-Router provisioning is the automated process of:
-1. Establishing connection to a MikroTik router
-2. Configuring network interfaces
-3. Setting up PPPoE/Hotspot services
-4. Creating user pools and IP assignments
-5. Implementing bandwidth management
-6. Establishing monitoring and management
-
-### Why Automated Provisioning?
-
-**Manual Configuration Issues**:
-- ❌ Time-consuming (30+ minutes per router)
-- ❌ Error-prone
-- ❌ Inconsistent configurations
-- ❌ Difficult to scale
-- ❌ No audit trail
-
-**Automated Provisioning Benefits**:
-- ✅ Fast (< 5 minutes per router)
-- ✅ Consistent and reliable
-- ✅ Scalable to hundreds of routers
-- ✅ Complete audit trail
-- ✅ Rollback capability
-- ✅ Version control
-
----
-
-## Architecture Overview
-
-### System Components
+A direct RouterOS API path still exists in the code (`MikroTikClient`) and is used
+**only** as a fallback for routers the backend *can* reach (same LAN, or once a
+WireGuard tunnel exists — see the audit doc §3). It is never the primary path.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Frontend (Next.js)                        │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │   Provisioning Wizard (3 Steps)                     │   │
-│  │   ├── Step 1: Connection Setup                      │   │
-│  │   ├── Step 2: Device Details                        │   │
-│  │   └── Step 3: Service Configuration                 │   │
-│  └─────────────────────────────────────────────────────┘   │
-└────────────────────┬────────────────────────────────────────┘
-                     │ HTTP/WebSocket
-┌────────────────────▼────────────────────────────────────────┐
-│               Backend API (FastAPI)                          │
-│  ┌──────────────┐  ┌────────────────┐  ┌───────────────┐  │
-│  │ Provisioning │  │  Command       │  │   Session     │  │
-│  │   Service    │  │  Generator     │  │   Manager     │  │
-│  └──────┬───────┘  └────────┬───────┘  └───────┬───────┘  │
-└─────────┼──────────────────┼───────────────────┼──────────┘
-          │                  │                   │
-          ▼                  ▼                   ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 MikroTik RouterOS API                        │
-│  ┌──────────────┐  ┌────────────────┐  ┌───────────────┐  │
-│  │   API Port   │  │   Script       │  │  Interface    │  │
-│  │   (8728)     │  │   Execution    │  │  Discovery    │  │
-│  └──────────────┘  └────────────────┘  └───────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Data Flow
-
-```
-User Action → Frontend → Backend API → Database
-                ↓            ↓
-          WebSocket    RouterOS API
-          Updates      Commands
-                ↓            ↓
-          Live Logs    Configuration
+                 (outbound HTTPS only)
+   ┌──────────┐   fetch script / poll    ┌─────────────────────┐
+   │ MikroTik │ ───────────────────────► │   Cloud Backend     │
+   │  (NAT)   │ ◄─────────────────────── │   (FastAPI)         │
+   └──────────┘   commands in response   └─────────────────────┘
+        ▲  the backend cannot initiate a connection inbound
 ```
 
 ---
 
-## Provisioning Workflow
+## 2. The three NAT-safe channels
 
-### Complete 3-Step Process
+| # | Channel | Endpoint(s) | Purpose |
+|---|---------|-------------|---------|
+| 1 | **Bootstrap** | `GET /provisioning/bootstrap/command` → `/bootstrap/script` → `/bootstrap/scan-report` + `/bootstrap/notify` | First touch: enable API/FTP/Winbox, create the `codevertex-api` user, scan the device, **install the polling agent**, (optionally enroll WireGuard). |
+| 2 | **Script-based provisioning** | `GET /provisioning/provision-script/{session_id}` → `/provision-script/{session_id}/complete` | Step 3 service setup. The router fetches a full `.rsc` (bridge / pool / DHCP / DNS / NAT / hotspot / walled-garden / captive portal) and runs it locally, then POSTs completion. |
+| 3 | **Polling agent** | `POST /router-agent/poll-text`, `POST /router-agent/report` | Ongoing command channel. A `/system/scheduler` on the router polls every ~30 s and runs queued commands (`create_user`, `disable_user`, `enable_user`, `disconnect`, `fetch_import`, …). This is what turns a *paid subscription* into actual router access. |
 
-#### **Step 1: Connection Setup**
-
-**First-Time Provisioning**:
-```mermaid
-graph TD
-    A[User clicks Provision] --> B[Enter Router Details]
-    B --> C{Router Reachable?}
-    C -->|No| D[Show Error: Cannot reach router]
-    C -->|Yes| E[Generate Bootstrap Command]
-    E --> F[Display Command to User]
-    F --> G[User runs command on router console]
-    G --> H[Router connects to backend]
-    H --> I[Backend verifies token]
-    I --> J{Token Valid?}
-    J -->|No| K[Reject Connection]
-    J -->|Yes| L[Establish Session]
-    L --> M[Mark router as connected]
-    M --> N[Enable Step 2]
-```
-
-**Reprovisioning**:
-```mermaid
-graph TD
-    A[User clicks Reprovision] --> B[Check existing connection]
-    B --> C{Router Connected?}
-    C -->|No| D[Show connection error]
-    C -->|Yes| E[Skip Step 1]
-    E --> F[Go directly to Step 2]
-```
-
-#### **Step 2: Device Details**
-
-```mermaid
-graph TD
-    A[Step 2 Active] --> B[Scan Router Interfaces]
-    B --> C[Fetch System Information]
-    C --> D[Retrieve Current Config]
-    D --> E[Display Device Details]
-    E --> F{User Reviews?}
-    F -->|Edit Settings| G[Update Configuration]
-    F -->|Continue| H[Enable Step 3]
-    G --> F
-```
-
-#### **Step 3: Service Configuration**
-
-```mermaid
-graph TD
-    A[Step 3 Active] --> B[User Selects Services]
-    B --> C[Configure PPPoE/Hotspot]
-    C --> D[Set IP Pools]
-    D --> E[Configure Interfaces]
-    E --> F[Set Bandwidth Limits]
-    F --> G[Review Configuration]
-    G --> H{User Confirms?}
-    H -->|No| B
-    H -->|Yes| I[Generate RouterOS Script]
-    I --> J[Execute Script on Router]
-    J --> K[Stream Logs to Frontend]
-    K --> L{Success?}
-    L -->|No| M[Rollback Configuration]
-    L -->|Yes| N[Mark Provisioning Complete]
-    N --> O[Update Database]
-    O --> P[Redirect to Router Details]
-```
+Authentication differs per channel:
+- Bootstrap / provision-script use a short-lived **provisioning JWT** (1-hour) in the URL.
+- The agent uses a per-router **`X-Router-Token`** (random 64-hex, hashed at rest), generated during bootstrap.
 
 ---
 
-## Technical Implementation
+## 3. End-to-end provisioning workflow
 
-### 1. Backend Service Architecture
+The frontend wizard has 3 steps; behind them is the create-only session + the
+NAT-safe channels above.
 
-#### Provisioning Service (`app/services/provisioning_service.py`)
+```
+Step 1  Connection  → POST /provisioning/sessions (create-only) returns session_id
+                      GET  /provisioning/bootstrap/command?...&session_id=...
+                      User pastes the one-liner in the router terminal.
+                      Router: identity + API/FTP/Winbox + codevertex-api user
+                              + POST scan-report + POST notify (+ install agent).
 
-```python
-class ProvisioningService:
-    """
-    Handles all provisioning operations.
-    
-    Responsibilities:
-    - Session management
-    - Command generation
-    - Script execution
-    - Error handling
-    - Log streaming
-    """
-    
-    def __init__(self, db: Session):
-        self.db = db
-        self.sessions = {}  # Active provisioning sessions
-        self.log_streams = {}  # WebSocket connections for logs
-    
-    async def create_provisioning_session(
-        self, 
-        router_id: int, 
-        user_id: int
-    ) -> ProvisioningSession:
-        """
-        Create a new provisioning session.
-        
-        Process:
-        1. Validate router exists and is accessible
-        2. Generate unique session token
-        3. Create session in database
-        4. Initialize WebSocket for logs
-        5. Return session details
-        """
-        # Validate router
-        router = self.db.query(Router).filter(Router.id == router_id).first()
-        if not router:
-            raise ResourceNotFoundError(f"Router {router_id} not found")
-        
-        # Generate secure token
-        token = self._generate_session_token(router_id, user_id)
-        
-        # Create session
-        session = ProvisioningSession(
-            router_id=router_id,
-            user_id=user_id,
-            token=token,
-            status=ProvisioningStatus.PENDING,
-            step=ProvisioningStep.CONNECTION,
-            created_at=datetime.utcnow()
-        )
-        
-        self.db.add(session)
-        self.db.commit()
-        
-        # Store in memory for quick access
-        self.sessions[token] = session
-        
-        return session
-    
-    def _generate_session_token(self, router_id: int, user_id: int) -> str:
-        """
-        Generate cryptographically secure session token.
-        
-        Token Format: BASE64(AES_ENCRYPT(router_id|user_id|timestamp|random))
-        
-        Security:
-        - Uses AES-256 encryption
-        - Includes timestamp to prevent replay attacks
-        - Adds random bytes for uniqueness
-        - 24-hour expiry
-        """
-        import secrets
-        from cryptography.fernet import Fernet
-        
-        # Get encryption key from environment
-        key = settings.ENCRYPTION_KEY.encode()
-        cipher = Fernet(key)
-        
-        # Create token payload
-        timestamp = int(datetime.utcnow().timestamp())
-        random_bytes = secrets.token_hex(16)
-        payload = f"{router_id}|{user_id}|{timestamp}|{random_bytes}"
-        
-        # Encrypt and encode
-        encrypted = cipher.encrypt(payload.encode())
-        token = base64.urlsafe_b64encode(encrypted).decode()
-        
-        return token
+Step 2  Device scan → scan data arrives via /bootstrap/scan-report (router→cloud).
+                      UI shows interfaces; WAN auto-detected (default route iface),
+                      WAN auto-excluded from the bridge port list.
+
+Step 3  Services    → POST /provisioning/workflow (or the script path).
+                      For a NAT'd router the UI uses GET /provision-script/{id}:
+                      router fetches the generated .rsc and runs it, then POSTs
+                      /provision-script/{id}/complete → session COMPLETED.
 ```
 
-### 2. Command Generation
-
-#### Bootstrap Command Generation
-
-The bootstrap command is what the user runs on the MikroTik console to establish initial connection.
-
-```python
-def generate_bootstrap_command(self, session_id: int, domain: str) -> str:
-    """
-    Generate the bootstrap command for router provisioning.
-    
-    Command Structure:
-    /tool fetch mode=https url="<provisioning_url>" dst-path=provision.rsc;:delay 2s;/import provision.rsc;
-    
-    Explanation:
-    1. /tool fetch - MikroTik command to download files
-    2. mode=https - Use HTTPS for security
-    3. url="..." - The provisioning endpoint URL
-    4. dst-path=provision.rsc - Save as provision.rsc
-    5. :delay 2s - Wait 2 seconds for download to complete
-    6. /import provision.rsc - Execute the downloaded script
-    
-    The URL contains the encrypted session token for authentication.
-    """
-    session = self.get_session(session_id)
-    
-    # Build provisioning URL with token
-    provisioning_url = (
-        f"https://{domain}/api/v1/provisioning/"
-        f"bootstrap/{session.token}"
-    )
-    
-    # Generate the command
-    command = (
-        f'/tool fetch mode=https url="{provisioning_url}" '
-        f'dst-path=provision.rsc;'
-        f':delay 2s;'
-        f'/import provision.rsc;'
-    )
-    
-    return command
-```
-
-**Why This Approach?**
-
-1. **Security**: HTTPS ensures encrypted communication
-2. **Token Authentication**: Session token validates the request
-3. **Single Command**: User only needs to paste one line
-4. **Automatic Execution**: Script imports and runs automatically
-5. **Error Recovery**: If download fails, nothing is imported
-
-#### Provisioning Script Generation
-
-The provisioning script (provision.rsc) is dynamically generated based on router configuration:
-
-```python
-def generate_provisioning_script(
-    self,
-    router_id: int,
-    config: ProvisioningConfig
-) -> str:
-    """
-    Generate the complete RouterOS script for provisioning.
-    
-    Script Sections:
-    1. System Identity
-    2. Network Interfaces
-    3. IP Addresses
-    4. IP Pools
-    5. PPPoE Server (if enabled)
-    6. Hotspot Server (if enabled)
-    7. Firewall Rules
-    8. NAT Rules
-    9. Queue Trees (Bandwidth Management)
-    10. User Profiles
-    11. Monitoring Setup
-    
-    Each section is generated separately and combined.
-    """
-    router = self.db.query(Router).filter(Router.id == router_id).first()
-    
-    script_parts = []
-    
-    # 1. System Identity
-    script_parts.append(self._generate_identity_config(router, config))
-    
-    # 2. Network Interfaces
-    script_parts.append(self._generate_interface_config(config))
-    
-    # 3. IP Configuration
-    script_parts.append(self._generate_ip_config(config))
-    
-    # 4. IP Pools
-    script_parts.append(self._generate_pool_config(config))
-    
-    # 5. PPPoE Server
-    if config.enable_pppoe:
-        script_parts.append(self._generate_pppoe_config(config))
-    
-    # 6. Hotspot Server
-    if config.enable_hotspot:
-        script_parts.append(self._generate_hotspot_config(config))
-    
-    # 7. Firewall Rules
-    script_parts.append(self._generate_firewall_config(config))
-    
-    # 8. NAT Rules
-    script_parts.append(self._generate_nat_config(config))
-    
-    # 9. Bandwidth Management
-    script_parts.append(self._generate_queue_config(config))
-    
-    # 10. Monitoring
-    script_parts.append(self._generate_monitoring_config(router))
-    
-    # Combine all parts
-    script = "\n\n".join(script_parts)
-    
-    return script
-
-def _generate_identity_config(self, router: Router, config: ProvisioningConfig) -> str:
-    """
-    Generate system identity configuration.
-    
-    Sets:
-    - Router name/identity
-    - Contact information
-    - Location
-    """
-    return f"""
-# ============================================
-# SYSTEM IDENTITY
-# ============================================
-/system identity set name="{config.router_identity}"
-/system note set note="Provisioned by Codevertex ISP Billing System"
-/system note set show-at-login=yes
-"""
-
-def _generate_interface_config(self, config: ProvisioningConfig) -> str:
-    """
-    Configure network interfaces.
-    
-    Sets:
-    - Bridge creation
-    - Interface assignments to bridge
-    - Interface descriptions
-    """
-    # Create bridge
-    script = """
-# ============================================
-# NETWORK INTERFACES
-# ============================================
-# Create bridge
-/interface bridge add name=bridge-local comment="LAN Bridge"
-"""
-    
-    # Add ports to bridge
-    for port in config.bridge_ports:
-        script += f'/interface bridge port add bridge=bridge-local interface={port}\n'
-    
-    # Set interface descriptions
-    script += f'/interface set ether1 comment="WAN - Internet"\n'
-    script += f'/interface set bridge-local comment="LAN - Local Network"\n'
-    
-    return script
-
-def _generate_ip_config(self, config: ProvisioningConfig) -> str:
-    """
-    Configure IP addresses and routing.
-    
-    Sets:
-    - WAN IP (DHCP client or static)
-    - LAN IP (gateway address)
-    - DNS servers
-    - Default route
-    """
-    script = """
-# ============================================
-# IP CONFIGURATION
-# ============================================
-"""
-    
-    # WAN Configuration
-    if config.wan_dhcp:
-        script += '/ip dhcp-client add interface=ether1 disabled=no\n'
-    else:
-        script += f'''
-/ip address add address={config.wan_ip}/{config.wan_netmask} \\
-    interface=ether1 comment="WAN IP"
-/ip route add gateway={config.wan_gateway}
-'''
-    
-    # LAN Configuration
-    script += f'''
-/ip address add address={config.gateway_ip}/{config.cidr} \\
-    interface=bridge-local comment="LAN Gateway"
-'''
-    
-    # DNS Configuration
-    script += f'/ip dns set servers={config.dns_primary},{config.dns_secondary}\n'
-    script += '/ip dns set allow-remote-requests=yes\n'
-    
-    return script
-
-def _generate_pool_config(self, config: ProvisioningConfig) -> str:
-    """
-    Create IP address pools for client assignments.
-    
-    Pools:
-    - PPPoE Pool: For PPPoE clients
-    - Hotspot Pool: For Hotspot users
-    - Static Pool: For static assignments
-    
-    Pool Calculation:
-    Based on network address and CIDR, calculate usable IP range
-    and split into pools.
-    """
-    script = """
-# ============================================
-# IP POOLS
-# ============================================
-"""
-    
-    # Calculate IP ranges
-    network = ipaddress.ip_network(f"{config.subnet_address}/{config.cidr}", strict=False)
-    usable_ips = list(network.hosts())
-    
-    # Reserve first IPs for gateway and infrastructure
-    gateway_ip = usable_ips[0]  # Already used as gateway
-    
-    # PPPoE Pool: 50% of available IPs
-    pppoe_start = usable_ips[10]
-    pppoe_end = usable_ips[len(usable_ips) // 2]
-    
-    # Hotspot Pool: Remaining IPs
-    hotspot_start = usable_ips[(len(usable_ips) // 2) + 1]
-    hotspot_end = usable_ips[-10]  # Reserve last 10 IPs
-    
-    script += f'/ip pool add name=pppoe-pool ranges={pppoe_start}-{pppoe_end}\n'
-    script += f'/ip pool add name=hotspot-pool ranges={hotspot_start}-{hotspot_end}\n'
-    
-    return script
-
-def _generate_pppoe_config(self, config: ProvisioningConfig) -> str:
-    """
-    Configure PPPoE server.
-    
-    Sets:
-    - PPPoE server on bridge interface
-    - Default profile
-    - Service name
-    - Authentication method
-    - IP pool assignment
-    """
-    script = """
-# ============================================
-# PPPoE SERVER
-# ============================================
-# Create PPPoE profile
-/ppp profile add name=pppoe-profile \\
-    local-address={gateway_ip} \\
-    remote-address=pppoe-pool \\
-    use-compression=no \\
-    use-encryption=no \\
-    only-one=yes \\
-    comment="Default PPPoE Profile"
-
-# Enable PPPoE server
-/interface pppoe-server server add \\
-    service-name="ISP-PPPoE" \\
-    interface=bridge-local \\
-    default-profile=pppoe-profile \\
-    authentication=pap,chap,mschap1,mschap2 \\
-    keepalive-timeout=60 \\
-    disabled=no
-""".format(gateway_ip=config.gateway_ip)
-    
-    return script
-
-def _generate_hotspot_config(self, config: ProvisioningConfig) -> str:
-    """
-    Configure Hotspot server.
-    
-    Process:
-    1. Create hotspot pool
-    2. Create hotspot profile
-    3. Create hotspot server
-    4. Configure login page
-    5. Set up walled garden (bypass URLs)
-    """
-    script = """
-# ============================================
-# HOTSPOT SERVER
-# ============================================
-# Create Hotspot profile
-/ip hotspot profile add name=hotspot-profile \\
-    hotspot-address={gateway_ip} \\
-    dns-name="hotspot.local" \\
-    html-directory=hotspot \\
-    login-by=http-chap \\
-    use-radius=no
-
-# Create Hotspot server
-/ip hotspot add name=hotspot1 \\
-    interface=bridge-local \\
-    address-pool=hotspot-pool \\
-    profile=hotspot-profile \\
-    disabled=no
-
-# DHCP Server for Hotspot
-/ip dhcp-server add name=hotspot-dhcp \\
-    interface=bridge-local \\
-    address-pool=hotspot-pool \\
-    disabled=no
-
-/ip dhcp-server network add \\
-    address={network}/{cidr} \\
-    gateway={gateway_ip} \\
-    dns-server={dns_primary},{dns_secondary}
-""".format(
-        gateway_ip=config.gateway_ip,
-        network=config.subnet_address,
-        cidr=config.cidr,
-        dns_primary=config.dns_primary,
-        dns_secondary=config.dns_secondary
-    )
-    
-    # Walled Garden (bypass URLs)
-    if config.walled_garden_urls:
-        script += "\n# Walled Garden\n"
-        for url in config.walled_garden_urls:
-            script += f'/ip hotspot walled-garden add dst-host={url}\n'
-    
-    return script
-
-def _generate_firewall_config(self, config: ProvisioningConfig) -> str:
-    """
-    Configure firewall rules for security.
-    
-    Rules:
-    1. Accept established/related connections
-    2. Accept ICMP (ping)
-    3. Drop invalid connections
-    4. Accept connections to router from LAN
-    5. Drop all other input
-    6. Accept forwarding for LAN to WAN
-    7. Drop forwarding from WAN to LAN (except established)
-    """
-    script = """
-# ============================================
-# FIREWALL RULES
-# ============================================
-# Input Chain
-/ip firewall filter add chain=input connection-state=established,related \\
-    action=accept comment="Accept established/related"
-    
-/ip firewall filter add chain=input connection-state=invalid \\
-    action=drop comment="Drop invalid"
-    
-/ip firewall filter add chain=input protocol=icmp \\
-    action=accept comment="Accept ICMP"
-    
-/ip firewall filter add chain=input in-interface=bridge-local \\
-    action=accept comment="Accept from LAN"
-    
-/ip firewall filter add chain=input \\
-    action=drop comment="Drop all other input"
-
-# Forward Chain
-/ip firewall filter add chain=forward connection-state=established,related \\
-    action=accept comment="Accept established/related"
-    
-/ip firewall filter add chain=forward connection-state=invalid \\
-    action=drop comment="Drop invalid"
-    
-/ip firewall filter add chain=forward in-interface=bridge-local \\
-    out-interface=ether1 action=accept comment="LAN to WAN"
-    
-/ip firewall filter add chain=forward \\
-    action=drop comment="Drop all other forward"
-"""
-    
-    return script
-
-def _generate_nat_config(self, config: ProvisioningConfig) -> str:
-    """
-    Configure NAT (Network Address Translation).
-    
-    Rules:
-    - Masquerade outgoing connections (source NAT)
-    - Port forwarding (if specified)
-    """
-    script = """
-# ============================================
-# NAT RULES
-# ============================================
-# Source NAT (Masquerade)
-/ip firewall nat add chain=srcnat out-interface=ether1 \\
-    action=masquerade comment="Masquerade LAN to WAN"
-"""
-    
-    # Port forwarding rules
-    if config.port_forwards:
-        script += "\n# Port Forwarding\n"
-        for forward in config.port_forwards:
-            script += f'''
-/ip firewall nat add chain=dstnat \\
-    dst-port={forward['external_port']} \\
-    protocol={forward['protocol']} \\
-    in-interface=ether1 \\
-    action=dst-nat \\
-    to-addresses={forward['internal_ip']} \\
-    to-ports={forward['internal_port']} \\
-    comment="{forward['description']}"
-'''
-    
-    return script
-
-def _generate_queue_config(self, config: ProvisioningConfig) -> str:
-    """
-    Configure bandwidth management (QoS).
-    
-    Creates:
-    - Queue trees for upload/download limiting
-    - Simple queues for per-user limits
-    - PCQ (Per Connection Queue) for fair sharing
-    """
-    script = """
-# ============================================
-# BANDWIDTH MANAGEMENT
-# ============================================
-# PCQ Types
-/queue type add name=pcq-download kind=pcq pcq-rate=0 \\
-    pcq-classifier=dst-address
-
-/queue type add name=pcq-upload kind=pcq pcq-rate=0 \\
-    pcq-classifier=src-address
-
-# Queue Trees
-/queue tree add name=download parent=bridge-local \\
-    packet-mark=all-packets queue=pcq-download
-
-/queue tree add name=upload parent=ether1 \\
-    packet-mark=all-packets queue=pcq-upload
-"""
-    
-    return script
-
-def _generate_monitoring_config(self, router: Router) -> str:
-    """
-    Configure monitoring and management.
-    
-    Sets:
-    - SNMP for monitoring
-    - Logging to remote syslog server
-    - API access for management
-    - Backup schedule
-    """
-    script = f"""
-# ============================================
-# MONITORING & MANAGEMENT
-# ============================================
-# Enable API
-/ip service enable api
-/ip service set api port=8728
-
-# SNMP Configuration
-/snmp set enabled=yes contact="{router.contact_info}" \\
-    location="{router.location}"
-
-# Logging
-/system logging action add name=remote target=remote \\
-    remote={settings.SYSLOG_SERVER} remote-port=514
-
-# Backup Schedule
-/system scheduler add name=daily-backup \\
-    on-event="/system backup save name=daily-backup" \\
-    start-time=02:00:00 interval=1d
-"""
-    
-    return script
-```
-
-### 3. Script Execution
-
-#### Executing RouterOS Commands
-
-```python
-async def execute_provisioning_script(
-    self,
-    router_id: int,
-    script: str,
-    session_id: int
-) -> bool:
-    """
-    Execute provisioning script on MikroTik router.
-    
-    Process:
-    1. Connect to router via API
-    2. Split script into commands
-    3. Execute commands sequentially
-    4. Log each command result
-    5. Handle errors gracefully
-    6. Stream logs to frontend via WebSocket
-    """
-    router = self.db.query(Router).filter(Router.id == router_id).first()
-    session = self.get_session(session_id)
-    
-    try:
-        # Connect to router
-        api = self._connect_to_router(router)
-        
-        # Split script into commands
-        commands = self._parse_script(script)
-        
-        # Execute commands
-        for i, command in enumerate(commands):
-            try:
-                # Log start
-                await self._stream_log(
-                    session_id,
-                    f"[{i+1}/{len(commands)}] Executing: {command[:50]}..."
-                )
-                
-                # Execute command
-                result = api.talk([command])
-                
-                # Log success
-                await self._stream_log(
-                    session_id,
-                    f"[{i+1}/{len(commands)}] ✓ Success"
-                )
-                
-            except Exception as cmd_error:
-                # Log error
-                await self._stream_log(
-                    session_id,
-                    f"[{i+1}/{len(commands)}] ✗ Error: {str(cmd_error)}"
-                )
-                
-                # Rollback on critical error
-                if self._is_critical_error(cmd_error):
-                    await self.rollback_provisioning(session_id)
-                    raise ProvisioningError(f"Critical error: {str(cmd_error)}")
-        
-        # Mark success
-        session.status = ProvisioningStatus.COMPLETED
-        session.completed_at = datetime.utcnow()
-        self.db.commit()
-        
-        await self._stream_log(session_id, "✓ Provisioning completed successfully!")
-        
-        return True
-        
-    except Exception as e:
-        # Mark failed
-        session.status = ProvisioningStatus.FAILED
-        session.error_message = str(e)
-        self.db.commit()
-        
-        await self._stream_log(session_id, f"✗ Provisioning failed: {str(e)}")
-        
-        return False
-    
-    finally:
-        # Disconnect
-        if api:
-            api.disconnect()
-
-def _connect_to_router(self, router: Router) -> RouterOsApiPool:
-    """
-    Establish connection to MikroTik router via API.
-    
-    Uses:
-    - RouterOS API (port 8728)
-    - SSL/TLS encryption (port 8729 if available)
-    - Authentication with stored credentials
-    """
-    from librouteros import connect
-    from librouteros.login import login_plain, login_token
-    
-    try:
-        # Try secure connection first
-        try:
-            api = connect(
-                host=router.ip_address,
-                username=router.username,
-                password=router.password,
-                port=8729,
-                ssl_wrapper=ssl.wrap_socket,
-                timeout=30
-            )
-        except:
-            # Fall back to non-secure
-            api = connect(
-                host=router.ip_address,
-                username=router.username,
-                password=router.password,
-                port=router.api_port or 8728,
-                timeout=30
-            )
-        
-        return api
-        
-    except Exception as e:
-        raise RouterConnectionError(f"Failed to connect to router: {str(e)}")
-```
+> `POST /provisioning/workflow` both creates a session and runs the background
+> workflow over the **direct** RouterOS API; for a NAT'd router that direct path
+> fails, so the UI uses the **script-based** path (`provision-script`) instead.
+> `POST /provisioning/sessions` is the *create-only* variant (no provisioning
+> started) used to obtain a `session_id` to thread through the bootstrap callback.
 
 ---
 
-## Live Log Streaming
+## 4. Step 1 — Bootstrap (one-liner)
 
-### WebSocket Implementation
+`GET /api/v1/provisioning/bootstrap/command` returns a copy-paste command:
 
-```python
-# Backend WebSocket Handler
-from fastapi import WebSocket
-
-class ProvisioningWebSocket:
-    """
-    Handle WebSocket connections for live log streaming.
-    """
-    
-    def __init__(self):
-        self.active_connections: Dict[int, List[WebSocket]] = {}
-    
-    async def connect(self, session_id: int, websocket: WebSocket):
-        """Accept WebSocket connection for a provisioning session."""
-        await websocket.accept()
-        
-        if session_id not in self.active_connections:
-            self.active_connections[session_id] = []
-        
-        self.active_connections[session_id].append(websocket)
-    
-    async def disconnect(self, session_id: int, websocket: WebSocket):
-        """Remove WebSocket connection."""
-        if session_id in self.active_connections:
-            self.active_connections[session_id].remove(websocket)
-    
-    async def send_log(self, session_id: int, message: str):
-        """Send log message to all connected clients."""
-        if session_id in self.active_connections:
-            for connection in self.active_connections[session_id]:
-                try:
-                    await connection.send_json({
-                        'type': 'log',
-                        'message': message,
-                        'timestamp': datetime.utcnow().isoformat()
-                    })
-                except:
-                    # Connection closed, remove it
-                    await self.disconnect(session_id, connection)
-
-# FastAPI Endpoint
-@router.websocket("/ws/provisioning/{session_id}")
-async def provisioning_websocket(
-    websocket: WebSocket,
-    session_id: int
-):
-    """WebSocket endpoint for provisioning logs."""
-    await ws_manager.connect(session_id, websocket)
-    
-    try:
-        while True:
-            # Keep connection alive
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        await ws_manager.disconnect(session_id, websocket)
+```routeros
+/tool fetch mode=https url="https://<backend>/api/v1/provisioning/bootstrap/script?token=<JWT>&identity=<NAME>&api_port=8728&interface=ether1" dst-path=codevertex.rsc;:delay 2s;/import codevertex.rsc; :delay 1s; /tool fetch mode=https url="https://<backend>/api/v1/provisioning/bootstrap/notify?session_id=<SID>&token=<JWT>&identity=<NAME>&status=bootstrap_completed" http-method=post;
 ```
 
-### Frontend WebSocket Client
+The downloaded `codevertex.rsc` (`bootstrap.py::get_bootstrap_script`) does, in order:
 
-```typescript
-// lib/store/provisioning.ts
-export const useProvisioningStore = create<ProvisioningState>((set, get) => ({
-  logs: [],
-  isConnected: false,
-  ws: null,
-  
-  connectToLogs: (sessionId: number) => {
-    const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL}/ws/provisioning/${sessionId}`
-    const ws = new WebSocket(wsUrl)
-    
-    ws.onopen = () => {
-      set({ isConnected: true, ws })
-      console.log('WebSocket connected')
-    }
-    
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-      
-      if (data.type === 'log') {
-        set((state) => ({
-          logs: [...state.logs, {
-            message: data.message,
-            timestamp: new Date(data.timestamp),
-          }]
-        }))
-      }
-    }
-    
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error)
-    }
-    
-    ws.onclose = () => {
-      set({ isConnected: false, ws: null })
-      console.log('WebSocket disconnected')
-    }
-  },
-  
-  disconnectFromLogs: () => {
-    const { ws } = get()
-    if (ws) {
-      ws.close()
-      set({ isConnected: false, ws: null, logs: [] })
-    }
-  },
-}))
-```
+1. Set system identity.
+2. Enable **API** (port from query), **FTP** (21), **Winbox**, and move **SSH** to **2222**.
+3. Create user group `codevertex-api` and user (`mikrotik_api_username` from settings)
+   in group `codevertex-api` — comment `"Codevertex ISP Billing API - DO NOT DELETE"`.
+4. Verify the WAN interface exists; tune memory logging.
+5. **POST a scan report** (`/bootstrap/scan-report`) with interfaces, version, board,
+   WAN interface (derived from the default route), service counts, IPs, DNS.
+6. Download the captive-portal templates (`login.html`, `alogin.html`) to `hotspot/`
+   when the user's org slug is known.
+7. **Install the polling agent**: fetch `/router-agent/script/{router_id}?token=<agent>`
+   (the *installer*) and `/import` it — this registers the recurring scheduler.
+8. Optionally emit a **WireGuard** client config + register callback (only if the
+   platform has WG configured; otherwise it prints `[SKIP]`).
+
+The outer one-liner then POSTs `/bootstrap/notify`, which marks the session
+`bootstrap_completed`, stores encrypted API credentials on the router row, and
+broadcasts completion over WebSocket so the UI auto-advances. `notify` correlates
+by `session_id` first, then falls back to router IP / identity.
+
+> The agent token is **reused** if the router already has one; it is **not**
+> regenerated on every bootstrap-command preview (regenerating would 401 the agent
+> already running on the device).
 
 ---
 
-## Security Implementation
+## 5. Step 2 — Device scan
 
-### Authentication & Authorization
+There is no inbound scan. The bootstrap script POSTs the scan to
+`/bootstrap/scan-report`, which `store_scanned_config()` persists on the router so
+the UI's device-scan view can render cached data. The scan determines:
 
-```python
-def verify_provisioning_token(token: str) -> ProvisioningSession:
-    """
-    Verify provisioning token.
-    
-    Security Checks:
-    1. Token format is valid
-    2. Token can be decrypted
-    3. Session exists in database
-    4. Session is not expired
-    5. Session is not already used
-    """
-    try:
-        # Decrypt token
-        cipher = Fernet(settings.ENCRYPTION_KEY.encode())
-        decrypted = cipher.decrypt(base64.urlsafe_b64decode(token))
-        
-        # Parse payload
-        router_id, user_id, timestamp, random = decrypted.decode().split('|')
-        
-        # Check expiry (24 hours)
-        token_age = datetime.utcnow().timestamp() - int(timestamp)
-        if token_age > 86400:  # 24 hours
-            raise TokenExpiredError("Token has expired")
-        
-        # Get session from database
-        session = db.query(ProvisioningSession).filter(
-            ProvisioningSession.token == token
-        ).first()
-        
-        if not session:
-            raise InvalidTokenError("Invalid token")
-        
-        if session.status == ProvisioningStatus.COMPLETED:
-            raise TokenAlreadyUsedError("Token already used")
-        
-        return session
-        
-    except Exception as e:
-        raise AuthenticationError(f"Token verification failed: {str(e)}")
-```
-
-### Encrypted Communication
-
-All communication between the backend and MikroTik router uses:
-1. **HTTPS** for initial bootstrap command download
-2. **API with TLS** for ongoing communication
-3. **Encrypted credentials** stored in database
-4. **Token-based authentication** for session management
+- the interface list shown for bridge-port selection, and
+- the **WAN interface** (the interface of the `0.0.0.0/0` default route), which is
+  **auto-excluded** from bridge ports to prevent management lockout.
 
 ---
 
-## Error Handling & Recovery
+## 6. Step 3 — Service provisioning (the generated .rsc)
 
-### Rollback Mechanism
+`GET /provisioning/provision-script/{session_id}` (`workflow.py`) builds a single
+`.rsc` from `generate_configuration_commands` + `generate_hotspot_commands` /
+`generate_pppoe_commands` (`app/modules/provisioning/commands.py`). Each command is
+wrapped in `:do {…} on-error={…}`; critical steps abort, non-critical ones warn and
+continue. At the end the script POSTs `/provision-script/{session_id}/complete`.
 
-```python
-async def rollback_provisioning(self, session_id: int):
-    """
-    Rollback provisioning changes.
-    
-    Process:
-    1. Connect to router
-    2. Restore previous configuration (if backup exists)
-    3. Remove newly created resources
-    4. Reset to safe defaults
-    5. Mark session as rolled back
-    """
-    session = self.get_session(session_id)
-    router = session.router
-    
-    try:
-        api = self._connect_to_router(router)
-        
-        # Check for backup
-        if session.backup_config:
-            # Restore from backup
-            await self._stream_log(session_id, "Restoring from backup...")
-            api.talk([f'/system backup load name={session.backup_config}'])
-        else:
-            # Manual cleanup
-            await self._stream_log(session_id, "Cleaning up changes...")
-            
-            # Remove PPPoE server
-            if session.config.get('enable_pppoe'):
-                api.talk(['/interface pppoe-server server remove numbers=0'])
-            
-            # Remove Hotspot
-            if session.config.get('enable_hotspot'):
-                api.talk(['/ip hotspot remove numbers=0'])
-            
-            # Remove IP pools
-            api.talk(['/ip pool remove [find name~"^(pppoe|hotspot)-pool"]'])
-            
-            # Remove firewall rules
-            api.talk(['/ip firewall filter remove [find comment~"Provisioned"]'])
-        
-        # Mark as rolled back
-        session.status = ProvisioningStatus.ROLLED_BACK
-        session.rolled_back_at = datetime.utcnow()
-        self.db.commit()
-        
-        await self._stream_log(session_id, "✓ Rollback completed successfully")
-        
-    except Exception as e:
-        await self._stream_log(session_id, f"✗ Rollback failed: {str(e)}")
-        raise
-```
+**Order of operations (hotspot path):**
+
+1. **Identity, NTP, timezone** (timezone from the org; default `Africa/Nairobi`).
+2. **Clean slate** — remove the previous run's `codevertex-*` objects first (see §13).
+3. **Bridge** `codevertex-bridge` (ensured, not stripped from the default bridge).
+4. **Bridge ports** — each selected port is removed from any current bridge, then
+   added to `codevertex-bridge`. **WAN is filtered out** (`filter_wan_from_bridge_ports`).
+5. **Gateway IP** on the bridge, **IP pool** `codevertex-pool`, **DNS** (`allow-remote-requests`).
+6. **DHCP server** `codevertex-dhcp` + network — DHCP hands clients the **router/gateway
+   as their DNS** (so captive-portal detection works), not 8.8.8.8.
+7. **NAT masquerade** out the WAN interface (`comment=codevertex-masquerade`).
+8. Hotspot: enable FTP, create CA + server **certificate** (for RFC 7710/8910 /
+   DHCP Option 114), hotspot **profile** `codevertex-hsprof`
+   (`login-by=http-chap,http-pap,https,mac-cookie`), assign the SSL cert.
+9. Create the **hotspot server** — **named `ISP-Hotspot`** (from service-config
+   enrichment), bound to `codevertex-bridge`, `addresses-per-mac=1`, `idle-timeout=5m`.
+10. **Captive-portal redirect install** — fetch `login.html` + `alogin.html` from the
+    backend into `hotspot/` and set `html-directory=hotspot` on the profile (see §8 — this
+    is what makes the redirect actually happen).
+11. Gateway **ip-binding bypass**, **walled garden** (portal + payment hosts),
+    **captive-portal-detection DNS static** entries, **DNS-redirect NAT** (force
+    :53 through the router), **DoH block** (reject :443 to known DoH IPs), optional
+    **anti-sharing** TTL rules.
+
+> **Hotspot server name caveat:** the server is `ISP-Hotspot`, the *profile* is
+> `codevertex-hsprof`. Cleanup/reset must match the **server by interface**
+> (`interface=codevertex-bridge`), not by `name~"codevertex"`. See
+> [`reset-router-provision.md`](./reset-router-provision.md).
 
 ---
 
-## Implementation Notes
+## 7. The polling agent
 
-### Configuration Data Structure
+Installed during bootstrap (channel 3). Two script modes from
+`GET /router-agent/script/{router_id}` (`router_agent.py`):
 
-The provisioning system uses a flexible dictionary-based configuration structure instead of rigid enums:
+- **`installer`** (default): removes any prior `codevertex-agent` scheduler + cached
+  `cvagent.rsc`, downloads the agent **body** to `cvagent.rsc`, creates a
+  `/system/scheduler name="codevertex-agent" interval=<poll>s on-event="/import file-name=cvagent.rsc"`,
+  and runs it once immediately. **This is what makes polling recurring** — a
+  previous bug returned only the body, so `/import` ran a single poll and never
+  scheduled anything.
+- **`body`**: the actual loop — collect telemetry (CPU/mem/uptime/version + active
+  hotspot/PPP users), `POST /router-agent/poll-text`, parse the **pipe-delimited**
+  command lines, execute them, and `POST /router-agent/report` with results.
 
-```python
-# Frontend sends configuration as:
-configuration = {
-    "identity": str,              # Router name
-    "selectedPorts": List[str],   # Interfaces to bridge
-    "enableAntiSharing": bool,    # TTL modification
-    "useCustomSubnet": bool,      # Custom vs default subnet
-    "subnetAddress": str,         # Network address
-    "cidr": int,                  # Subnet mask in CIDR
-    "enableHotspot": bool,        # Enable Hotspot service
-    "enablePppoe": bool,          # Enable PPPoE service
-}
-```
+Backend side (`app/services/router_agent.py`):
+- `queue_command()` enqueues a `RouterCommand` (priority, source, expiry).
+- `handle_poll()` updates telemetry (DB + Redis 5-min TTL), stores the agent-reported
+  **active users** (the only NAT-safe source for the "Active Users" tab), returns up
+  to N pending commands and marks them `sent`.
+- `handle_report()` flips commands to `success`/`failed` (with retry/backoff);
+  `subscription_sync` results update `is_router_synced`.
+- Plain-text `/poll-text` avoids needing a JSON parser on RouterOS v6.
 
-**Why Dictionary Instead of Enum?**
-- Flexibility: Easy to add new fields without schema changes
-- Frontend Compatibility: Direct JSON serialization
-- Backward Compatibility: Old fields don't break new code
-- Validation: Pydantic schemas validate structure at API boundary
-
-### Command Display Formatting
-
-The `ProvisioningCommand` component uses specific CSS properties for proper command wrapping:
-
-```css
-.command-display {
-  white-space: pre-wrap;      /* Preserves whitespace but wraps */
-  word-break: break-all;       /* Breaks long URLs */
-  overflow-wrap: anywhere;     /* Modern browsers */
-}
-```
-
-**Why This Approach?**
-- Long URLs don't cause horizontal scroll
-- Command remains readable on mobile devices
-- Copy-paste preserves original formatting
-- No manual line breaks needed
-
-### Token Security
-
-Provisioning tokens are JWT tokens with:
-- **1-hour expiration**: Prevents unauthorized reuse
-- **Purpose field**: Restricted to provisioning operations only
-- **Permission scope**: Limited to `provisioning.execute` and `router.configure`
-- **User binding**: Tied to requesting user for audit trail
-
-### WebSocket Live Streaming
-
-Live log streaming uses WebSocket protocol:
-- **Endpoint**: `/ws/provisioning/{session_id}`
-- **Auth**: Token passed in query string or WebSocket headers
-- **Reconnection**: Automatic reconnection on disconnect
-- **Buffering**: Backend buffers messages if client disconnects
+Command wire format (one per line): `action|param1|...|command_id`, e.g.
+`create_user|jane|pass|hotspot|plan_7|10M/5M|<cmd-id>`.
 
 ---
 
-## Best Practices
+## 8. Captive-portal flow
 
-### 1. Pre-Provisioning Checklist
-- ✅ Router is accessible on network
-- ✅ Default credentials are known
-- ✅ Firmware version is compatible (RouterOS 6.x or 7.x)
-- ✅ Router has internet access
-- ✅ Backup of existing configuration taken
+This is an **external** captive portal: unauthenticated clients are redirected to
+the ISP-billing **frontend** buy page, not MikroTik's built-in login form.
 
-### 2. Configuration Best Practices
-- ✅ Use descriptive router identities
-- ✅ Document all custom configurations
-- ✅ Test with one router before mass deployment
-- ✅ Keep provisioning templates updated
-- ✅ Monitor logs during provisioning
+```
+Client → AP → bridged ether port → hotspot DHCP lease (172.31.x.x, gateway=router DNS)
+   │  opens any HTTP page (unauthenticated)
+   ▼
+MikroTik hotspot intercepts → serves hotspot/login.html
+   │  login.html <meta refresh> → {frontend}/buy/{org_slug}?mac=..&ip=..
+   ▼  (walled garden allows the portal + payment hosts)
+Frontend buy page → redeem voucher OR buy package (M-PESA / Paystack)
+   │  backend creates the hotspot user NAT-safely (agent queues create_user)
+   ▼
+Client authenticates (returning users: POST /hotspot/{org}/login) → internet
+```
 
-### 3. Security Best Practices
-- ✅ Change default admin password
-- ✅ Use strong API passwords
-- ✅ Enable firewall rules
-- ✅ Restrict API access to management network
-- ✅ Regularly update RouterOS firmware
+Key pieces:
+- **`login.html`** (`templates.py::generate_login_template`, served from
+  `GET /provisioning/templates/login.html?org_slug=…`) meta-refreshes to
+  `{frontend_url}/buy/{org_slug}` and also has a fallback username/password form that
+  POSTs to MikroTik's `$(link-login-only)`.
+- **`alogin.html`** is the post-auth page; it redirects to the org's configured
+  `hotspot_redirect_url`.
+- **`html-directory=hotspot`** on the hotspot profile is what activates these custom
+  pages. **Without it the router serves its built-in login form and no external
+  redirect happens** (this was the "lease but no popup" bug — now fixed in
+  `generate_hotspot_commands`, which fetches both templates and sets the directory).
+- **Captive-portal detection** DNS static entries resolve OS probe domains
+  (`connectivitycheck.gstatic.com`, `captive.apple.com`, `www.msftconnecttest.com`, …)
+  to the gateway with short TTL so the device shows the "Sign in to Wi-Fi" popup.
+  DNS-redirect NAT + DoH blocking stop clients bypassing this with hardcoded/encrypted DNS.
+
+> Templates reach the router two ways, both router-initiated: (a) the **bootstrap**
+> script downloads them up-front, and (b) **provisioning** re-fetches them and sets
+> `html-directory=hotspot`. (b) is the load-bearing one for the redirect.
 
 ---
 
-## Troubleshooting
+## 9. Subscriber lifecycle (create / disable / enable)
 
-### Common Issues
+User changes never dial the router; they are **queued** for the agent:
 
-#### 1. Router Not Connecting
-**Symptoms**: Bootstrap command fails, no connection established
+- **Create** — `_sync_hotspot_user_to_router()` (`app/api/v1/portal/hotspot.py`) is the
+  single source of truth, shared by voucher redeem, returning-user login, and
+  post-payment. It prefers the agent (`queue_command("create_user", …)` with the
+  plan's `rate_limit` and `profile=plan_<id>`); the agent **ensures the profile exists
+  with the right `rate-limit`** before adding the user. Direct API is fallback only.
+- **Disable / disconnect on expiry** — queued `disable_user` / `disconnect` commands
+  (subscription expiry sweep → `subscription_sync`).
+- **Enable on renewal** — queued `enable_user`.
 
-**Solutions**:
-```bash
-# Check router accessibility
-ping <router-ip>
-
-# Verify API port is open
-telnet <router-ip> 8728
-
-# Check firewall rules on router
-/ip firewall filter print where chain=input
-```
-
-#### 2. Script Execution Fails
-**Symptoms**: Commands fail midway through provisioning
-
-**Solutions**:
-- Check RouterOS version compatibility
-- Verify syntax of generated script
-- Check for conflicting existing configuration
-- Review error logs for specific command failures
-
-#### 3. Network Configuration Issues
-**Symptoms**: Clients can't connect after provisioning
-
-**Solutions**:
-```bash
-# Verify IP pools
-/ip pool print
-
-# Check PPPoE server status
-/interface pppoe-server server print
-
-# Verify firewall isn't blocking
-/ip firewall filter print
-```
+Vouchers (`app/api/v1/business/vouchers.py`): `POST /business/vouchers/generate`
+creates a batch (shared `batch_id`), each with **auto-generated hotspot credentials**
+and an optional pre-use **expiry** (shelf life). Limits are **not** stored on the
+voucher — they are derived from the linked plan at redeem time.
 
 ---
 
-**Last Updated**: October 21, 2025  
-**Version**: 1.0.0  
-**Author**: Codevertex Africa Limited
+## 10. Payments → activation
 
+`BillingService.create_payment(is_manual=…)` (`app/modules/billing/service.py`):
+
+- **Offline** methods (`cash`, `bank_transfer`) and any `is_manual=true`
+  reconciliation are recorded **COMPLETED** immediately and applied to the invoice.
+- **Online** (M-PESA / card) stay **PENDING** until the gateway callback confirms.
+- `_apply_payment_to_invoice()` is the shared path: when the invoice becomes fully
+  paid **and** is linked to a subscription, it activates that subscription and marks
+  it for router sync — identical behaviour across M-PESA, Paystack and manual/cash
+  (previously only the gateway webhooks activated; cash did not).
+
+For hotspot self-service purchases (`/hotspot/{org}/purchase` →
+`_process_successful_payment`), a voucher with hotspot credentials is generated and
+the hotspot user is queued onto the router via the shared helper. **All gateways are
+platform-level** (`organization_id IS NULL`); ISPs don't configure their own.
+
+---
+
+## 11. Network defaults & RouterOS v6/v7
+
+- Default subnet **`172.31.0.0/16`** (gateway `.0.1`, pool `.0.2`–`.255.254`).
+  `calculate_network_config()` also handles /22, /23, /24.
+- Bridge `codevertex-bridge`; pool `codevertex-pool`; DHCP `codevertex-dhcp`;
+  hotspot profile `codevertex-hsprof`; hotspot **server `ISP-Hotspot`**.
+- Version handling: `is_v7_or_later()` branches NTP and timezone syntax (v7 uses
+  `servers=` and IANA `time-zone-name=`; v6 uses `primary-ntp/secondary-ntp` and
+  `time-zone-autodetect`). The generated `.rsc` uses slash-separated paths
+  (`/ip/firewall/nat/add …`) which both versions accept. See
+  [`mikrotikv6-v7-comparison.md`](./mikrotikv6-v7-comparison.md).
+- **No DROP-all firewall rule** is added (avoids lockout); only permissive
+  management-allow rules (`comment=codevertex-allow-*`) — and those are **never**
+  removed by cleanup.
+
+---
+
+## 12. Tenant timezone
+
+Each organization has a `timezone` (default **`Africa/Nairobi`**, EAT UTC+3). It is
+injected into the provision script (clock set at provision time) and can be re-applied
+later via the router `sync_time` action. v6 routers fall back to timezone auto-detect.
+
+---
+
+## 13. Reprovisioning & clean-slate idempotency
+
+`generate_configuration_commands()` emits a **clean-slate block first** so a
+reprovision (e.g. to add `ether2`) starts from a known state and re-adds never hit
+"already exists". Every removal is `on-error`-guarded and scoped to `codevertex-*`
+objects, in dependency order (dependents → deps):
+
+- hotspot **server by `interface=codevertex-bridge`** (name varies — `ISP-Hotspot`),
+  hotspot profile `codevertex-hsprof`, gateway ip-binding, walled-garden hosts/IPs,
+- DHCP server + network, IP pool,
+- captive-detection DNS static, DNS-redirect NAT, masquerade NAT, DoH-block filter,
+  anti-sharing mangle/filter,
+- bridge IP, then the bridge itself.
+
+What is deliberately **never** touched: the default `bridge`, the WAN interface, the
+management IP, and the `codevertex-allow-*` management firewall rules.
+
+For a manual wipe before re-provisioning, use
+[`reset-router-provision.md`](./reset-router-provision.md) (which matches the same
+"remove hotspot by interface" rule and also stops the polling-agent scheduler).
+
+---
+
+## 14. Captive-portal troubleshooting
+
+**Symptom: client gets a `172.31.x.x` lease but no portal popup / no redirect.**
+- **Most common cause:** `html-directory` was not set / `login.html` was not
+  installed, so the hotspot serves MikroTik's **built-in** username/password form and
+  never meta-refreshes to the buy page. **Fixed in provisioning** —
+  `generate_hotspot_commands` now `/tool fetch`es `login.html` + `alogin.html` into
+  `hotspot/` and sets `html-directory=hotspot`. Verify on the router:
+  `/ip/hotspot/profile/print` shows `html-directory: hotspot`, and the files exist
+  under `/file/print` as `hotspot/login.html` and `hotspot/alogin.html`.
+- If templates are missing, re-run provisioning (preferred) or re-fetch them:
+  `/tool fetch url="https://<backend>/api/v1/provisioning/templates/login.html?org_slug=<slug>" dst-path=hotspot/login.html` (and `alogin.html`).
+- Confirm the client got the **router as its DNS** (DHCP hands gateway as DNS); if a
+  device uses hardcoded `8.8.8.8`/DoH the detection probe may slip through — the
+  DNS-redirect NAT and DoH-block rules exist to prevent this.
+- Confirm the buy host is in the **walled garden** (otherwise the redirect target is
+  itself blocked pre-auth).
+
+**Symptom: the router's own built-in open Wi-Fi says "No internet" yet still browses.**
+- The provision script installs **global** `/ip/dns/static` captive-detection entries
+  (probe domains → gateway) and a **global** masquerade. These also affect clients on
+  the router's **built-in Wi-Fi**, which is **not** part of `codevertex-bridge` and so
+  is **not** gated by the hotspot. Such clients reach the internet (via masquerade)
+  but their OS captive probe resolves to the gateway and gets intercepted, so the OS
+  shows "No internet / sign-in required" even though browsing works.
+- **The built-in open Wi-Fi bypasses the hotspot entirely** — anyone on it gets
+  unauthenticated internet. For production, the built-in Wi-Fi should be **disabled**
+  or **bridged into `codevertex-bridge`** so it is gated by the hotspot like the wired
+  ports. (Provisioning intentionally does not touch the default bridge / built-in
+  Wi-Fi to avoid locking out the operator, so this is a manual step.)
+
+**Symptom: after authenticating, sites won't load for ~a while.**
+- Captive-detection DNS static entries use a short **TTL (5m)** precisely so the
+  client's cache clears soon after auth. If you raised the TTL, post-auth clients can
+  keep resolving probe/real domains to the gateway for up to the TTL.
+
+**Symptom: voucher redeemed / payment succeeded but the client still can't log in.**
+- The hotspot user is created **asynchronously** via the agent. Check the agent is
+  online (`GET /router-agent/status/{router_id}`, `is_online=true`) and that a
+  `create_user` command went `pending → sent → success`
+  (`GET /router-agent/commands/{router_id}`). If the agent never polls, nothing is
+  created — see §15.
+
+---
+
+## 15. General troubleshooting
+
+- **"device mode not allowed"** when importing: run
+  `/system/device-mode/update mode=advanced` (newer RouterOS restricts fetch/scheduler).
+- **Bootstrap fetch fails / 308 redirect:** RouterOS `/tool fetch` doesn't follow
+  redirects and the `mode=` must match the URL scheme. The backend forces `https`
+  when `force_https` or `x-forwarded-proto: https` is set; ensure the backend base
+  URL is `https://`.
+- **Agent never polls (no commands ever delivered):** confirm the bootstrap actually
+  imported the agent installer (`router_obj` existed at bootstrap so a token was
+  issued) and that the `codevertex-agent` scheduler exists
+  (`/system/scheduler/print`). Historically `agent_installed=true` was set without
+  anything installing the agent — both that and the "installer returned body only"
+  bug are fixed.
+- **`create_user` fails / no bandwidth shaping:** the agent ensures the
+  hotspot/PPP profile exists with `rate-limit=<plan>` before adding the user; an
+  empty rate limit means "unlimited" (not `0/0`).
+- **Bridge removal fails with "interface in use":** the hotspot server is still bound
+  to the bridge — remove it **by interface** first (see §13 and the reset script).
+- **Stale `sent` commands:** `reset_stale_sent_commands()` returns commands stuck in
+  `sent` (e.g. router rebooted mid-poll) back to `pending`.
+
+---
+
+## 16. Code map
+
+| Concern | File |
+|---------|------|
+| Bootstrap command + script + scan-report + notify + wg-register | `app/api/v1/provisioning/bootstrap.py` |
+| Provision-script (Step 3) + workflow + sessions | `app/api/v1/provisioning/workflow.py` |
+| Command generation (config / hotspot / pppoe, clean-slate, WAN filter) | `app/modules/provisioning/commands.py` |
+| Captive-portal templates (`login.html` / `alogin.html`) | `app/api/v1/provisioning/templates.py` |
+| Polling agent: command queue, poll/report, token | `app/services/router_agent.py` |
+| Polling agent: endpoints + RSC installer/body generators | `app/api/v1/router_agent.py` |
+| Hotspot portal (redeem / login / purchase) + NAT-safe user sync | `app/api/v1/portal/hotspot.py` |
+| Voucher admin (generate batch + credentials + expiry) | `app/api/v1/business/vouchers.py` |
+| Payments → invoice → subscription activation | `app/modules/billing/service.py` |
+| Direct RouterOS API client (fallback only) | `app/integrations/mikrotik.py` |
+| RouterOS v6 vs v7 syntax reference | `docs/mikrotikv6-v7-comparison.md` |
+| Manual reset before reprovisioning | `docs/reset-router-provision.md` |
+| Authoritative connectivity/billing audit | `docs/AUDIT-AND-REMEDIATION-2026-06.md` |
+
+---
+
+**Last updated:** 2026-06 · Reflects the NAT polling-agent + external captive-portal
+implementation. Supersedes the earlier RADIUS/direct-API revision.

@@ -4,6 +4,18 @@
 # This script removes all codevertex provisioning configurations
 # Run this in WinBox Terminal before fresh provisioning
 # ============================================================================
+#
+# IMPORTANT — HOTSPOT NAME CAVEAT:
+# The hotspot SERVER is NOT named "codevertex". The provisioning layer enriches
+# the service config and creates the hotspot server with name "ISP-Hotspot"
+# (see app/schemas/provisioning.py + app/modules/provisioning/service.py), while
+# the hotspot PROFILE is named "codevertex-hsprof". So matching the server by
+# `name~"codevertex"` removes NOTHING, and because the (still-present) hotspot is
+# bound to codevertex-bridge, the bridge removal in STEP 8 then fails with
+# "interface in use". The hotspot server is ALWAYS bound to codevertex-bridge,
+# so we remove it BY INTERFACE instead. This mirrors what the backend does in
+# generate_configuration_commands() (clean-slate removal by interface).
+# ============================================================================
 
 :put "Starting Codevertex configuration cleanup..."
 
@@ -12,8 +24,9 @@
 # ============================================================================
 :put "Removing hotspot configurations..."
 
-# Remove hotspot instances
-:foreach i in=[/ip/hotspot/find name~"codevertex"] do={
+# Remove hotspot instances BY INTERFACE (the server name varies — "ISP-Hotspot"
+# — so name~"codevertex" would miss it and block bridge removal later).
+:foreach i in=[/ip/hotspot/find interface~"codevertex"] do={
   /ip/hotspot/remove $i
   :put "  Removed hotspot"
 }
@@ -161,11 +174,23 @@
 # ============================================================================
 :put "Removing system configurations..."
 
-# Remove system scheduler entries
+# Remove system scheduler entries.
+# NOTE: the polling agent scheduler is name="codevertex-agent" with the comment
+# "CodeVertex billing agent ..." (capital C/V). `~` is case-sensitive, so
+# comment~"codevertex" does NOT match it — match by NAME so the agent is actually
+# stopped. If you leave the agent running it will keep re-creating hotspot/PPP
+# users on its next poll, undoing this cleanup.
+:foreach i in=[/system/scheduler/find name~"codevertex"] do={
+  /system/scheduler/remove $i
+  :put "  Removed scheduler entry"
+}
 :foreach i in=[/system/scheduler/find comment~"codevertex"] do={
   /system/scheduler/remove $i
   :put "  Removed scheduler entry"
 }
+
+# Remove the cached agent body file the scheduler imported each tick
+:do { /file/remove [find name="cvagent.rsc"] } on-error={}
 
 # Remove remote logging actions
 :foreach i in=[/system/logging/action/find name~"codevertex"] do={
@@ -212,7 +237,7 @@
 :put ""
 
 # Verification checks — each runs independently (no shared variable needed)
-:if ([:len [/ip/hotspot/find name~"codevertex"]] > 0) do={ :put "WARNING: Hotspot instances still exist" }
+:if ([:len [/ip/hotspot/find interface~"codevertex"]] > 0) do={ :put "WARNING: Hotspot instances still exist" }
 :if ([:len [/ip/dhcp-server/find name~"codevertex"]] > 0) do={ :put "WARNING: DHCP servers still exist" }
 :if ([:len [/ip/pool/find name~"codevertex"]] > 0) do={ :put "WARNING: IP pools still exist" }
 :if ([:len [/interface/bridge/find name~"codevertex"]] > 0) do={ :put "WARNING: Bridges still exist" }
@@ -221,7 +246,7 @@
 :if ([:len [/ip/firewall/nat/find comment~"codevertex"]] > 0) do={ :put "WARNING: NAT rules still exist" }
 :if ([:len [/certificate/find name~"codevertex"]] > 0) do={ :put "WARNING: SSL certificates still exist" }
 :if ([:len [/queue/tree/find comment~"codevertex"]] > 0) do={ :put "WARNING: Queue trees still exist" }
-:if ([:len [/system/scheduler/find comment~"codevertex"]] > 0) do={ :put "WARNING: System scheduler entries still exist" }
+:if ([:len [/system/scheduler/find name~"codevertex"]] > 0) do={ :put "WARNING: System scheduler entries still exist (polling agent may still be running)" }
 :if ([:len [/system/logging/action/find name~"codevertex"]] > 0) do={ :put "WARNING: System logging actions still exist" }
 
 :put ""
@@ -271,8 +296,8 @@
 :put "============================================================================"
 :put "If the script fails, you can run these commands manually step by step:"
 :put ""
-:put "# Remove Hotspot"
-:put "/ip/hotspot/remove [find name~\"codevertex\"]"
+:put "# Remove Hotspot (server by INTERFACE — name is 'ISP-Hotspot', not codevertex)"
+:put "/ip/hotspot/remove [find interface~\"codevertex\"]"
 :put "/ip/hotspot/profile/remove [find name~\"codevertex\"]"
 :put "/ip/hotspot/walled-garden/remove [find comment~\"codevertex\"]"
 :put "/ip/hotspot/walled-garden/ip/remove [find comment~\"codevertex\"]"
@@ -303,8 +328,10 @@
 :put "/queue/simple/remove [find comment~\"codevertex\"]"
 :put "/queue/type/remove [find name~\"codevertex\"]"
 :put ""
-:put "# Remove System Configs"
+:put "# Remove System Configs (agent scheduler is name=codevertex-agent — match by NAME)"
+:put "/system/scheduler/remove [find name~\"codevertex\"]"
 :put "/system/scheduler/remove [find comment~\"codevertex\"]"
+:put "/file/remove [find name=\"cvagent.rsc\"]"
 :put "/system/logging/action/remove [find name~\"codevertex\"]"
 :put ""
 :put "# Remove Bridge (LAST)"

@@ -7,8 +7,9 @@ A comprehensive, production-ready ISP billing and management system built with F
 ### Core Features
 - **RBAC System**: Role-Based Access Control with 4 roles (Superuser, Admin, Technician, Customer) and 70 granular permissions
 - **User Management**: Complete user lifecycle management with multi-role authentication
-- **MikroTik Integration**: RouterOS API integration for PPPoE, Hotspot, and device provisioning
-- **Automated Provisioning**: 3-step wizard for router provisioning with live log streaming
+- **MikroTik Integration**: NAT-safe router management for PPPoE & Hotspot. Routers sit behind NAT, so the backend never dials them directly — a per-router **polling agent** (`/system/scheduler`) phones home every ~30s for queued commands (`create_user`, `disable_user`, …). A direct RouterOS API path exists only as a same-LAN/VPN fallback.
+- **Automated Provisioning**: 3-step wizard (bootstrap one-liner → device scan → script-based service setup) with live WebSocket log streaming. See the [MikroTik Provisioning Guide](./docs/MIKROTIK_PROVISIONING_GUIDE.md).
+- **External Captive Portal**: hotspot redirects unauthenticated clients to the ISP-billing frontend buy page (`/buy/{org_slug}`); vouchers/purchases create hotspot users via the agent.
 - **Billing Engine**: Automated invoicing, usage tracking, and payment reconciliation
 - **M-PESA Integration**: STK Push, C2B callbacks, and payment verification
 - **SMS Credit Management**: Multi-provider SMS gateway with credit tracking
@@ -163,6 +164,16 @@ backend/
 docker-compose up -d
 ```
 
+### Production Deployment (GitOps)
+
+Pushes to `main`/`master` trigger `.github/workflows/deploy.yml`, which runs
+`build.sh`: it builds `docker.io/codevertex/isp-billing-backend:<short-sha>` (the
+8-char commit/merge SHA), pushes it, bumps the image `tag` in the devops-k8s
+`apps/isp-billing-backend/values.yaml`, and **ArgoCD auto-syncs** the
+`isp-billing` namespace. Deployment secrets are synced on-demand from the
+`Bengo-Hub/devops-k8s` repo (`GH_PAT` must exist in this repo). DB migrations run
+idempotently on container start.
+
 ## API Documentation
 
 - **Swagger UI**: http://localhost:8000/docs
@@ -195,15 +206,18 @@ pytest tests/ --cov=app --cov-report=html
 - **[Project Summary](./docs/PROJECT_SUMMARY.md)** - High-level overview and architecture
 
 ### Feature-Specific Guides
-- **[RBAC System Guide](./docs/RBAC_SYSTEM.md)** - Role-based access control documentation
-- **[MikroTik Provisioning Guide](./docs/MIKROTIK_PROVISIONING_GUIDE.md)** - Complete technical provisioning guide (1,400+ lines)
+- **[MikroTik Provisioning Guide](./docs/MIKROTIK_PROVISIONING_GUIDE.md)** - Canonical, current provisioning reference (NAT polling-agent + external captive portal)
+- **[Provisioning Overview](./docs/PROVISIONING_GUIDE.md)** - Conceptual overview of the hotspot/captive-portal flow
+- **[Connectivity & Billing Audit (2026-06)](./docs/AUDIT-AND-REMEDIATION-2026-06.md)** - Authoritative "how prod is wired" + shipped fixes
+- **[RouterOS v6 vs v7 Comparison](./docs/mikrotikv6-v7-comparison.md)** - Command-syntax reference for provisioning scripts
+- **[Reset / Cleanup Script](./docs/reset-router-provision.md)** - Manual wipe of codevertex config before reprovisioning
 - **[Auth Mapping Guide](./docs/AUTH_MAPPING.md)** - Frontend to backend authentication mapping
 - **[Swagger Authentication Guide](./docs/swagger_authentication_guide.md)** - API authentication setup
 
 ### Additional Resources
-- **[Bug Fixes Log](./docs/BUG_FIXES.md)** - Known issues and resolutions
 - **[OpenAPI Spec](./docs/openapi.json)** - OpenAPI 3.0 specification
-- **[Implementation Progress](../wifi-billing-software-frontend/docs/IMPLEMENTATION_PROGRESS.md)** - Feature completion status
+- **[Platform vs Tenant Separation](./docs/PLATFORM-TENANT-SEPARATION.md)** - Platform-level vs tenant-level settings
+- **[Backend Implementation Plan](./docs/plan.md)** - Feature/sprint status
 
 ## 🚀 Quick Links
 
@@ -274,5 +288,5 @@ Codevertex Africa Limited specializes in ISP management software, network automa
 ---
 
 **Version**: 1.0.0  
-**Last Updated**: October 21, 2025  
-**Status**: Production Ready ✅
+**Last Updated**: 2026-06  
+**Status**: Production

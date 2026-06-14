@@ -22,7 +22,7 @@ For the quickest setup experience, use our all-in-one setup script:
 
 ```bash
 # Navigate to backend directory
-cd wifi-billing-software-backend
+cd isp-billing-backend
 
 # Create virtual environment
 python -m venv venv
@@ -135,14 +135,14 @@ cd ISPBilling
 
 # Verify structure
 ls -la
-# You should see: wifi-billing-software-backend/ and wifi-billing-software-frontend/
+# You should see: isp-billing-backend/ and isp-billing-frontend/
 ```
 
 ### 2. Backend Environment Setup
 
 #### Step 1: Navigate to Backend Directory
 ```bash
-cd wifi-billing-software-backend
+cd isp-billing-backend
 ```
 
 #### Step 2: Create Python Virtual Environment
@@ -176,7 +176,7 @@ pip install -r requirements-dev.txt
 
 #### Step 1: Navigate to Frontend Directory
 ```bash
-cd ../wifi-billing-software-frontend
+cd ../isp-billing-frontend
 ```
 
 #### Step 2: Install Node Dependencies
@@ -264,7 +264,7 @@ redis-cli ping
 
 #### Step 1: Copy Environment Template
 ```bash
-cd wifi-billing-software-backend
+cd isp-billing-backend
 cp env.example .env
 ```
 
@@ -348,7 +348,7 @@ LOG_FILE=logs/app.log
 #### ⭐ Recommended: One-Command Setup (All-in-One)
 ```bash
 # Ensure you're in the backend directory and venv is activated
-cd wifi-billing-software-backend
+cd isp-billing-backend
 source venv/bin/activate  # Linux/MacOS
 # or
 venv\Scripts\activate  # Windows
@@ -417,7 +417,7 @@ python scripts/seed_routers.py
 
 #### Step 1: Copy Environment Template
 ```bash
-cd wifi-billing-software-frontend
+cd isp-billing-frontend
 cp .env.example .env.local
 ```
 
@@ -552,7 +552,7 @@ Once the backend is running, you can configure:
 
 #### Development Mode (with auto-reload)
 ```bash
-cd wifi-billing-software-backend
+cd isp-billing-backend
 source venv/bin/activate  # Linux/MacOS
 # or
 venv\Scripts\activate  # Windows
@@ -578,7 +578,7 @@ gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
 If using background tasks:
 ```bash
 # In a new terminal
-cd wifi-billing-software-backend
+cd isp-billing-backend
 source venv/bin/activate  # Linux/MacOS
 # or
 venv\Scripts\activate  # Windows
@@ -592,7 +592,7 @@ celery -A app.core.celery worker --loglevel=info
 For scheduled tasks:
 ```bash
 # In another new terminal
-cd wifi-billing-software-backend
+cd isp-billing-backend
 source venv/bin/activate
 
 # Start Celery beat
@@ -603,7 +603,7 @@ celery -A app.core.celery beat --loglevel=info
 
 #### Development Mode
 ```bash
-cd wifi-billing-software-frontend
+cd isp-billing-frontend
 
 # Start Next.js development server
 npm run dev
@@ -874,10 +874,10 @@ python scripts/seed_all.py
 
 ### Documentation Links
 - [API Documentation](./API_DOCUMENTATION.md)
-- [RBAC System Guide](./RBAC_SYSTEM.md)
-- [MikroTik Provisioning Guide](./MIKROTIK_PROVISIONING.md)
-- [Bug Fixes Log](./BUG_FIXES.md)
-- [Implementation Progress](../wifi-billing-software-frontend/docs/IMPLEMENTATION_PROGRESS.md)
+- [MikroTik Provisioning Guide](./MIKROTIK_PROVISIONING_GUIDE.md)
+- [Provisioning Overview](./PROVISIONING_GUIDE.md)
+- [Connectivity & Billing Audit (2026-06)](./AUDIT-AND-REMEDIATION-2026-06.md)
+- [Backend Implementation Plan](./plan.md)
 - [Swagger Authentication Guide](./swagger_authentication_guide.md)
 
 ### Quick Commands Reference
