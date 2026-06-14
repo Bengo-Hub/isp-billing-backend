@@ -239,8 +239,9 @@ def generate_configuration_commands(
                 }
             )
 
-    # Set timezone (default to Africa/Nairobi for Kenya - EAT UTC+3)
-    timezone = config.get("timezone", "Africa/Nairobi")
+    # Set timezone (tenant-configured; default Africa/Nairobi for Kenya — EAT UTC+3).
+    # `or` (not just .get default) so an empty-string config value still falls back.
+    timezone = config.get("timezone") or "Africa/Nairobi"
     if _is_v7:
         # RouterOS v7: IANA timezone database names
         commands.append(
@@ -261,6 +262,42 @@ def generate_configuration_commands(
                 "critical": False,
             }
         )
+
+    # =========================================================================
+    # CLEAN SLATE — remove any prior codevertex-* config (idempotent reprovision)
+    # =========================================================================
+    # Clear the PREVIOUS run's service objects first so re-adds never hit
+    # "already exists" and a reprovision (e.g. to add ether2) starts from a known
+    # state. Every removal is on-error-guarded (a missing object is a no-op) and
+    # scoped to codevertex service objects by name/comment. The management-allow
+    # firewall rules (comment "codevertex-allow-*") are deliberately NOT removed
+    # so management access is never even briefly weakened. Default bridge, WAN
+    # and the management IP are never touched. Order: dependents before deps.
+    _cleanup_commands = [
+        ("Clearing previous hotspot server", ":do { /ip/hotspot/remove [find name=codevertex-hotspot] } on-error={}"),
+        ("Clearing previous hotspot profile", ":do { /ip/hotspot/profile/remove [find name=codevertex-hsprof] } on-error={}"),
+        ("Clearing previous hotspot ip-binding", ':do { /ip/hotspot/ip-binding/remove [find comment~"codevertex-gateway-bypass"] } on-error={}'),
+        ("Clearing previous walled-garden hosts", ':do { /ip/hotspot/walled-garden/remove [find comment~"codevertex-portal"] } on-error={}'),
+        ("Clearing previous walled-garden IPs", ':do { /ip/hotspot/walled-garden/ip/remove [find comment~"codevertex-portal"] } on-error={}'),
+        ("Clearing previous DHCP server", ":do { /ip/dhcp-server/remove [find name=codevertex-dhcp] } on-error={}"),
+        ("Clearing previous DHCP network", ':do { /ip/dhcp-server/network/remove [find comment~"codevertex-dhcp-network"] } on-error={}'),
+        ("Clearing previous IP pool", ":do { /ip/pool/remove [find name=codevertex-pool] } on-error={}"),
+        ("Clearing previous captive DNS entries", ':do { /ip/dns/static/remove [find comment~"codevertex-captive-portal-detection"] } on-error={}'),
+        ("Clearing previous DNS-redirect NAT", ':do { /ip/firewall/nat/remove [find comment~"codevertex-dns-redirect"] } on-error={}'),
+        ("Clearing previous masquerade NAT", ':do { /ip/firewall/nat/remove [find comment~"codevertex-masquerade"] } on-error={}'),
+        ("Clearing previous DoH-block filter", ':do { /ip/firewall/filter/remove [find comment~"codevertex-block-doh"] } on-error={}'),
+        ("Clearing previous anti-sharing rules", ':do { /ip/firewall/mangle/remove [find comment~"codevertex-anti-sharing"] } on-error={}'),
+        ("Clearing previous anti-sharing drop", ':do { /ip/firewall/filter/remove [find comment~"codevertex-anti-sharing"] } on-error={}'),
+        ("Clearing previous bridge IP", ":do { /ip/address/remove [find interface=codevertex-bridge] } on-error={}"),
+        ("Clearing previous bridge", ":do { /interface/bridge/remove [find name=codevertex-bridge] } on-error={}"),
+    ]
+    for _desc, _cmd in _cleanup_commands:
+        commands.append({
+            "type": "api_call",
+            "command": _cmd,
+            "description": _desc,
+            "critical": False,
+        })
 
     # =========================================================================
     # CLEAN UP DEFAULT BRIDGE (prevent port conflicts)

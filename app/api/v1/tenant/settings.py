@@ -63,6 +63,9 @@ class OrganizationDetailsUpdate(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = Field(None, max_length=20)
     address: Optional[str] = Field(None, max_length=500)
+    # IANA timezone name (e.g. Africa/Nairobi). Pushed to routers via NTP/clock
+    # sync so device timestamps match the tenant's local time.
+    timezone: Optional[str] = Field(None, max_length=64)
 
 
 class OrganizationResponse(BaseModel):
@@ -79,6 +82,7 @@ class OrganizationResponse(BaseModel):
     logo_url: Optional[str] = None
     primary_color: str
     currency: str
+    timezone: str = "Africa/Nairobi"
     trial_ends_at: Optional[str] = None
     subscription_status: Optional[str] = None
     max_routers: int
@@ -137,6 +141,7 @@ async def get_organization_details(
         logo_url=organization.logo_url,
         primary_color=organization.primary_color,
         currency=organization.currency,
+        timezone=organization.timezone,
         trial_ends_at=organization.trial_ends_at.isoformat() if organization.trial_ends_at else None,
         subscription_status=organization.subscription_status,
         max_routers=organization.max_routers,
@@ -166,6 +171,8 @@ async def update_organization_details(
         organization.phone = data.phone
     if data.address is not None:
         organization.address = data.address
+    if data.timezone is not None:
+        organization.timezone = data.timezone
 
     await db.commit()
     await db.refresh(organization)
@@ -182,6 +189,7 @@ async def update_organization_details(
         logo_url=organization.logo_url,
         primary_color=organization.primary_color,
         currency=organization.currency,
+        timezone=organization.timezone,
         trial_ends_at=organization.trial_ends_at.isoformat() if organization.trial_ends_at else None,
         subscription_status=organization.subscription_status,
         max_routers=organization.max_routers,
