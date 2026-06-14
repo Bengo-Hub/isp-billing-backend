@@ -7,6 +7,22 @@
 
 ---
 
+> **⚠️ Status-correction note (2026-06):** Several sprints below are now stale.
+> In particular, **Multi-Tenancy (Phase 4 / Sprints 9–10) is implemented**, not
+> "PENDING" — the system has `Organization`/`OrganizationSettings`, tenant
+> middleware/context, and `organization_id`-scoped queries throughout. The
+> **Captive Portal (Sprint 12)** redirect is also implemented: provisioning
+> installs `hotspot/login.html` + `alogin.html` (org-branded, served from
+> `/provisioning/templates/*`) and sets `html-directory=hotspot`. **Paystack
+> (Sprint 13)** is implemented (platform-level gateway). Note also that the
+> router channel is the **NAT polling agent**, not RADIUS — the
+> "User Manager / RADIUS" research bullets are background, not the shipped design.
+> The authoritative, current view of how prod is wired is
+> [`AUDIT-AND-REMEDIATION-2026-06.md`](./AUDIT-AND-REMEDIATION-2026-06.md); for
+> provisioning see [`MIKROTIK_PROVISIONING_GUIDE.md`](./MIKROTIK_PROVISIONING_GUIDE.md).
+
+---
+
 ## Executive Summary
 
 This plan outlines the comprehensive backend implementation for a production-ready, multi-tenant ISP billing platform. Based on extensive research of industry leaders (Centipid, Splynx, WISPGate, Powerlynx), MikroTik integration patterns, and enterprise multi-tenancy best practices, this document tracks all features, their implementation status, and pending work required for production readiness.

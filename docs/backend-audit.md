@@ -5,6 +5,14 @@
 **Status:** Production Readiness Assessment  
 **Last Updated:** January 27, 2026
 
+> **⚠️ Superseded for connectivity claims.** This is an optimistic feature-level
+> audit (scored 95/100). For how the router/billing path is **actually wired in
+> production** — routers behind NAT, the polling-agent command channel, and the
+> shipped bug fixes (agent install, scheduler, cash-payment activation) — trust
+> [`AUDIT-AND-REMEDIATION-2026-06.md`](./AUDIT-AND-REMEDIATION-2026-06.md).
+> Note: there is **no RADIUS** in this system (some rows below imply RADIUS-style
+> auth); hotspot/PPP users are local, created via the agent.
+
 ---
 
 ## Executive Summary
