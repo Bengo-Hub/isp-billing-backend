@@ -672,6 +672,17 @@ async def get_provisioning_script(
     service_type = session.service_type
     routeros_version = config.get('routeros_version')
 
+    # Inject the tenant's configured timezone (default Africa/Nairobi) so the
+    # router clock matches the org's local time on every (re)provision.
+    if not config.get('timezone') and getattr(session, 'organization_id', None):
+        from app.models.organization import Organization
+        org_res = await db.execute(
+            select(Organization).where(Organization.id == session.organization_id)
+        )
+        _org = org_res.scalar_one_or_none()
+        if _org and _org.timezone:
+            config['timezone'] = _org.timezone
+
     # Generate commands
     all_commands = []
 

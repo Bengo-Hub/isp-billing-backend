@@ -3,6 +3,8 @@
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 
+from app.core.datetime_utils import normalize_datetime
+
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -155,6 +157,11 @@ class SubscriptionService:
         router = await self.db.get(Router, router_id)
         if not router:
             raise ValueError("Router not found")
+
+        # Normalize dates to naive UTC (DB columns are TIMESTAMP WITHOUT TIME ZONE;
+        # tz-aware ISO inputs otherwise raise asyncpg naive/aware errors on insert)
+        start_date = normalize_datetime(start_date)
+        end_date = normalize_datetime(end_date)
 
         # Check for existing subscription
         existing = await self.db.execute(
