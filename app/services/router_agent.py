@@ -261,6 +261,9 @@ class RouterAgentService:
             # Reconcile a pending backup history row tied to this command.
             await self._update_backup_status(command_id, "completed", message or "OK")
 
+            # Stream agent apply progress to the provisioning session's WS.
+            await self._broadcast_provisioning_progress(command, "success", message)
+
             logger.info(
                 f"Command {command_id} ({command.action}) succeeded "
                 f"on router {command.router_id}"
@@ -274,6 +277,10 @@ class RouterAgentService:
                 command.status = CommandStatus.FAILED
                 command.completed_at = now
                 await self._update_backup_status(command_id, "failed", message)
+
+                # Stream the permanent failure to the provisioning session's WS.
+                await self._broadcast_provisioning_progress(command, "failed", message)
+
                 logger.error(
                     f"Command {command_id} ({command.action}) failed permanently "
                     f"on router {command.router_id}: {message}"
@@ -282,10 +289,97 @@ class RouterAgentService:
                 # Reset to pending for retry on next poll
                 command.status = CommandStatus.PENDING
                 command.sent_at = None
+
+                # Stream the retry notice so the UI shows progress, not silence.
+                await self._broadcast_provisioning_progress(
+                    command,
+                    "retry",
+                    f"{message} (retry {command.retry_count}/{command.max_retries})",
+                )
+
                 logger.warning(
                     f"Command {command_id} ({command.action}) failed, "
                     f"retry {command.retry_count}/{command.max_retries}: {message}"
                 )
+
+    async def _broadcast_provisioning_progress(
+        self, command: RouterCommand, status: str, message: str
+    ) -> None:
+        """Stream an agent command result to its provisioning session's WS.
+
+        Best-effort: agent-based provisioning queues a ``fetch_import`` command
+        with ``source="provisioning"`` and ``source_id=<session_id>``. When the
+        agent reports that command's result we forward a human-readable log line
+        (and, for the terminal fetch_import result, a completion/status event) to
+        the provisioning session over the live-logs WebSocket. The stream manager
+        publishes via Redis so it reaches the WS client on whatever pod it is
+        connected to. A broadcast failure must never break the poll/report
+        handler, so everything here is wrapped and swallowed.
+        """
+        # Only provisioning-sourced commands carry a WS session to update.
+        if getattr(command, "source", None) != "provisioning":
+            return
+        session_id = getattr(command, "source_id", None)
+        if not session_id:
+            return
+
+        action = getattr(command, "action", "command")
+        level = {
+            "success": "success",
+            "failed": "error",
+            "retry": "warning",
+        }.get(status, "info")
+
+        try:
+            # Import inside the function to avoid a circular import at module load
+            # (stream.py lives under app.api which can import services).
+            from app.api.v1.provisioning.stream import manager
+
+            await manager.broadcast_log(
+                session_id,
+                {
+                    "timestamp": datetime.utcnow().strftime("%H:%M:%S"),
+                    "message": f"Router agent: {action} {status}"
+                    + (f" — {message}" if message else ""),
+                    "level": level,
+                },
+            )
+
+            # The fetch_import command IS the provisioning apply step. Its
+            # terminal result drives the session's completion/failure event so
+            # the UI can advance/redirect even though the work happened on the
+            # NAT'd router via the agent.
+            if action == "fetch_import":
+                if status == "success":
+                    await manager.send_message(
+                        session_id,
+                        {
+                            "type": "provisioning_complete",
+                            "session_id": session_id,
+                            "data": {
+                                "success": True,
+                                "message": "Router agent applied the configuration "
+                                "successfully. Router is now ready.",
+                                "timestamp": datetime.utcnow().isoformat(),
+                            },
+                        },
+                    )
+                elif status == "failed":
+                    await manager.broadcast_status(
+                        session_id,
+                        {
+                            "success": False,
+                            "status": "failed",
+                            "message": "Router agent failed to apply the configuration: "
+                            + (message or "unknown error"),
+                            "timestamp": datetime.utcnow().isoformat(),
+                        },
+                    )
+        except Exception as e:  # pragma: no cover - best-effort streaming
+            logger.warning(
+                f"Failed to broadcast provisioning progress for session "
+                f"{session_id}: {e}"
+            )
 
     async def _update_backup_status(
         self, command_id: str, status: str, message: str

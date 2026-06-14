@@ -147,6 +147,59 @@ class RedisClient:
             await self.connect()
         return bool(await self.redis.sismember(name, value))
 
+    # ---- Pub/Sub + capped-list helpers (used by provisioning WS fan-out) ----
+
+    async def publish(self, channel: str, message: Union[str, dict, list]) -> int:
+        """Publish a message to a pub/sub channel. Returns subscriber count."""
+        if not self.redis:
+            await self.connect()
+
+        if isinstance(message, (dict, list)):
+            message = json.dumps(message)
+
+        return await self.redis.publish(channel, message)
+
+    async def lpush_capped(
+        self,
+        name: str,
+        value: Union[str, dict, list],
+        max_len: int,
+        expire: Optional[int] = None,
+    ) -> None:
+        """LPUSH a value, trim the list to ``max_len`` newest items, set TTL.
+
+        Used as a small replay buffer so a WS that connects slightly after a
+        broadcast can still receive recent history. Index 0 is the newest item
+        after LPUSH; LTRIM 0..max_len-1 keeps the newest ``max_len`` entries.
+        """
+        if not self.redis:
+            await self.connect()
+
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value)
+
+        # Pipeline so the three ops are a single round-trip and stay consistent.
+        pipe = self.redis.pipeline()
+        pipe.lpush(name, value)
+        pipe.ltrim(name, 0, max(0, max_len - 1))
+        if expire:
+            pipe.expire(name, expire)
+        await pipe.execute()
+
+    async def lrange(self, name: str, start: int = 0, end: int = -1) -> list:
+        """Return a range of list elements (oldest→newest when reversed)."""
+        if not self.redis:
+            await self.connect()
+        return await self.redis.lrange(name, start, end)
+
+    def raw(self):
+        """Return the underlying redis.asyncio client (for pubsub objects).
+
+        Callers must ensure :meth:`connect` has run first (e.g. via
+        ``await get_redis()``). Returns ``None`` if not yet connected.
+        """
+        return self.redis
+
 
 # Global Redis client instance
 redis_client = RedisClient()
