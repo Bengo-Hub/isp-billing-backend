@@ -54,7 +54,9 @@ class SubscriptionHistory(SubscriptionHistoryBase):
 
     id: int
     subscription_id: int
-    created_at: datetime
+    # The subscription_history table has no timestamp column, so this is optional
+    # to avoid a Pydantic "missing" error that 500s the whole subscriptions list.
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
