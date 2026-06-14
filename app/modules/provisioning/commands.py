@@ -607,6 +607,46 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
         }
     )
 
+    # =========================================================================
+    # CAPTIVE PORTAL REDIRECT — install + activate the custom login page
+    # =========================================================================
+    # WITHOUT this the hotspot serves MikroTik's BUILT-IN login FORM (a
+    # username/password page), so unauthenticated clients are never redirected to
+    # the external buy-package portal and iOS/Android never pop the captive page.
+    # The router (NOT a hotspot client) fetches the redirecting login.html /
+    # alogin.html from the backend over its WAN, then html-directory=hotspot
+    # activates them. Best-effort: if a fetch fails the hotspot still gates
+    # traffic, it just falls back to the built-in page.
+    login_template_url = config.get("login_template_url")
+    alogin_template_url = config.get("alogin_template_url")
+    if login_template_url:
+        commands.append(
+            {
+                "type": "api_call",
+                "command": f':do {{ /tool/fetch url="{login_template_url}" dst-path=hotspot/login.html check-certificate=no }} on-error={{}}',
+                "description": "Installing captive-portal login.html (external-redirect page)",
+                "critical": False,
+            }
+        )
+    if alogin_template_url:
+        commands.append(
+            {
+                "type": "api_call",
+                "command": f':do {{ /tool/fetch url="{alogin_template_url}" dst-path=hotspot/alogin.html check-certificate=no }} on-error={{}}',
+                "description": "Installing captive-portal alogin.html (post-auth page)",
+                "critical": False,
+            }
+        )
+    # Activate the custom templates (point the hotspot profile at the /hotspot dir).
+    commands.append(
+        {
+            "type": "api_call",
+            "command": f':do {{ /ip/hotspot/profile/set [find name={profile_name}] html-directory=hotspot }} on-error={{}}',
+            "description": "Activating captive-portal templates (html-directory=hotspot)",
+            "critical": False,
+        }
+    )
+
     # CRITICAL: Bypass the gateway IP from hotspot authentication
     # Without this, the router's own management traffic goes through the
     # hotspot, causing connectivity issues and preventing proper HTTP

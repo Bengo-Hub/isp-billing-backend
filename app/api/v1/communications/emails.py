@@ -67,7 +67,23 @@ async def send_email(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.get("/{email_id}", response_model=Email)
+@router.get("/templates")
+async def list_email_templates(
+    org_id: int = Depends(get_org_id_for_query),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List email templates.
+
+    Template management is not yet backed by a model, so this returns an empty
+    list (the UI renders "no templates") instead of the 422 that previously
+    occurred when "/templates" collided with GET /{email_id} (parsed as an int).
+    Declared BEFORE /{email_id:int} so the static path always wins.
+    """
+    return []
+
+
+@router.get("/{email_id:int}", response_model=Email)
 async def get_email(
     email_id: int,
     org_id: int = Depends(get_org_id_for_query),

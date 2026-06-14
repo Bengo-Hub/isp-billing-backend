@@ -672,16 +672,31 @@ async def get_provisioning_script(
     service_type = session.service_type
     routeros_version = config.get('routeros_version')
 
-    # Inject the tenant's configured timezone (default Africa/Nairobi) so the
-    # router clock matches the org's local time on every (re)provision.
-    if not config.get('timezone') and getattr(session, 'organization_id', None):
+    # Inject the tenant's timezone + captive-portal template URLs so the provision
+    # script can (a) set the router clock to the org's local time and (b) install
+    # the redirecting hotspot login page pointing at THIS org's buy portal. The
+    # router fetches these template URLs from the backend over its WAN.
+    if getattr(session, 'organization_id', None):
         from app.models.organization import Organization
+        from app.core.config import settings as _settings
         org_res = await db.execute(
             select(Organization).where(Organization.id == session.organization_id)
         )
         _org = org_res.scalar_one_or_none()
-        if _org and _org.timezone:
-            config['timezone'] = _org.timezone
+        if _org:
+            if not config.get('timezone') and _org.timezone:
+                config['timezone'] = _org.timezone
+            _base = (_settings.backend_url or "").rstrip("/")
+            if _base and _org.slug:
+                config.setdefault('org_slug', _org.slug)
+                config.setdefault(
+                    'login_template_url',
+                    f"{_base}/api/v1/provisioning/templates/login.html?org_slug={_org.slug}",
+                )
+                config.setdefault(
+                    'alogin_template_url',
+                    f"{_base}/api/v1/provisioning/templates/alogin.html?org_slug={_org.slug}",
+                )
 
     # Generate commands
     all_commands = []
