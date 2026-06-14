@@ -274,6 +274,14 @@ def generate_configuration_commands(
     # so management access is never even briefly weakened. Default bridge, WAN
     # and the management IP are never touched. Order: dependents before deps.
     _cleanup_commands = [
+        # Log out live sessions + drop stored MAC cookies and tracked hosts FIRST,
+        # so a re-provision starts from a clean AUTH state. Without this, a device
+        # that authenticated before keeps silently auto-re-logging-in via its
+        # mac-cookie and never sees the captive portal — which looks exactly like
+        # "the hotspot isn't gating / still has internet" after a reprovision.
+        ("Clearing active hotspot sessions", ':do { /ip/hotspot/active/remove [find] } on-error={}'),
+        ("Clearing stored hotspot MAC cookies", ':do { /ip/hotspot/cookie/remove [find] } on-error={}'),
+        ("Clearing tracked hotspot hosts", ':do { /ip/hotspot/host/remove [find] } on-error={}'),
         # Match by interface, not name: the hotspot server name varies (e.g.
         # "ISP-Hotspot" from service-config enrichment), but it is always bound to
         # codevertex-bridge. Removing it first also frees the bridge so it can be
