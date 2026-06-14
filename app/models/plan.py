@@ -138,6 +138,33 @@ class ServicePlan(Base):
         """Check if plan has unlimited time."""
         return self.time_limit == -1
 
+    def access_window_hours(self) -> int:
+        """Effective access window, in HOURS, for a hotspot package.
+
+        ``validity_days`` is the calendar window; ``time_limit`` (also HOURS, per
+        the column definition) caps it when set (> 0). Returns the binding duration
+        in hours, or <= 0 when no finite window is defined (e.g. unlimited) so the
+        caller can treat it as "no calendar expiry". This is the single source of
+        truth used by both the voucher-redeem expiry and the expiry reconciler.
+        """
+        hours = (self.validity_days or 0) * 24
+        if self.time_limit and self.time_limit > 0:
+            hours = min(hours, self.time_limit) if hours > 0 else self.time_limit
+        return hours
+
+    def access_expiry_from(self, activated_at):
+        """Absolute access expiry for a package activated at ``activated_at``.
+
+        Returns ``None`` when there is no finite window (caller decides — e.g. rely
+        on router-side time/data limits instead).
+        """
+        from datetime import timedelta
+
+        hours = self.access_window_hours()
+        if hours <= 0:
+            return None
+        return activated_at + timedelta(hours=hours)
+
     def __repr__(self) -> str:
         """String representation."""
         return f"<ServicePlan(id={self.id}, name='{self.name}', type='{self.plan_type}')>"
