@@ -81,6 +81,50 @@ def process_expired_subscriptions(
 
 
 @celery_app.task(bind=True)
+def process_expired_hotspot_users(
+    self,
+    grace_period_minutes: int = 2,
+    batch_size: int = 300,
+):
+    """
+    Disable + disconnect HOTSPOT voucher users whose package has expired.
+
+    Hotspot access is sold via vouchers (redeemed or bought online), NOT the PPPoE
+    Subscription model, so ``process_expired_subscriptions`` does not cover it.
+    Without this, an expired voucher's router user stays enabled and the device
+    silently auto-re-logs-in via its mac-cookie => free internet after expiry.
+    NAT-safe: disables/disconnects are queued through the polling agent.
+    """
+    logger.info("Starting hotspot user expiry processing")
+
+    try:
+        async def _process():
+            from app.modules.subscriptions.expiry_manager import SubscriptionExpiryManager
+
+            async with AsyncSessionLocal() as db:
+                manager = SubscriptionExpiryManager(db)
+                return await manager.process_expired_hotspot_users(
+                    grace_period_minutes=grace_period_minutes,
+                    batch_size=batch_size,
+                )
+
+        results = asyncio.run(_process())
+
+        logger.info(
+            f"Hotspot expiry completed: "
+            f"{results['expired']} expired, "
+            f"{results['disabled_on_router']} disabled on router, "
+            f"{results['sessions_expired']} sessions expired"
+        )
+
+        return results
+
+    except Exception as exc:
+        logger.error(f"Hotspot user expiry processing failed: {exc}")
+        raise self.retry(exc=exc, countdown=60, max_retries=3)
+
+
+@celery_app.task(bind=True)
 def send_expiring_soon_notifications(
     self,
     hours_before: list = None,

@@ -99,6 +99,9 @@ class VoucherRedeemResponse(BaseModel):
     # Hotspot login credentials so the captive portal can show / auto-fill them.
     hotspot_username: Optional[str] = None
     hotspot_password: Optional[str] = None
+    # MikroTik hotspot gateway login URL so the captive page can authenticate the
+    # client directly (even when opened manually, with no captive redirect param).
+    login_url: Optional[str] = None
 
 
 class SessionStatusResponse(BaseModel):
@@ -415,6 +418,35 @@ async def hotspot_login(
     )
 
 
+def _resolve_hotspot_gateway(router_obj: Router) -> str:
+    """Hotspot LAN gateway the *client's* browser must POST its login to.
+
+    This is the bridge gateway assigned during provisioning (default 172.31.0.1) —
+    NOT router_obj.ip_address, which is the cloud-side management address the
+    captive client (sitting on the hotspot LAN) cannot reach. Sourced from the
+    stored provisioning config, falling back to the standard /16 gateway.
+    """
+    import json
+
+    cfg = {}
+    if router_obj.config:
+        try:
+            cfg = json.loads(router_obj.config)
+        except (ValueError, TypeError):
+            cfg = {}
+    gateway = cfg.get("gateway")
+    if gateway:
+        return str(gateway)
+    try:
+        from app.modules.provisioning.commands import calculate_network_config
+
+        subnet = cfg.get("subnet_address", "172.31.0.0")
+        cidr = int(cfg.get("cidr", 16) or 16)
+        return calculate_network_config(subnet, cidr)["gateway"]
+    except Exception:
+        return "172.31.0.1"
+
+
 async def _sync_hotspot_user_to_router(
     db: AsyncSession,
     organization: Organization,
@@ -480,7 +512,16 @@ async def _sync_hotspot_user_to_router(
             )
         except Exception as e:
             logger.error(f"Failed to queue hotspot user {username} for router {router_obj.name}: {e}")
-        return None
+        # Even on the agent (NAT) path, hand back the hotspot gateway login URL so
+        # the captive page can authenticate the *client* directly — works whether
+        # the page was reached via captive redirect (link-login-only) OR opened
+        # manually. The router accepts the credentials once the queued create_user
+        # lands on its next poll.
+        gateway = _resolve_hotspot_gateway(router_obj)
+        login_url = f"http://{gateway}/login?username={username}&password={password}"
+        if mac_address:
+            login_url += f"&mac={mac_address}"
+        return login_url
 
     try:
         client = get_mikrotik_client()
@@ -518,9 +559,11 @@ async def _sync_hotspot_user_to_router(
             f"Synced hotspot user {username} to router {router_obj.name}"
         )
 
-        # Build MikroTik login URL
+        # Build MikroTik login URL — the client posts to the hotspot LAN gateway,
+        # not the cloud-side management ip_address (which the client can't reach).
+        gateway = _resolve_hotspot_gateway(router_obj)
         login_url = (
-            f"http://{router_obj.ip_address}/login"
+            f"http://{gateway}/login"
             f"?username={username}&password={password}"
         )
         if mac_address:
@@ -794,13 +837,16 @@ async def redeem_voucher(
     await db.flush()
 
     # Sync the hotspot user onto the org's router (NAT-safe; best-effort).
+    # Returns the gateway login URL so the client can authenticate itself.
+    login_url = None
     if voucher.hotspot_username and voucher.hotspot_password:
-        await _sync_hotspot_user_to_router(
+        login_url = await _sync_hotspot_user_to_router(
             db,
             organization,
             voucher.hotspot_username,
             voucher.hotspot_password,
             plan,
+            mac_address=data.mac_address,
             source="voucher_redeem",
             source_id=str(voucher.id),
             comment=f"Redeemed voucher {voucher.code} - {plan.name}",
@@ -816,6 +862,7 @@ async def redeem_voucher(
         expires_at=expires_at,
         hotspot_username=voucher.hotspot_username,
         hotspot_password=voucher.hotspot_password,
+        login_url=login_url,
     )
 
 
@@ -1053,6 +1100,22 @@ async def get_payment_status(
             if voucher.hotspot_username:
                 response["hotspot_username"] = voucher.hotspot_username
                 response["hotspot_password"] = voucher.hotspot_password
+                # Gateway login URL so the captive page can authenticate the
+                # client on manual navigation (no captive-redirect param).
+                router_result = await db.execute(
+                    select(Router).where(
+                        Router.organization_id == organization.id,
+                        Router.is_active == True,
+                    ).limit(1)
+                )
+                router_obj = router_result.scalar_one_or_none()
+                if router_obj:
+                    gw = _resolve_hotspot_gateway(router_obj)
+                    response["login_url"] = (
+                        f"http://{gw}/login"
+                        f"?username={voucher.hotspot_username}"
+                        f"&password={voucher.hotspot_password}"
+                    )
 
     return response
 
@@ -1097,9 +1160,15 @@ async def _process_successful_payment(
             organization_id=organization.id,
             code=voucher_code,
             plan_id=plan.id,
-            status=VoucherStatus.ACTIVE,
+            # Online purchase: the hotspot user is provisioned immediately below, so
+            # the voucher is already "activated" -> mark USED with used_at=now. This
+            # unifies expiry handling (the expiry reconciler keys the access window
+            # off used_at + plan validity) and prevents it being redeemed again.
+            status=VoucherStatus.USED,
+            is_used=True,
+            used_at=datetime.utcnow(),
             value=purchase.amount,
-            expires_at=datetime.utcnow() + timedelta(days=30),  # Voucher valid for 30 days
+            expires_at=datetime.utcnow() + timedelta(days=30),  # pre-use deadline (n/a once used)
             hotspot_username=hotspot_username,
             hotspot_password=hotspot_password,
         )
