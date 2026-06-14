@@ -30,6 +30,13 @@ from app.models.subscription import (
     SubscriptionHistory
 )
 from app.models.plan import ServicePlan
+from app.models.customer_portal import (
+    VoucherCode,
+    VoucherStatus,
+    CustomerSession,
+    SessionStatus,
+    CustomerPurchase,
+)
 from app.integrations.mikrotik import get_mikrotik_client
 from .router_sync import SubscriptionRouterSyncService
 
@@ -161,6 +168,230 @@ class SubscriptionExpiryManager:
             logger.error(f"Expiry processing failed: {e}")
             results["errors"].append({"error": str(e), "stage": "query"})
             return results
+
+    async def process_expired_hotspot_users(
+        self,
+        grace_period_minutes: int = 2,
+        batch_size: int = 300,
+    ) -> Dict[str, Any]:
+        """
+        Disable + disconnect HOTSPOT users whose package has expired.
+
+        This is the hotspot counterpart to ``process_expired_subscriptions`` (which
+        only covers the PPPoE ``Subscription`` model). Hotspot access is sold via
+        ``VoucherCode``s — redeemed (status USED) or bought online — each carrying a
+        ``hotspot_username`` created on the router. Without this, an expired
+        voucher's router user stays enabled and the device silently re-authenticates
+        via its mac-cookie => FREE INTERNET AFTER EXPIRY.
+
+        NAT-safe: the disable/disconnect are queued through the polling AGENT (the
+        cloud cannot reach a NATed router directly); a direct MikroTik API call is
+        used only as a fallback for reachable (LAN/VPN) routers. Disabling the user
+        is what defeats mac-cookie auto-re-login — a disabled user cannot
+        authenticate by cookie or otherwise.
+        """
+        results = {
+            "checked": 0,
+            "expired": 0,
+            "disabled_on_router": 0,
+            "sessions_expired": 0,
+            "failed": 0,
+            "errors": [],
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        now = datetime.utcnow()
+
+        try:
+            candidates: List[tuple] = []  # (voucher, activated_at)
+
+            # 1) Redeemed / activated vouchers (status USED) — the main path.
+            used_result = await self.db.execute(
+                select(VoucherCode)
+                .where(
+                    VoucherCode.hotspot_username.isnot(None),
+                    VoucherCode.status == VoucherStatus.USED,
+                    VoucherCode.used_at.isnot(None),
+                )
+                .order_by(VoucherCode.used_at.asc())
+                .limit(batch_size)
+            )
+            candidates.extend((v, v.used_at) for v in used_result.scalars().all())
+
+            # 2) Online purchases left ACTIVE (user already provisioned at payment).
+            #    Joined to a completed purchase so admin-generated unredeemed
+            #    vouchers (which must stay redeemable) are never touched.
+            purchased_result = await self.db.execute(
+                select(VoucherCode, CustomerPurchase.completed_at)
+                .join(CustomerPurchase, CustomerPurchase.voucher_code_id == VoucherCode.id)
+                .where(
+                    VoucherCode.hotspot_username.isnot(None),
+                    VoucherCode.status == VoucherStatus.ACTIVE,
+                    CustomerPurchase.payment_status == "completed",
+                )
+                .limit(batch_size)
+            )
+            candidates.extend(
+                (row[0], row[1] or row[0].created_at) for row in purchased_result.all()
+            )
+
+            results["checked"] = len(candidates)
+
+            for voucher, activated_at in candidates:
+                try:
+                    if not activated_at:
+                        continue
+
+                    plan = (
+                        await self.db.execute(
+                            select(ServicePlan).where(ServicePlan.id == voucher.plan_id)
+                        )
+                    ).scalar_one_or_none()
+                    if not plan:
+                        continue
+
+                    validity_days = getattr(plan, "validity_days", 0) or 0
+                    if validity_days <= 0:
+                        # No calendar window -> rely on router-side time/data limits.
+                        continue
+
+                    expiry = activated_at + timedelta(days=validity_days)
+                    if now <= expiry + timedelta(minutes=grace_period_minutes):
+                        continue  # still inside the paid window (+ grace)
+
+                    results["expired"] += 1
+                    if await self._expire_hotspot_user_on_router(
+                        voucher.organization_id, voucher.hotspot_username
+                    ):
+                        results["disabled_on_router"] += 1
+
+                    voucher.status = VoucherStatus.EXPIRED
+                    voucher.updated_at = now
+
+                except Exception as e:
+                    results["failed"] += 1
+                    results["errors"].append({"voucher_id": voucher.id, "error": str(e)})
+                    logger.error(f"Failed to expire hotspot voucher {voucher.id}: {e}")
+
+            # Mark stale hotspot SESSIONS expired too (status only — the router
+            # disconnect is driven off the voucher above). Keeps the dashboard
+            # session list accurate.
+            session_res = await self.db.execute(
+                update(CustomerSession)
+                .where(
+                    CustomerSession.status == SessionStatus.ACTIVE,
+                    CustomerSession.expires_at <= now,
+                )
+                .values(
+                    status=SessionStatus.EXPIRED,
+                    ended_at=now,
+                    terminate_cause="Session-Timeout",
+                    updated_at=now,
+                )
+            )
+            results["sessions_expired"] = session_res.rowcount or 0
+
+            await self.db.commit()
+
+            logger.info(
+                f"Hotspot expiry: checked={results['checked']} expired={results['expired']} "
+                f"disabled_on_router={results['disabled_on_router']} "
+                f"sessions_expired={results['sessions_expired']} failed={results['failed']}"
+            )
+            return results
+
+        except Exception as e:
+            logger.error(f"Hotspot expiry processing failed: {e}")
+            results["errors"].append({"error": str(e), "stage": "query"})
+            await self.db.rollback()
+            return results
+
+    async def _expire_hotspot_user_on_router(
+        self, organization_id: int, username: str
+    ) -> bool:
+        """
+        Disable + disconnect a hotspot user on the organization's router.
+
+        NAT-safe: prefers the polling-agent command queue (production routers are
+        NATed and unreachable from the cloud); falls back to a direct MikroTik API
+        call only for reachable routers. Best-effort — never raises.
+        """
+        router = (
+            await self.db.execute(
+                select(Router)
+                .where(
+                    Router.organization_id == organization_id,
+                    Router.is_active == True,  # noqa: E712
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if not router:
+            return False
+
+        # Preferred NAT-safe path: queue for the agent's next poll.
+        if getattr(router, "agent_installed", False) and getattr(router, "agent_token", None):
+            try:
+                from app.services.router_agent import RouterAgentService
+
+                agent = RouterAgentService(self.db)
+                await agent.queue_command(
+                    router_id=router.id,
+                    action="disable_user",
+                    params={"username": username, "type": "hotspot"},
+                    priority=2,
+                    source="hotspot_expiry",
+                    source_id=username,
+                )
+                await agent.queue_command(
+                    router_id=router.id,
+                    action="disconnect",
+                    params={"username": username},
+                    priority=2,
+                    source="hotspot_expiry",
+                    source_id=username,
+                )
+                return True
+            except Exception as e:
+                logger.error(
+                    f"Failed to queue hotspot expiry for {username} on router {router.id}: {e}"
+                )
+                return False
+
+        # Direct API fallback (reachable routers only).
+        try:
+            client = get_mikrotik_client()
+            connection = await client.connect(
+                ip_address=router.ip_address,
+                username=router.username,
+                password=router.password,
+                port=router.port,
+            )
+            try:
+                users = await client.execute_command(
+                    connection, "/ip/hotspot/user", method="get"
+                )
+                for u in (users or []):
+                    if u.get("name") == username and u.get(".id"):
+                        await client.execute_command(
+                            connection, "/ip/hotspot/user", method="set",
+                            id=u[".id"], disabled="yes",
+                        )
+                actives = await client.execute_command(
+                    connection, "/ip/hotspot/active", method="get"
+                )
+                for a in (actives or []):
+                    if a.get("user") == username and a.get(".id"):
+                        await client.execute_command(
+                            connection, "/ip/hotspot/active", method="remove", id=a[".id"],
+                        )
+            finally:
+                await client.disconnect(router.ip_address, router.port)
+            return True
+        except Exception as e:
+            logger.error(
+                f"Direct hotspot expiry failed for {username} on router {router.id}: {e}"
+            )
+            return False
 
     async def process_expiring_soon_notifications(
         self,

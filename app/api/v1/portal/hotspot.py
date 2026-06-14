@@ -1160,9 +1160,15 @@ async def _process_successful_payment(
             organization_id=organization.id,
             code=voucher_code,
             plan_id=plan.id,
-            status=VoucherStatus.ACTIVE,
+            # Online purchase: the hotspot user is provisioned immediately below, so
+            # the voucher is already "activated" -> mark USED with used_at=now. This
+            # unifies expiry handling (the expiry reconciler keys the access window
+            # off used_at + plan validity) and prevents it being redeemed again.
+            status=VoucherStatus.USED,
+            is_used=True,
+            used_at=datetime.utcnow(),
             value=purchase.amount,
-            expires_at=datetime.utcnow() + timedelta(days=30),  # Voucher valid for 30 days
+            expires_at=datetime.utcnow() + timedelta(days=30),  # pre-use deadline (n/a once used)
             hotspot_username=hotspot_username,
             hotspot_password=hotspot_password,
         )
