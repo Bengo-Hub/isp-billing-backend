@@ -73,6 +73,10 @@ celery_app.conf.update(
             "task": "app.tasks.subscription_tasks.process_expired_subscriptions",
             "schedule": 60.0,  # Every minute - critical for timely disconnection
         },
+        "process-expired-hotspot-users": {
+            "task": "app.tasks.subscription_tasks.process_expired_hotspot_users",
+            "schedule": 60.0 * 2,  # Every 2 min - disconnect expired hotspot/voucher users (NAT-safe)
+        },
         "send-expiring-soon-notifications": {
             "task": "app.tasks.subscription_tasks.send_expiring_soon_notifications",
             "schedule": 60.0 * 30,  # Every 30 minutes

@@ -51,7 +51,7 @@ def generate_login_template(captive_portal_url: str, org_name: str = "ISP") -> s
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="refresh" content="8; url={captive_portal_url}?mac=$(mac)&ip=$(ip)&username=$(username)&link-orig=$(link-orig-esc)">
+    <meta http-equiv="refresh" content="0; url={captive_portal_url}?mac=$(mac)&ip=$(ip)&username=$(username)&link-orig=$(link-orig-esc)">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{org_name} - WiFi Portal</title>
     <style>
