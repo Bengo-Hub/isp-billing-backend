@@ -30,7 +30,7 @@ def _get_org_id(current_user: User) -> Optional[int]:
     return current_user.organization_id
 
 
-async def _queue_agent_action(db: AsyncSession, router_obj, action: str, user_id: Optional[int]) -> str:
+async def _queue_agent_action(db: AsyncSession, router_obj, action: str, user_id: Optional[int], extra_query: Optional[dict] = None) -> str:
     """Queue a NAT-safe action for a router via its polling agent.
 
     The agent downloads a generated per-action .rsc (see /action-script) and
@@ -50,6 +50,9 @@ async def _queue_agent_action(db: AsyncSession, router_obj, action: str, user_id
     )
     base = (settings.backend_url or "").rstrip("/")
     url = f"{base}/api/v1/routers/{router_obj.id}/action-script/{action}?token={token}"
+    if extra_query:
+        from urllib.parse import urlencode
+        url += "&" + urlencode({k: v for k, v in extra_query.items() if v not in (None, "")})
     agent_service = RouterAgentService(db)
     cmd = await agent_service.queue_command(
         router_id=router_obj.id,
@@ -364,6 +367,9 @@ async def get_router_action_script(
     router_id: int,
     action: str,
     token: str = Query(..., description="Provisioning/access token"),
+    u: Optional[str] = Query(None, description="username (set_limits)"),
+    lu: Optional[str] = Query(None, description="limit-uptime e.g. 1h (set_limits)"),
+    lb: Optional[str] = Query(None, description="limit-bytes-total in bytes (set_limits)"),
     db: AsyncSession = Depends(get_db),
 ) -> str:
     """Return a RouterOS .rsc for an agent-delivered router action.
@@ -417,6 +423,26 @@ async def get_router_action_script(
             ":local bname (\"codevertex-\" . [:pick [/system/clock/get date] 0 11])\n"
             ":do { /system/backup/save name=$bname } on-error={ :log warning \"CVACTION: backup failed\" }\n"
             ":log info \"CVACTION: backup saved\"\n"
+        )
+
+    if action == "set_limits":
+        # Router-side hard caps on a hotspot user (queued right after create_user as
+        # defense-in-depth, so the router self-enforces time/data even if the cloud
+        # reconciler is down). u=username, lu=limit-uptime (e.g. "1h", blank=skip),
+        # lb=limit-bytes-total in bytes (blank=skip).
+        if not u:
+            return ":log warning \"CVACTION: set_limits missing username\"\n"
+        sets = []
+        if lu:
+            sets.append(f"limit-uptime={lu}")
+        if lb:
+            sets.append(f"limit-bytes-total={lb}")
+        if not sets:
+            return ":log info \"CVACTION: set_limits no-op (unlimited plan)\"\n"
+        return (
+            f":do {{ /ip/hotspot/user/set [find name=\"{u}\"] {' '.join(sets)} }} "
+            f"on-error={{ :log warning \"CVACTION: set_limits failed\" }}\n"
+            f":log info \"CVACTION: limits set for {u}\"\n"
         )
 
     if action == "sync_hotspot":
