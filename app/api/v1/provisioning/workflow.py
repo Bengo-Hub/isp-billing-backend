@@ -676,11 +676,19 @@ async def get_provisioning_script(
     # script can (a) set the router clock to the org's local time and (b) install
     # the redirecting hotspot login page pointing at THIS org's buy portal. The
     # router fetches these template URLs from the backend over its WAN.
-    if getattr(session, 'organization_id', None):
-        from app.models.organization import Organization
-        from app.core.config import settings as _settings
+    # Resolve the org from the session, falling back to the ROUTER's org (the
+    # provisioning session does not always carry organization_id).
+    from app.models.organization import Organization
+    from app.core.config import settings as _settings
+    _org_id = getattr(session, 'organization_id', None)
+    if not _org_id and getattr(session, 'router_id', None):
+        from app.models.router import Router as _Router
+        _r = await db.execute(select(_Router).where(_Router.id == session.router_id))
+        _router_row = _r.scalar_one_or_none()
+        _org_id = getattr(_router_row, 'organization_id', None) if _router_row else None
+    if _org_id:
         org_res = await db.execute(
-            select(Organization).where(Organization.id == session.organization_id)
+            select(Organization).where(Organization.id == _org_id)
         )
         _org = org_res.scalar_one_or_none()
         if _org:
