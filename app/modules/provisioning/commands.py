@@ -274,7 +274,11 @@ def generate_configuration_commands(
     # so management access is never even briefly weakened. Default bridge, WAN
     # and the management IP are never touched. Order: dependents before deps.
     _cleanup_commands = [
-        ("Clearing previous hotspot server", ":do { /ip/hotspot/remove [find name=codevertex-hotspot] } on-error={}"),
+        # Match by interface, not name: the hotspot server name varies (e.g.
+        # "ISP-Hotspot" from service-config enrichment), but it is always bound to
+        # codevertex-bridge. Removing it first also frees the bridge so it can be
+        # removed + re-added below without an "interface in use" error.
+        ("Clearing previous hotspot server", ':do { /ip/hotspot/remove [find interface=codevertex-bridge] } on-error={}'),
         ("Clearing previous hotspot profile", ":do { /ip/hotspot/profile/remove [find name=codevertex-hsprof] } on-error={}"),
         ("Clearing previous hotspot ip-binding", ':do { /ip/hotspot/ip-binding/remove [find comment~"codevertex-gateway-bypass"] } on-error={}'),
         ("Clearing previous walled-garden hosts", ':do { /ip/hotspot/walled-garden/remove [find comment~"codevertex-portal"] } on-error={}'),
