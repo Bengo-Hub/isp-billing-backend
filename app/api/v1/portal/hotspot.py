@@ -810,11 +810,9 @@ async def redeem_voucher(
         voucher.hotspot_username = voucher.hotspot_username or gen_user
         voucher.hotspot_password = voucher.hotspot_password or gen_pass
 
-    # Calculate session expiry
-    validity_hours = plan.validity_days * 24
-    if plan.time_limit > 0:
-        validity_hours = min(validity_hours, plan.time_limit)
-
+    # Calculate session expiry — honours BOTH validity_days and time_limit via the
+    # shared helper (single source of truth with the expiry reconciler).
+    validity_hours = plan.access_window_hours()
     expires_at = datetime.utcnow() + timedelta(hours=validity_hours)
 
     # Create session

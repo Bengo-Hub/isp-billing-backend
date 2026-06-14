@@ -249,12 +249,13 @@ class SubscriptionExpiryManager:
                     if not plan:
                         continue
 
-                    validity_days = getattr(plan, "validity_days", 0) or 0
-                    if validity_days <= 0:
-                        # No calendar window -> rely on router-side time/data limits.
+                    # Effective window honours BOTH validity_days and time_limit
+                    # (a "1 hour" package has validity_days=1 but time_limit=1h).
+                    expiry = plan.access_expiry_from(activated_at)
+                    if expiry is None:
+                        # No finite window (e.g. unlimited) -> rely on router-side
+                        # time/data limits; nothing to expire here.
                         continue
-
-                    expiry = activated_at + timedelta(days=validity_days)
                     if now <= expiry + timedelta(minutes=grace_period_minutes):
                         continue  # still inside the paid window (+ grace)
 
