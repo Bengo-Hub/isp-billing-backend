@@ -1,6 +1,7 @@
 """Voucher management API endpoints for admin dashboard."""
 
 import logging
+import secrets
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -13,6 +14,7 @@ from app.models.plan import ServicePlan
 from app.models.organization import Organization
 from app.api.deps import get_current_user, require_technician_or_admin
 from app.api.deps_org import get_org_id_for_query
+from app.utils.hotspot_username import generate_hotspot_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +24,7 @@ router = APIRouter()
 # --------------- Schemas ---------------
 
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 
 
@@ -41,13 +43,15 @@ class VoucherListItem(BaseModel):
     plan_name: Optional[str] = None
     organization_id: Optional[int] = None
     hotspot_username: Optional[str] = None
+    hotspot_password: Optional[str] = None
+    # Limits are derived from the linked plan (not stored on the voucher row).
     data_limit_bytes: Optional[int] = None
     time_limit_seconds: Optional[int] = None
     bandwidth_limit: Optional[str] = None
     used_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
-    batch_id: Optional[int] = None
+    batch_id: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -72,11 +76,46 @@ class VoucherCreateRequest(BaseModel):
     plan_id: int
     count: int = Field(default=1, ge=1, le=500)
     code_format: str = Field(default="XXXX-XXXX-XXXX")
+    # Optional shelf-life: the voucher must be redeemed before this many days
+    # elapse. None = no pre-use expiry (access duration is still enforced by the
+    # plan once redeemed).
+    expires_in_days: Optional[int] = Field(default=None, ge=1, le=3650)
 
 
 class VoucherUpdateRequest(BaseModel):
     status: Optional[VoucherStatusFilter] = None
     expires_at: Optional[datetime] = None
+
+
+def _to_list_item(v: VoucherCode, plan: Optional[ServicePlan]) -> "VoucherListItem":
+    """Serialize a voucher, deriving the limit fields from its linked plan."""
+    data_limit_bytes = None
+    time_limit_seconds = None
+    bandwidth_limit = None
+    if plan is not None:
+        if plan.data_limit and plan.data_limit > 0:
+            data_limit_bytes = plan.data_limit * 1024 * 1024  # plan.data_limit is MB
+        if plan.time_limit and plan.time_limit > 0:
+            time_limit_seconds = plan.time_limit
+        if plan.download_speed:
+            bandwidth_limit = f"{plan.download_speed}/{plan.upload_speed}"
+    return VoucherListItem(
+        id=v.id,
+        code=v.code,
+        status=v.status.value if hasattr(v.status, "value") else str(v.status),
+        plan_id=v.plan_id,
+        plan_name=plan.name if plan is not None else None,
+        organization_id=v.organization_id,
+        hotspot_username=v.hotspot_username,
+        hotspot_password=v.hotspot_password,
+        data_limit_bytes=data_limit_bytes,
+        time_limit_seconds=time_limit_seconds,
+        bandwidth_limit=bandwidth_limit,
+        used_at=v.used_at,
+        expires_at=v.expires_at,
+        created_at=v.created_at,
+        batch_id=v.batch_id,
+    )
 
 
 # --------------- Endpoints ---------------
@@ -125,33 +164,17 @@ async def list_vouchers(
     result = await db.execute(query)
     vouchers = result.scalars().all()
 
-    # Fetch plan names
+    # Fetch full plans for name + limit derivation (limits live on the plan,
+    # not the voucher row).
     plan_ids = {v.plan_id for v in vouchers if v.plan_id}
-    plan_names = {}
+    plans_by_id = {}
     if plan_ids:
         plans_result = await db.execute(
-            select(ServicePlan.id, ServicePlan.name).where(ServicePlan.id.in_(plan_ids))
+            select(ServicePlan).where(ServicePlan.id.in_(plan_ids))
         )
-        plan_names = {row.id: row.name for row in plans_result}
+        plans_by_id = {p.id: p for p in plans_result.scalars().all()}
 
-    items = []
-    for v in vouchers:
-        items.append(VoucherListItem(
-            id=v.id,
-            code=v.code,
-            status=v.status.value if hasattr(v.status, 'value') else str(v.status),
-            plan_id=v.plan_id,
-            plan_name=plan_names.get(v.plan_id),
-            organization_id=v.organization_id,
-            hotspot_username=v.hotspot_username,
-            data_limit_bytes=v.data_limit_bytes,
-            time_limit_seconds=v.time_limit_seconds,
-            bandwidth_limit=v.bandwidth_limit,
-            used_at=v.used_at,
-            expires_at=v.expires_at,
-            created_at=v.created_at,
-            batch_id=v.batch_id,
-        ))
+    items = [_to_list_item(v, plans_by_id.get(v.plan_id)) for v in vouchers]
 
     pages = (total + size - 1) // size if total > 0 else 0
 
@@ -222,30 +245,15 @@ async def get_voucher(
     if not voucher:
         raise HTTPException(status_code=404, detail="Voucher not found")
 
-    # Get plan name
-    plan_name = None
+    # Get plan for name + limit derivation
+    plan = None
     if voucher.plan_id:
         plan_result = await db.execute(
-            select(ServicePlan.name).where(ServicePlan.id == voucher.plan_id)
+            select(ServicePlan).where(ServicePlan.id == voucher.plan_id)
         )
-        plan_name = plan_result.scalar_one_or_none()
+        plan = plan_result.scalar_one_or_none()
 
-    return VoucherListItem(
-        id=voucher.id,
-        code=voucher.code,
-        status=voucher.status.value if hasattr(voucher.status, 'value') else str(voucher.status),
-        plan_id=voucher.plan_id,
-        plan_name=plan_name,
-        organization_id=voucher.organization_id,
-        hotspot_username=voucher.hotspot_username,
-        data_limit_bytes=voucher.data_limit_bytes,
-        time_limit_seconds=voucher.time_limit_seconds,
-        bandwidth_limit=voucher.bandwidth_limit,
-        used_at=voucher.used_at,
-        expires_at=voucher.expires_at,
-        created_at=voucher.created_at,
-        batch_id=voucher.batch_id,
-    )
+    return _to_list_item(voucher, plan)
 
 
 @router.post("/generate", status_code=status.HTTP_201_CREATED)
@@ -255,8 +263,15 @@ async def generate_vouchers(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_technician_or_admin),
 ):
-    """Generate a batch of voucher codes for a plan."""
-    # Verify plan exists
+    """Generate a batch of voucher codes for a plan.
+
+    Each voucher gets its own auto-generated hotspot credentials
+    (username/password). Without credentials a voucher cannot be synced to the
+    router on redemption and is therefore unredeemable, so they are mandatory.
+    Limits are NOT stored on the voucher — they are derived from the plan at
+    redeem time (see the portal redeem flow).
+    """
+    # Verify plan exists and belongs to this org
     plan_result = await db.execute(
         select(ServicePlan).where(ServicePlan.id == data.plan_id)
     )
@@ -264,25 +279,48 @@ async def generate_vouchers(
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
 
+    # Optional pre-use expiry (shelf life). None = never expires before use.
+    expires_at = None
+    if data.expires_in_days:
+        expires_at = datetime.utcnow() + timedelta(days=data.expires_in_days)
+
+    # Tag the whole run with a shared batch id (for export/printing later).
+    batch_id = secrets.token_hex(6)
+
     created = []
+    issued = []
     for _ in range(data.count):
         code = VoucherCode.generate_code(format_pattern=data.code_format)
+        # Per-voucher hotspot credentials (increments the org username counter).
+        username, password = await generate_hotspot_credentials(db, org_id)
         voucher = VoucherCode(
             code=code,
             plan_id=plan.id,
             organization_id=org_id,
             status=VoucherStatus.ACTIVE,
-            data_limit_bytes=plan.data_limit * 1024 * 1024 if plan.data_limit else None,
-            time_limit_seconds=plan.time_limit * 60 if plan.time_limit else None,
-            bandwidth_limit=f"{plan.download_speed}/{plan.upload_speed}" if plan.download_speed else None,
+            hotspot_username=username,
+            hotspot_password=password,
+            expires_at=expires_at,
+            batch_id=batch_id,
+            created_by=getattr(current_user, "id", None),
         )
         db.add(voucher)
         created.append(voucher)
+        issued.append({
+            "code": code,
+            "hotspot_username": username,
+            "hotspot_password": password,
+        })
 
     await db.commit()
-    logger.info(f"Generated {len(created)} vouchers for plan {plan.name}")
+    logger.info(f"Generated {len(created)} vouchers for plan {plan.name} (org {org_id}, batch {batch_id})")
 
-    return {"message": f"Generated {len(created)} vouchers", "count": len(created)}
+    return {
+        "message": f"Generated {len(created)} vouchers",
+        "count": len(created),
+        "batch_id": batch_id,
+        "vouchers": issued,
+    }
 
 
 @router.patch("/{voucher_id}")

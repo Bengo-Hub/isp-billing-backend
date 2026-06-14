@@ -96,6 +96,9 @@ class VoucherRedeemResponse(BaseModel):
     plan_name: Optional[str] = None
     validity_hours: Optional[int] = None
     expires_at: Optional[datetime] = None
+    # Hotspot login credentials so the captive portal can show / auto-fill them.
+    hotspot_username: Optional[str] = None
+    hotspot_password: Optional[str] = None
 
 
 class SessionStatusResponse(BaseModel):
@@ -418,14 +421,21 @@ async def _sync_hotspot_user_to_router(
     username: str,
     password: str,
     plan: ServicePlan,
-    mac_address: Optional[str],
-    comment: str,
+    *,
+    mac_address: Optional[str] = None,
+    comment: Optional[str] = None,
+    source: str = "hotspot_login",
+    source_id: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Create / update a hotspot user on the org's MikroTik router with proper
-    bandwidth, data and time limits derived from the plan.
+    Create / update a hotspot user on the org's MikroTik router, NAT-safely.
 
-    Returns the MikroTik login URL if sync succeeded, None otherwise.
+    Single source of truth for hotspot-user provisioning — shared by the captive
+    login, voucher redemption and post-payment flows. Prefers the polling-agent
+    command queue (the cloud cannot reach a NATed router directly); only falls
+    back to a direct MikroTik API call for routers without the agent (reachable
+    LAN/VPN). Returns the MikroTik login URL when the direct path runs, else None
+    (the agent path applies it asynchronously on the next poll).
     """
     router_result = await db.execute(
         select(Router).where(
@@ -440,6 +450,36 @@ async def _sync_hotspot_user_to_router(
             f"No active router for org {organization.id}. "
             f"Hotspot user {username} not synced."
         )
+        return None
+
+    # Preferred NAT-safe path: queue create_user for the agent's next poll.
+    if getattr(router_obj, "agent_installed", False) and getattr(router_obj, "agent_token", None):
+        try:
+            from app.services.router_agent import RouterAgentService
+
+            download = plan.download_speed or 0
+            upload = plan.upload_speed or 0
+            rate_limit = f"{download}M/{upload}M" if (download or upload) else ""
+            agent_service = RouterAgentService(db)
+            await agent_service.queue_command(
+                router_id=router_obj.id,
+                action="create_user",
+                params={
+                    "username": username,
+                    "password": password,
+                    "type": "hotspot",
+                    "profile": f"plan_{plan.id}",
+                    "rate_limit": rate_limit,
+                },
+                priority=2,
+                source=source,
+                source_id=source_id,
+            )
+            logger.info(
+                f"Queued create_user hotspot {username} -> router {router_obj.name} (agent, {source})"
+            )
+        except Exception as e:
+            logger.error(f"Failed to queue hotspot user {username} for router {router_obj.name}: {e}")
         return None
 
     try:
@@ -718,6 +758,15 @@ async def redeem_voucher(
     voucher.used_mac_address = data.mac_address
     voucher.used_ip_address = client_ip
 
+    # Defensive: ensure the voucher has hotspot credentials. Vouchers issued
+    # before credential auto-generation (or via legacy paths) may have NULLs,
+    # which would otherwise leave the customer unable to authenticate.
+    if not voucher.hotspot_username or not voucher.hotspot_password:
+        from app.utils.hotspot_username import generate_hotspot_credentials
+        gen_user, gen_pass = await generate_hotspot_credentials(db, organization.id)
+        voucher.hotspot_username = voucher.hotspot_username or gen_user
+        voucher.hotspot_password = voucher.hotspot_password or gen_pass
+
     # Calculate session expiry
     validity_hours = plan.validity_days * 24
     if plan.time_limit > 0:
@@ -744,73 +793,18 @@ async def redeem_voucher(
     db.add(session)
     await db.flush()
 
-    # Sync user to MikroTik router if available
-    from app.models.router import Router
-    from app.modules.routers.mikrotik import get_mikrotik_client
-
-    router_result = await db.execute(
-        select(Router).where(
-            Router.organization_id == organization.id,
-            Router.is_active == True,
-        ).limit(1)
-    )
-    router = router_result.scalar_one_or_none()
-
-    if router and voucher.hotspot_username and voucher.hotspot_password:
-        try:
-            # Connect to router
-            client = get_mikrotik_client()
-            connection = await client.connect(
-                ip_address=router.ip_address,
-                username=router.username,
-                password=router.password,
-                port=router.port,
-            )
-
-            # Use plan's time_limit (in seconds) if set, otherwise unlimited
-            time_limit_seconds = plan.time_limit if plan.time_limit > 0 else None
-
-            # Calculate data limit in bytes (plan.data_limit is in MB)
-            data_limit_bytes = None
-            if plan.data_limit > 0 and not plan.is_unlimited_data:
-                data_limit_bytes = plan.data_limit * 1024 * 1024  # MB to bytes
-
-            # Create or update hotspot user with limits
-            await client.create_hotspot_user(
-                connection=connection,
-                username=voucher.hotspot_username,
-                password=voucher.hotspot_password,
-                profile="default",
-                **{
-                    "limit-uptime": f"{time_limit_seconds}s" if time_limit_seconds else None,
-                    "limit-bytes-total": data_limit_bytes if data_limit_bytes else None,
-                    "comment": f"Redeemed voucher {voucher.code} - {plan.name}",
-                }
-            )
-
-            await client.disconnect(router.ip_address, router.port)
-
-            logger.info(
-                f"Synced hotspot user {voucher.hotspot_username} to router {router.name} "
-                f"on voucher redemption {voucher.code}"
-            )
-        except Exception as e:
-            logger.error(
-                f"Failed to sync hotspot user {voucher.hotspot_username} to router {router.name}: {e}. "
-                f"User may need to reconnect or authenticate manually."
-            )
-            # Don't fail voucher redemption if router sync fails
-    else:
-        if not router:
-            logger.warning(
-                f"No active router found for organization {organization.id}. "
-                f"Hotspot user not synced to router."
-            )
-        else:
-            logger.warning(
-                f"Voucher {voucher.code} missing hotspot credentials. "
-                f"Cannot sync to router."
-            )
+    # Sync the hotspot user onto the org's router (NAT-safe; best-effort).
+    if voucher.hotspot_username and voucher.hotspot_password:
+        await _sync_hotspot_user_to_router(
+            db,
+            organization,
+            voucher.hotspot_username,
+            voucher.hotspot_password,
+            plan,
+            source="voucher_redeem",
+            source_id=str(voucher.id),
+            comment=f"Redeemed voucher {voucher.code} - {plan.name}",
+        )
 
     await db.commit()
 
@@ -820,6 +814,8 @@ async def redeem_voucher(
         plan_name=plan.name,
         validity_hours=validity_hours,
         expires_at=expires_at,
+        hotspot_username=voucher.hotspot_username,
+        hotspot_password=voucher.hotspot_password,
     )
 
 
@@ -1118,58 +1114,18 @@ async def _process_successful_payment(
 
         logger.info(f"Generated voucher {voucher_code} with hotspot credentials {hotspot_username} for purchase {purchase.id}")
 
-        # Create MikroTik hotspot user on the router (non-critical, best effort)
-        try:
-            router_result = await db.execute(
-                select(Router).where(
-                    Router.organization_id == organization.id,
-                    Router.is_active == True,
-                ).limit(1)
-            )
-            router = router_result.scalar_one_or_none()
-
-            if router:
-                # Connect to router and create hotspot user
-                client = get_mikrotik_client()
-                connection = await client.connect(
-                    ip_address=router.ip_address,
-                    username=router.username,
-                    password=router.password,
-                    port=router.port,
-                )
-
-                # Calculate time limit in seconds (validity_days * 24 hours * 3600 seconds)
-                time_limit_seconds = plan.validity_days * 24 * 3600 if plan.validity_days > 0 else 0
-
-                # Create hotspot user with bandwidth and time limits
-                await client.create_hotspot_user(
-                    connection=connection,
-                    username=hotspot_username,
-                    password=hotspot_password,
-                    profile="default",
-                    **{
-                        "limit-uptime": f"{time_limit_seconds}s" if time_limit_seconds > 0 else None,
-                        "limit-bytes-total": plan.data_limit * 1024 * 1024 * 1024 if plan.data_limit > 0 and not plan.is_unlimited_data else None,
-                        "comment": f"Purchased {plan.name} - Voucher {voucher_code}",
-                    }
-                )
-
-                await client.disconnect(router.ip_address, router.port)
-
-                logger.info(
-                    f"Created MikroTik hotspot user {hotspot_username} on router {router.name} "
-                    f"for purchase {purchase.id}"
-                )
-            else:
-                logger.warning(
-                    f"No active router found for organization {organization.id}. "
-                    f"Hotspot user {hotspot_username} not created on router."
-                )
-        except Exception as e:
-            logger.error(
-                f"Failed to create hotspot user {hotspot_username} on router: {e}. "
-                f"User can still redeem voucher manually."
-            )
+        # Create the hotspot user on the router (NAT-safe + best-effort; shared
+        # helper queues via the agent for NATed routers, falls back to direct).
+        await _sync_hotspot_user_to_router(
+            db,
+            organization,
+            hotspot_username,
+            hotspot_password,
+            plan,
+            source="voucher_purchase",
+            source_id=str(purchase.id),
+            comment=f"Purchased {plan.name} - Voucher {voucher_code}",
+        )
 
     except Exception as e:
         logger.error(f"Error processing successful payment for purchase {purchase.id}: {e}")
