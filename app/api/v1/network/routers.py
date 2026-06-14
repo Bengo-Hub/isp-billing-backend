@@ -434,7 +434,81 @@ async def get_router_action_script(
             ":log info \"CVACTION: hotspot files synced\"\n"
         )
 
+    if action == "vpn":
+        # Durable WireGuard enrollment for an already-bootstrapped (pre-WG) router.
+        # Emits the SAME WG client config as the bootstrap so the router creates
+        # the cvvpn interface, peers the server, gets a tunnel IP and POSTs its
+        # public key to /bootstrap/wg-register -- no manual re-bootstrap needed.
+        from app.services.wireguard import WireGuardService
+        from app.core.security import create_access_token
+        from datetime import timedelta as _td
+        from urllib.parse import quote as _quote
+
+        wg = WireGuardService(db)
+        if not wg.enabled:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="WireGuard is not configured on the platform",
+            )
+        tunnel_ip = await wg.allocate_ip(router_obj)
+        # Reserve the tunnel IP so the reconcile loop + register callback agree
+        # (allocate_ip is idempotent, so re-fetching the script keeps the same IP).
+        router_obj.vpn_address = tunnel_ip
+        await db.commit()
+        reg_token = create_access_token(
+            {"sub": "0", "type": "access", "permissions": ["provisioning.execute"]},
+            expires_delta=_td(hours=2),
+        )
+        base = (settings.backend_url or "").rstrip("/")
+        wg_register_url = (
+            f"{base}/api/v1/provisioning/bootstrap/wg-register"
+            f"?token={reg_token}&identity={_quote(router_obj.name or '')}"
+        )
+        lines = wg.build_bootstrap_lines(tunnel_ip=tunnel_ip, wg_register_url=wg_register_url)
+        return "\n".join(lines) + "\n"
+
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown action: {action}")
+
+
+@router.post("/{router_id}/enroll-vpn", response_model=Dict[str, Any])
+async def enroll_router_vpn(
+    router_id: int,
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Enroll an already-bootstrapped router into the WireGuard overlay (NAT-safe).
+
+    Queues an agent action-script that runs the WG client config on the router
+    (create cvvpn, peer the server, allocate the tunnel IP, register the pubkey),
+    so a router bootstrapped BEFORE WG existed joins the tunnel WITHOUT a manual
+    re-bootstrap. The WG server reconcile loop then adds the peer + the per-router
+    winbox DNAT (winbox reachable at vpn:<winbox_port>).
+    """
+    from app.services.wireguard import WireGuardService
+
+    service = RouterService(db, organization_id=_get_org_id(current_user))
+    router_obj = await service.get_by_id(router_id)
+    if not router_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    wg = WireGuardService(db)
+    if not wg.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="WireGuard is not configured on the platform",
+        )
+    if not (getattr(router_obj, "agent_installed", False) and getattr(router_obj, "agent_token", None)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Router has no polling agent installed; re-bootstrap it first",
+        )
+
+    cmd_id = await _queue_agent_action(db, router_obj, "vpn", current_user.id)
+    return {
+        "message": "VPN enrollment queued; the router joins the tunnel on its next agent poll (~30s).",
+        "command_id": cmd_id,
+        "winbox_port": router_obj.winbox_port,
+    }
 
 
 @router.post("/sync-all", response_model=Dict[str, Any])
