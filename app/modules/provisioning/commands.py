@@ -357,8 +357,8 @@ def generate_configuration_commands(
         commands.append(
             {
                 "type": "api_call",
-                "command": f":do {{ /interface/bridge/port/remove [find interface={port}] }} on-error={{}}; /interface/bridge/port/add interface={port} bridge={bridge_name}",
-                "description": f"Adding port {port} to bridge",
+                "command": f":do {{ /interface/bridge/port/remove [find interface={port}] }} on-error={{}}; /interface/bridge/port/add interface={port} bridge={bridge_name} hw=no",
+                "description": f"Adding port {port} to bridge (hw=no: HW-offload bypasses the CPU, so the hotspot can't register clients as hosts → no captive intercept)",
                 "critical": True,
                 "rollback": f"/interface/bridge/port/remove [find interface={port}]",
             }
@@ -765,7 +765,7 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
         commands.append(
             {
                 "type": "api_call",
-                "command": f'/ip/dns/static/add name="{domain}" address={gateway} ttl=5m comment=codevertex-captive-portal-detection',
+                "command": f'/ip/dns/static/add name="{domain}" address={gateway} ttl=1m comment=codevertex-captive-portal-detection',
                 "description": f"DNS static entry for captive portal detection: {domain}",
                 "critical": False,
             }
