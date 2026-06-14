@@ -68,12 +68,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         encryption_key=encryption_key
     )
 
+    # Start the cross-pod provisioning WebSocket subscriber. This PSUBSCRIBEs
+    # prov_ws:* on Redis and forwards messages to this pod's local WS clients,
+    # so live provisioning logs broadcast on any pod reach the right client.
+    # Resilient: if Redis is down it retries in the background and delivery
+    # degrades to local-only (single-pod) until Redis returns.
+    try:
+        from app.api.v1.provisioning.stream import start_ws_subscriber
+        await start_ws_subscriber()
+    except Exception as e:
+        logger.warning(f"Failed to start provisioning WS subscriber: {e}")
+
     logger.info("Application startup complete")
     yield
 
     # Shutdown
     logger.info("Application shutting down")
-    pass
+    try:
+        from app.api.v1.provisioning.stream import stop_ws_subscriber
+        await stop_ws_subscriber()
+    except Exception as e:
+        logger.warning(f"Failed to stop provisioning WS subscriber: {e}")
 
 
 # Security scheme for JWT authentication
