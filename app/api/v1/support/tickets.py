@@ -71,7 +71,7 @@ async def create_ticket(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.get("/{ticket_id}", response_model=SupportTicket)
+@router.get("/{ticket_id:int}", response_model=SupportTicket)
 async def get_ticket(
     ticket_id: int,
     org_id: int = Depends(get_org_id_for_query),
@@ -206,7 +206,7 @@ async def close_ticket(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
-@router.get("/stats/", response_model=TicketStats)
+@router.get("/stats", response_model=TicketStats)
 async def get_ticket_stats(
     org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
