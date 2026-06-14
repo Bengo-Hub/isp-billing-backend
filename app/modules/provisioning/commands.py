@@ -281,6 +281,12 @@ def generate_configuration_commands(
         ("Clearing previous hotspot server", ':do { /ip/hotspot/remove [find interface=codevertex-bridge] } on-error={}'),
         ("Clearing previous hotspot profile", ":do { /ip/hotspot/profile/remove [find name=codevertex-hsprof] } on-error={}"),
         ("Clearing previous hotspot ip-binding", ':do { /ip/hotspot/ip-binding/remove [find comment~"codevertex-gateway-bypass"] } on-error={}'),
+        # PPPoE (service_type=both): remove the server + profile + secrets BEFORE
+        # the pool/bridge they depend on, so a re-run does not abort the whole
+        # import with "already have ... pppoe" / "in use" on the critical re-adds.
+        ("Clearing previous PPPoE server", ':do { /interface/pppoe-server/server/remove [find service-name~"codevertex"] } on-error={}'),
+        ("Clearing previous PPP profile", ':do { /ppp/profile/remove [find name~"codevertex"] } on-error={}'),
+        ("Clearing previous PPP secrets", ':do { /ppp/secret/remove [find comment~"codevertex"] } on-error={}'),
         ("Clearing previous walled-garden hosts", ':do { /ip/hotspot/walled-garden/remove [find comment~"codevertex-portal"] } on-error={}'),
         ("Clearing previous walled-garden IPs", ':do { /ip/hotspot/walled-garden/ip/remove [find comment~"codevertex-portal"] } on-error={}'),
         ("Clearing previous DHCP server", ":do { /ip/dhcp-server/remove [find name=codevertex-dhcp] } on-error={}"),
