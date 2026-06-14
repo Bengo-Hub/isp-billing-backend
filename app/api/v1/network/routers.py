@@ -1262,6 +1262,22 @@ async def regenerate_winbox_credentials(
         except Exception:
             await db.rollback()
 
+    # Ensure the router is enrolled on the VPN WITH the management firewall rule
+    # (winbox 8291 + API 8728 allowed from the tunnel), so remote winbox works
+    # without a manual router edit. NAT-safe + idempotent: queues the agent 'vpn'
+    # action-script (build_bootstrap_lines). Best-effort.
+    try:
+        from app.services.wireguard import WireGuardService
+
+        if (
+            WireGuardService(db).enabled
+            and getattr(router_obj, "agent_installed", False)
+            and getattr(router_obj, "agent_token", None)
+        ):
+            await _queue_agent_action(db, router_obj, "vpn", current_user.id)
+    except Exception:
+        pass
+
     # Generate new secure password
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
     new_password = ''.join(secrets.choice(alphabet) for _ in range(16))
