@@ -53,7 +53,7 @@ class User(Base):
 
 ### Frontend Form (Login Page)
 
-**File**: `wifi-billing-software-frontend/app/(marketing)/login/page.tsx`
+**File**: `isp-billing-frontend/app/(marketing)/login/page.tsx`
 
 **Form Fields**:
 ```typescript
@@ -75,7 +75,7 @@ class User(Base):
 
 ### Frontend Auth Store
 
-**File**: `wifi-billing-software-frontend/lib/store/auth.ts`
+**File**: `isp-billing-frontend/lib/store/auth.ts`
 
 **Login Function**:
 ```typescript
@@ -146,7 +146,7 @@ username=demo@codevertexitsolutions.com&password=demo123
 
 ### Frontend Form (Signup Page)
 
-**File**: `wifi-billing-software-frontend/app/(marketing)/signup/page.tsx`
+**File**: `isp-billing-frontend/app/(marketing)/signup/page.tsx`
 
 **Multi-Step Form Fields**:
 
@@ -198,7 +198,7 @@ const registrationData = {
 
 ### Frontend Auth Store
 
-**File**: `wifi-billing-software-frontend/lib/store/auth.ts`
+**File**: `isp-billing-frontend/lib/store/auth.ts`
 
 **Register Function**:
 ```typescript

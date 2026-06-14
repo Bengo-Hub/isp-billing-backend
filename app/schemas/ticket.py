@@ -200,15 +200,23 @@ class TicketCancelRequest(BaseModel):
 
 
 class TicketStats(BaseModel):
-    """Schema for ticket statistics."""
+    """Schema for ticket statistics.
 
-    total_tickets: int
-    open_tickets: int
-    in_progress_tickets: int
-    resolved_tickets: int
-    closed_tickets: int
-    avg_resolution_time_hours: float
-    resolution_rate: float
+    All fields default so the endpoint never 500s when the service omits one
+    (the service does not compute avg_resolution_time_hours / resolution_rate
+    and returns urgent_tickets, which the old strict schema rejected).
+    """
+
+    total_tickets: int = 0
+    open_tickets: int = 0
+    in_progress_tickets: int = 0
+    resolved_tickets: int = 0
+    closed_tickets: int = 0
+    urgent_tickets: int = 0
+    avg_resolution_time_hours: float = 0.0
+    resolution_rate: float = 0.0
+
+    model_config = {"extra": "ignore"}
 
 
 class TicketStatsByPriority(BaseModel):
