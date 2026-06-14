@@ -384,9 +384,19 @@ async def get_router_action_script(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
 
     if action == "sync_time":
+        # Use the tenant's configured timezone (default Africa/Nairobi).
+        tz = "Africa/Nairobi"
+        if router_obj.organization_id:
+            from app.models.organization import Organization
+            res = await db.execute(
+                select(Organization).where(Organization.id == router_obj.organization_id)
+            )
+            org = res.scalar_one_or_none()
+            if org and org.timezone:
+                tz = org.timezone
         return (
             "/system/ntp/client/set enabled=yes servers=time.google.com,time.cloudflare.com\n"
-            ":do { /system/clock/set time-zone-name=Africa/Nairobi } on-error={}\n"
+            f":do {{ /system/clock/set time-zone-name={tz} }} on-error={{}}\n"
             ":log info \"CVACTION: time synced\"\n"
         )
 

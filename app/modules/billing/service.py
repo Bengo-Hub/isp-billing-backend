@@ -410,17 +410,25 @@ class BillingService:
         transaction_id: Optional[str] = None,
         reference_number: Optional[str] = None,
         notes: Optional[str] = None,
+        is_manual: bool = False,
     ) -> Payment:
-        """Create a new payment."""
+        """Create a new payment.
+
+        ``is_manual`` marks an admin-recorded reconciliation (e.g. the "Record
+        Payment" action) where the funds were already received out-of-band. Such
+        payments are immediately COMPLETED and applied to the invoice regardless
+        of method (cash, bank transfer, manually-received M-PESA, etc.).
+        """
         # Generate payment number
         payment_number = await self._generate_payment_number()
 
         # Offline methods (cash / bank transfer) are recorded by an admin AFTER
         # the funds were physically received, so they are immediately COMPLETED
         # and reconciled. Online methods (M-PESA / card) stay PENDING until the
-        # gateway callback confirms them.
+        # gateway callback confirms them — UNLESS this is an explicit manual
+        # reconciliation, in which case the admin is asserting receipt.
         offline_methods = {PaymentMethod.CASH, PaymentMethod.BANK_TRANSFER}
-        is_offline = payment_method in offline_methods
+        is_offline = is_manual or payment_method in offline_methods
 
         payment = Payment(
             user_id=user_id,

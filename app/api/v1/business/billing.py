@@ -358,6 +358,9 @@ async def create_payment(
 ) -> Payment:
     """Create a new payment."""
     service = BillingService(db)
+    # This endpoint is the admin "Record Payment" / manual-reconcile path: the
+    # funds were already received out-of-band, so mark it manual → COMPLETED and
+    # applied to the invoice (which activates the linked subscription).
     payment = await service.create_payment(
         user_id=payment_data.user_id,
         amount=payment_data.amount,
@@ -366,7 +369,8 @@ async def create_payment(
         transaction_id=payment_data.transaction_id,
         reference_number=payment_data.reference_number,
         notes=payment_data.notes,
-            )
+        is_manual=True,
+    )
     return payment
 
 
