@@ -550,25 +550,32 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
     )
 
     # Create hotspot profile for external captive portal
-    # login-by methods (dual legacy + modern support):
-    #   - http-chap: Challenge-response auth over HTTP (legacy devices)
-    #   - http-pap: Plain-text auth over HTTP (legacy fallback)
-    #   - https: TLS-encrypted auth + enables RFC 7710 DHCP Option 114 (modern devices)
-    #   - mac-cookie: Server-side MAC-to-credential mapping for auto-re-login (all devices)
+    # login-by methods — HTTP ONLY (no https):
+    #   - http-pap: Plain-text auth over HTTP (our custom login.html + the buy page
+    #     POST credentials in clear, so http-pap MUST be present and is listed first)
+    #   - http-chap: Challenge-response auth over HTTP (legacy devices that render
+    #     MikroTik's built-in JS login form)
+    #   - mac-cookie: Server-side MAC-to-credential mapping for auto-re-login
+    # IMPORTANT: `https` is intentionally OMITTED. With `https` + a SELF-SIGNED cert,
+    # MikroTik redirects every intercepted HTTP probe to https://<dns-name>/login,
+    # whose untrusted TLS handshake fails on Android/Chrome — the captive popup never
+    # appears (device reports "no internet"), neverssl returns ERR_CONNECTION_CLOSED,
+    # and $(link-login-only) resolves to an unreachable https://hotspot.local URL.
+    # RFC 7710 DHCP Option 114 needs a *publicly-trusted* cert to help, which a
+    # self-signed cert is not — so it only hurts here. Re-enable https + Option 114
+    # later only with a real (e.g. Let's Encrypt) certificate.
     # NOTE: html-directory is NOT set here initially. It defaults to MikroTik built-in
     # templates. After custom templates are uploaded via FTP, the service layer sets
     # html-directory=hotspot to use them. This ensures captive portal works even if
     # template upload fails (falls back to built-in login page).
     # use-radius=no: Authenticate locally/via API, not RADIUS
     # http-cookie-lifetime=1d: Browser cookie keeps users logged in for 1 day
-    # Note: mac-cookie-timeout is on /ip/hotspot/user/profile (NOT server profile)
-    #   mac-cookie defaults to 3-day timeout from user profile, which is fine
     # Note: HTTP proxy/interception is enabled automatically by MikroTik hotspot
     profile_cmd = (
         f"/ip/hotspot/profile/add name={profile_name} "
         f"hotspot-address={gateway} dns-name={dns_name} "
         f"use-radius=no "
-        f"login-by=http-chap,http-pap,https,mac-cookie "
+        f"login-by=http-pap,http-chap,mac-cookie "
         f"http-cookie-lifetime=1d "
         f"split-user-domain=no"
     )
@@ -587,14 +594,18 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
         }
     )
 
-    # Assign SSL certificate to hotspot profile for RFC 7710/8910 support
-    # This is done as a separate SET command so profile creation succeeds even if
-    # certificate creation failed. When cert IS available, this enables DHCP Option 114.
+    # SSL certificate is intentionally NOT assigned to the profile.
+    # Assigning a SELF-SIGNED cert turns on RFC 7710 DHCP Option 114 pointing at
+    # https://<dns-name>/... — but the untrusted cert makes Android/Chrome fail the
+    # captive check ("no internet", no popup) and intercepts post-auth HTTPS with a
+    # cert error. The cert objects are still created above so a real (trusted) cert
+    # can be assigned later; until then we run an HTTP-only captive portal.
+    # Defensive: clear any cert left over from a previous (https) provisioning.
     commands.append(
         {
             "type": "api_call",
-            "command": f"/ip/hotspot/profile/set {profile_name} ssl-certificate={cert_name}",
-            "description": "Assigning SSL certificate to hotspot profile for RFC 7710",
+            "command": f':do {{ /ip/hotspot/profile/set [find name={profile_name}] ssl-certificate=none }} on-error={{}}',
+            "description": "Ensuring hotspot profile has NO ssl-certificate (HTTP-only captive)",
             "critical": False,
         }
     )
@@ -728,13 +739,13 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
 
     captive_portal_detection_domains = [
         # --- Android / Google (probes /generate_204, expects HTTP 204) ---
+        # Only the DEDICATED captive-probe hostnames are hijacked. Do NOT hijack
+        # www.google.com / *.gstatic.com / clients*.google.com — those serve real
+        # traffic, so pointing them at the gateway breaks Google for up to the DNS
+        # TTL after the client authenticates (and throws a cert error during the
+        # pre-auth redirect). connectivitycheck.* are used ONLY for portal probing.
         "connectivitycheck.gstatic.com",
         "connectivitycheck.android.com",
-        "www.google.com",
-        "clients3.google.com",
-        "clients4.google.com",
-        "android.clients.google.com",
-        "www.gstatic.com",
 
         # --- Apple iOS / macOS (probes /hotspot-detect.html, expects "Success") ---
         "captive.apple.com",
