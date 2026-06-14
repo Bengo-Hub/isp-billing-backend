@@ -1,9 +1,9 @@
 """Router-related Pydantic schemas."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, model_validator, validator
+from pydantic import BaseModel, Field, field_serializer, model_validator, validator
 
 from app.models.router import RouterStatus, RouterType
 from app.core.config import settings
@@ -346,6 +346,21 @@ class Router(BaseModel):
         self.total_hdd_space_formatted = format_bytes_mikrotik(self.total_hdd_space)
         self.free_hdd_space_formatted = format_bytes_mikrotik(self.free_hdd_space)
         return self
+
+    @field_serializer(
+        'last_seen', 'last_poll_at', 'last_provisioned_at', 'created_at', 'updated_at',
+        when_used='json',
+    )
+    def _serialize_utc(self, dt: Optional[datetime]):
+        """Emit timestamps as explicit UTC so the frontend computes relative time
+        correctly. The DB stores naive UTC; without a timezone the browser parses
+        them as local time (EAT/UTC+3), which made a fresh poll show
+        "Last Seen 3h ago"."""
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
 
     class Config:
         from_attributes = True

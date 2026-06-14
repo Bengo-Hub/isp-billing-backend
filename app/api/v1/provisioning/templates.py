@@ -51,7 +51,7 @@ def generate_login_template(captive_portal_url: str, org_name: str = "ISP") -> s
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="refresh" content="0; url={captive_portal_url}?mac=$(mac)&ip=$(ip)&username=$(username)&link-orig=$(link-orig-esc)">
+    <meta http-equiv="refresh" content="8; url={captive_portal_url}?mac=$(mac)&ip=$(ip)&username=$(username)&link-orig=$(link-orig-esc)">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{org_name} - WiFi Portal</title>
     <style>
@@ -198,10 +198,21 @@ def generate_login_template(captive_portal_url: str, org_name: str = "ISP") -> s
     </div>
 
     <script>
-        // Auto-redirect after 2 seconds if meta refresh fails
-        setTimeout(function() {{
-            window.location.href = '{captive_portal_url}?mac=$(mac)&ip=$(ip)&username=$(username)&link-orig=$(link-orig-esc)';
-        }}, 2000);
+        // Immediately redirect to the external buy/redeem portal, carrying the
+        // MikroTik login endpoint ($(link-login-only)) + original URL so the
+        // portal can log THIS client into the hotspot after purchase/redeem.
+        // encodeURIComponent is required: link-login-only contains "://" and "/".
+        (function() {{
+            try {{
+                var portal = '{captive_portal_url}';
+                var sep = portal.indexOf('?') >= 0 ? '&' : '?';
+                window.location.href = portal + sep +
+                    'loginurl=' + encodeURIComponent('$(link-login-only)') +
+                    '&linkorig=' + encodeURIComponent('$(link-orig)') +
+                    '&mac=' + encodeURIComponent('$(mac)') +
+                    '&ip=' + encodeURIComponent('$(ip)');
+            }} catch (e) {{}}
+        }})();
 
         // Show error if login failed
         var error = '$(error)';
