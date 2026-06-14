@@ -374,7 +374,7 @@ async def create_payment(
     return payment
 
 
-@router.get("/payments/{payment_id}", response_model=Payment)
+@router.get("/payments/{payment_id:int}", response_model=Payment)
 async def get_payment(
     payment_id: int,
     org_id: int = Depends(get_org_id_for_query),
