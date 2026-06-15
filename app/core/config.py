@@ -53,6 +53,24 @@ class Settings(BaseSettings):
     # Shared secret for trusted service-to-service (S2S) callers via X-API-Key.
     internal_service_key: Optional[str] = None
 
+    # ── Treasury payments (Phase 2, ADDITIVE behind a flag) ──
+    # When use_treasury_payments is True, customer (hotspot/PPPoE) payments are
+    # routed through the central treasury-api (intent → shared pay page) instead
+    # of isp-billing's own Paystack/M-PESA gateways. Default False keeps the
+    # just-fixed direct-gateway flow as the live path; treasury is opt-in per
+    # environment. The direct-gateway code remains the fallback while this is off.
+    use_treasury_payments: bool = False
+    # Internal (S2S) base URL for treasury-api — used for create-intent / get-status
+    # calls authenticated with internal_service_key (X-API-Key). e.g.
+    # http://treasury-api.finance.svc.cluster.local:8080
+    treasury_api_url: Optional[str] = None
+    # Browser-reachable shared pay page base (treasury-ui). The customer is
+    # redirected here to choose a gateway and pay. e.g.
+    # https://books.codevertexitsolutions.com
+    treasury_pay_page_url: str = "https://books.codevertexitsolutions.com"
+    # Request timeout (seconds) for S2S treasury calls.
+    treasury_request_timeout: float = 20.0
+
     # Encryption (NEW)
     encryption_key: Optional[str] = None
     master_password: Optional[str] = None

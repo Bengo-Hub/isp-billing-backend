@@ -324,6 +324,11 @@ class CustomerPurchase(Base):
     payment_reference = Column(String(100), nullable=True, index=True)
     payment_status = Column(String(50), nullable=False, index=True)  # pending, completed, failed
     transaction_id = Column(Integer, ForeignKey("payment_transactions.id"), nullable=True)
+    # Phase 2 (ADDITIVE): treasury-api payment intent id when the purchase was
+    # routed through the central treasury (settings.use_treasury_payments=True).
+    # Nullable so direct-gateway purchases (the default path) are unaffected; the
+    # payment/status poller uses it to verify the intent against treasury.
+    treasury_payment_intent_id = Column(String(64), nullable=True, index=True)
 
     # Result
     voucher_code_id = Column(Integer, ForeignKey("voucher_codes.id"), nullable=True)
