@@ -2,6 +2,18 @@
 Platform Owner API - Billing Management.
 
 Endpoints for platform billing and invoice management.
+
+DEPRECATED ownership (cross-service data-ownership): INVOICES and PAYMENTS are
+owned by treasury-api. The local PlatformInvoice / PlatformPayment models and
+the write endpoints below (generate / update / void / delete / regenerate /
+refund / mark-paid) are RETAINED, not deleted, so the running platform-billing
+UI keeps working during migration. The migration target is to raise the
+platform→ISP-provider subscription invoice via subscriptions-api treasury
+auto-invoicing (``app.services.subscriptions_client.SubscriptionsClient
+.subscribe(..., generate_invoice=True)`` / ``.generate_invoice(tenant_id)``)
+and to collect payment through treasury intents
+(``app.services.treasury_client.TreasuryClient``). Do NOT add new parallel
+invoice/payment write paths here; treasury is the canonical financial ledger.
 """
 
 import logging

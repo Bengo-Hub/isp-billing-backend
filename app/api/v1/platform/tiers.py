@@ -2,6 +2,16 @@
 Platform Owner API - Subscription Tiers.
 
 Endpoints for managing platform subscription tiers.
+
+DEPRECATED ownership (cross-service data-ownership): subscription PLANS, TIERS
+and ENTITLEMENTS are owned by subscriptions-api (ISP_* plans are already seeded
+there). The local PlatformSubscriptionTier model + these write endpoints are
+RETAINED, not deleted, so the running platform-billing UI keeps working during
+migration. The migration target is to read a tenant's resolved plan/limits via
+``app.services.subscriptions_client.SubscriptionsClient.get_subscription`` and
+to (un)subscribe tenants via ``.subscribe(...)`` rather than authoring tiers
+here. Do NOT add new parallel write paths against these local tiers; new plan
+definitions belong in subscriptions-api.
 """
 
 from typing import List, Optional
