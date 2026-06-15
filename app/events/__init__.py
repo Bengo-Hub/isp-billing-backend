@@ -33,6 +33,10 @@ EVT_INVOICE_CREATED = "invoice.created"
 
 # Consumed subjects (durable consumer interest).
 SUB_TREASURY_PAYMENT_SUCCEEDED = "treasury.payment.succeeded"
+# auth-api is the SoT for ISP-provider tenants + users (they sign up via SSO).
+# It publishes auth.tenant.created and auth.user.created/updated (subject =
+# {aggregate_type}.{event_type}); isp-billing mirrors them locally.
+SUB_AUTH_TENANT = "auth.tenant.*"
 SUB_AUTH_USER = "auth.user.*"
 SUB_SUBSCRIPTION = "subscription.*"
 
@@ -42,6 +46,7 @@ __all__ = [
     "EVT_SUBSCRIBER_CREATED",
     "EVT_INVOICE_CREATED",
     "SUB_TREASURY_PAYMENT_SUCCEEDED",
+    "SUB_AUTH_TENANT",
     "SUB_AUTH_USER",
     "SUB_SUBSCRIPTION",
 ]

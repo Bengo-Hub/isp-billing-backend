@@ -12,7 +12,6 @@ Public endpoints for hotspot customers to:
 import logging
 import secrets
 from datetime import datetime, timedelta
-from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -27,10 +26,17 @@ from app.models.organization import Organization, OrganizationSettings
 from app.models.plan import ServicePlan, PlanType, PlanStatus
 from app.models.customer_portal import VoucherCode, CustomerSession, CustomerPurchase, VoucherStatus, SessionStatus
 from app.models.subscription import Subscription, SubscriptionStatus, SubscriptionType
-from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
 from app.models.router import Router
-from app.integrations.payment_gateways import PaymentGatewayFactory
 from app.integrations.mikrotik import get_mikrotik_client
+
+# DEPRECATED (customer payments centralized on treasury-api):
+#   The CUSTOMER hotspot purchase path no longer uses isp-billing's own payment
+#   gateways. ``PaymentGatewayConfig`` / ``GatewayType`` / ``PaymentGatewayFactory``
+#   are intentionally NO LONGER imported here — treasury-api is the single source
+#   of truth for initiating + confirming customer payments (NATS consumer primary,
+#   treasury get_status polling fallback). The model + integrations remain
+#   importable for legacy/admin (SMS-credit / WhatsApp top-up / PPPoE renewal)
+#   paths, which are out of scope for this cutover.
 from app.utils.hotspot_username import generate_hotspot_credentials
 
 logger = logging.getLogger(__name__)
@@ -604,25 +610,26 @@ async def _purchase_via_treasury(
 ) -> Optional[PurchaseResponse]:
     """Create a treasury payment intent and return the shared pay-page checkout.
 
-    ADDITIVE Phase-2 path (only called when settings.use_treasury_payments). The
-    intent is created under the ISP's tenant UUID with source_service="isp", so
-    treasury attributes + settles the revenue to that ISP. A local
-    CustomerPurchase snapshot is still written (status "pending") with the
-    treasury intent id stored on it, so the existing payment/status poller can
-    verify the intent and run the unchanged voucher + hotspot-user provisioning.
+    This is the ONLY customer-payment path: customer hotspot purchases are fully
+    centralized on treasury-api. The intent is created under the ISP's tenant
+    UUID with source_service="isp", so treasury attributes + settles the revenue
+    to that ISP. A local CustomerPurchase snapshot is still written (status
+    "pending") with the treasury intent id stored on it, so the payment
+    confirmation (NATS consumer primary, treasury get_status poll fallback) can
+    run the unchanged voucher + hotspot-user provisioning.
 
     Returns a PurchaseResponse whose checkout_url is the treasury-ui pay page
-    (with redirect back to isp-billing's payment/callback). Returns None when
-    treasury cannot be used (not configured / call failed) so the caller can
-    fall back to the direct-gateway flow rather than hard-breaking the purchase.
+    (with redirect back to isp-billing's payment/callback). Returns None ONLY
+    when treasury is unusable (not configured / call failed); the caller then
+    surfaces an error — there is NO local-gateway fallback anymore.
     """
     from app.services.treasury_client import TreasuryClient, TreasuryError
 
     client = TreasuryClient()
     if not client.is_configured:
-        logger.warning(
-            "use_treasury_payments is on but treasury client is not configured; "
-            "falling back to direct gateway for org %s",
+        logger.error(
+            "treasury client is not configured (treasury_api_url / "
+            "internal_service_key) — cannot process customer payment for org %s",
             organization.id,
         )
         return None
@@ -739,9 +746,16 @@ async def purchase_package(
     organization: Organization = Depends(get_organization_by_slug),
 ):
     """
-    Purchase a hotspot package via M-PESA or Paystack.
+    Purchase a hotspot package — payment is centralized on treasury-api.
 
-    Public endpoint - initiates payment based on selected method.
+    Customer payments are NO LONGER processed by isp-billing's own gateways:
+    treasury-api is the single source of truth. We always create a treasury
+    payment intent and hand the customer the shared treasury pay page; the
+    purchase is confirmed via the NATS consumer (primary) or the treasury
+    get_status poll (fallback), both of which run the same voucher + hotspot-user
+    provisioning so the Phase-0 captive-device login still works.
+
+    Public endpoint.
     """
     # Get the plan
     result = await db.execute(
@@ -760,148 +774,28 @@ async def purchase_package(
             detail="Package not found"
         )
 
-    # ── Phase 2 (ADDITIVE): treasury-api payment path, behind a config flag ──
-    # When settings.use_treasury_payments is True, route the customer payment
-    # through the central treasury-api (invoice-first intent + shared pay page)
-    # instead of isp-billing's own Paystack/M-PESA gateways. The direct-gateway
-    # path below is left untouched and remains the default + fallback.
-    from app.core.config import settings as app_settings
-
-    if app_settings.use_treasury_payments:
-        result = await _purchase_via_treasury(
-            db=db,
-            request=request,
-            organization=organization,
-            org_slug=org_slug,
-            plan=plan,
-            data=data,
-        )
-        if result is not None:
-            return result
-        # _purchase_via_treasury returns None only when treasury is not usable
-        # for this org (e.g. unconfigured); fall through to the direct gateway so
-        # the flag never hard-breaks a working purchase.
-
-    # Determine gateway type based on payment method
-    requested_gateway_type = None
-    if data.payment_method == "paystack":
-        requested_gateway_type = GatewayType.PAYSTACK
-    elif data.payment_method == "mpesa":
-        requested_gateway_type = GatewayType.MPESA
-
-    # All payments go through the platform-level gateway (organization_id IS NULL).
-    # ISPs don't configure their own gateways - the platform admin configures
-    # the Paystack account and payouts are disbursed to ISPs separately.
-    gateway_config = None
-    if requested_gateway_type:
-        gateway_result = await db.execute(
-            select(PaymentGatewayConfig)
-            .where(
-                PaymentGatewayConfig.organization_id.is_(None),
-                PaymentGatewayConfig.gateway_type == requested_gateway_type,
-                PaymentGatewayConfig.is_active == True,
-            )
-            .limit(1)
-        )
-        gateway_config = gateway_result.scalar_one_or_none()
-
-    # Fallback to any active platform-level gateway (primary first)
-    if not gateway_config:
-        gateway_result = await db.execute(
-            select(PaymentGatewayConfig)
-            .where(
-                PaymentGatewayConfig.organization_id.is_(None),
-                PaymentGatewayConfig.is_active == True,
-            )
-            .order_by(PaymentGatewayConfig.is_primary.desc())
-            .limit(1)
-        )
-        gateway_config = gateway_result.scalar_one_or_none()
-
-    if not gateway_config:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No payment method configured"
-        )
-
-    # Create payment gateway
-    try:
-        gateway = PaymentGatewayFactory.create(gateway_config)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Payment gateway configuration error"
-        )
-
-    # Generate reference
-    import uuid
-    reference = f"HS-{organization.slug[:6].upper()}-{uuid.uuid4().hex[:8].upper()}"
-
-    # Get client IP and user agent
-    client_ip = request.client.host if request.client else None
-    user_agent = request.headers.get("user-agent", "")
-
-    # Create purchase record
-    purchase = CustomerPurchase(
-        organization_id=organization.id,
-        phone_number=data.phone_number,
-        email=data.email,
-        plan_id=plan.id,
-        amount=plan.price,
-        currency=plan.currency,
-        payment_method=gateway_config.gateway_type.value,
-        payment_reference=reference,
-        payment_status="pending",
-        ip_address=client_ip,
-        user_agent=user_agent,
+    # ── Treasury-api is the ONLY customer-payment path ──────────────────────
+    # No config flag, no direct-gateway fallback: the intent is created under the
+    # ISP's tenant UUID (source_service="isp") so treasury attributes + settles
+    # the revenue to that ISP. If treasury is unusable we surface an error rather
+    # than silently falling back to a local gateway.
+    treasury_result = await _purchase_via_treasury(
+        db=db,
+        request=request,
+        organization=organization,
+        org_slug=org_slug,
+        plan=plan,
+        data=data,
     )
-    db.add(purchase)
-    await db.commit()
+    if treasury_result is not None:
+        return treasury_result
 
-    # Build callback URL for Paystack with payment type context
-    callback_url = None
-    if gateway_config.gateway_type == GatewayType.PAYSTACK:
-        # Use the request origin for callback
-        origin = request.headers.get("origin", "")
-        if origin:
-            callback_url = f"{origin}/payment/callback?payment_type=hotspot_purchase&org={org_slug}"
-
-    # Initiate payment
-    payment_result = await gateway.initiate_payment(
-        amount=Decimal(str(plan.price)),
-        phone_number=data.phone_number or "",
-        reference=reference,
-        description=f"{plan.name} - {organization.name}",
-        callback_url=callback_url,
-        metadata={
-            "organization_id": organization.id,
-            "plan_id": plan.id,
-            "purchase_id": purchase.id,
-            "email": data.email,
-            "phone_number": data.phone_number,
-        },
+    # _purchase_via_treasury returns None only when treasury is not usable
+    # (unconfigured / intent create failed). There is no local-gateway fallback.
+    raise HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail="Payment service is temporarily unavailable. Please try again.",
     )
-
-    # Update purchase with gateway response
-    purchase.payment_status = "processing" if payment_result.success else "failed"
-    await db.commit()
-
-    if payment_result.success:
-        return PurchaseResponse(
-            success=True,
-            reference=reference,
-            message=payment_result.message or "Payment request sent",
-            instructions=payment_result.instructions,
-            checkout_url=payment_result.checkout_url,
-            status="pending",
-        )
-    else:
-        return PurchaseResponse(
-            success=False,
-            reference=reference,
-            message=payment_result.message or "Payment failed",
-            status="failed",
-        )
 
 
 @router.post("/{org_slug}/voucher/redeem", response_model=VoucherRedeemResponse)
@@ -1170,9 +1064,18 @@ async def payment_webhook(
     organization: Organization = Depends(get_organization_by_slug),
 ):
     """
-    Payment callback webhook.
+    DEPRECATED — direct-gateway payment callback webhook.
 
-    Receives payment notifications from payment gateways and activates customer sessions.
+    Customer payments are now centralized on treasury-api, so isp-billing no
+    longer initiates Paystack/M-PESA gateways for customer purchases and these
+    providers no longer call this endpoint. Confirmation now flows via the NATS
+    consumer (treasury.payment.succeeded, primary) and the treasury get_status
+    poll in GET /payment/status (fallback).
+
+    The endpoint is retained (importable, route preserved) only for backward
+    compatibility / any in-flight legacy callbacks; it remains idempotent because
+    it delegates to the unchanged _process_successful_payment. New integrations
+    must NOT depend on it.
     """
     import json
     from app.core.logging import get_logger
@@ -1274,11 +1177,12 @@ async def get_payment_status(
             "message": "Payment reference not found",
         }
 
-    # Phase 2 (ADDITIVE): when the purchase was routed through treasury, verify
-    # the intent status against treasury-api (the confirmation source) instead
-    # of the local Paystack gateway. On success we run the SAME voucher +
-    # hotspot-user provisioning, so the response still carries the credentials
-    # the Phase-0 captive callback needs.
+    # Confirmation is owned by treasury-api. The NATS consumer
+    # (treasury.payment.succeeded) is the PRIMARY path; this poll of treasury's
+    # get_status is the FALLBACK for when NATS is not yet configured / a delivery
+    # was missed. There is NO local-gateway verification anymore. On success we
+    # run the SAME voucher + hotspot-user provisioning, so the response still
+    # carries the credentials the Phase-0 captive callback needs.
     if (
         purchase.payment_status == "processing"
         and purchase.treasury_payment_intent_id
@@ -1305,75 +1209,7 @@ async def get_payment_status(
                     await db.commit()
         except TreasuryError as e:
             logger.error("Error verifying treasury intent for %s: %s", reference, e)
-            # Keep current status; the customer can retry / webhook may land.
-
-        # Re-evaluate completion below using the (possibly updated) status.
-        is_completed = purchase.payment_status in ["completed", "failed"]
-        is_success = purchase.payment_status == "completed"
-        response = {
-            "status": purchase.payment_status,
-            "is_completed": is_completed,
-            "message": "Payment successful" if is_success else (
-                "Payment failed" if purchase.payment_status == "failed" else "Payment pending"
-            ),
-        }
-        if is_success and purchase.voucher_code_id:
-            voucher_result = await db.execute(
-                select(VoucherCode).where(VoucherCode.id == purchase.voucher_code_id)
-            )
-            voucher = voucher_result.scalar_one_or_none()
-            if voucher:
-                response["voucher_code"] = voucher.code
-                response["username"] = voucher.hotspot_username
-                response["password"] = voucher.hotspot_password
-                if voucher.hotspot_username:
-                    response["hotspot_username"] = voucher.hotspot_username
-                    response["hotspot_password"] = voucher.hotspot_password
-                    router_result = await db.execute(
-                        select(Router).where(
-                            Router.organization_id == organization.id,
-                            Router.is_active == True,
-                        ).limit(1)
-                    )
-                    router_obj = router_result.scalar_one_or_none()
-                    if router_obj:
-                        gw = _resolve_hotspot_gateway(router_obj)
-                        response["login_url"] = (
-                            f"http://{gw}/login"
-                            f"?username={voucher.hotspot_username}"
-                            f"&password={voucher.hotspot_password}"
-                        )
-        return response
-
-    # If payment is still processing, try to verify with gateway (webhook fallback)
-    if purchase.payment_status == "processing":
-        try:
-            # Get the platform-level Paystack gateway for verification
-            gateway_result = await db.execute(
-                select(PaymentGatewayConfig).where(
-                    PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
-                    PaymentGatewayConfig.organization_id.is_(None),
-                    PaymentGatewayConfig.is_active == True,
-                ).limit(1)
-            )
-            gateway_config = gateway_result.scalar_one_or_none()
-
-            if gateway_config:
-                gateway = PaymentGatewayFactory.create(gateway_config)
-                verification = await gateway.verify_payment(reference)
-
-                if verification.success:
-                    # Payment was successful! Process it now
-                    logger.info(f"Paystack verification successful for reference {reference}, processing payment")
-                    await _process_successful_payment(db, purchase, organization)
-
-                elif verification.status in ["failed", "cancelled"]:
-                    purchase.payment_status = "failed"
-                    await db.commit()
-
-        except Exception as e:
-            logger.error(f"Error verifying payment {reference}: {e}")
-            # Continue with current status if verification fails
+            # Keep current status; the customer can retry / the NATS consumer may land.
 
     # Check if payment is completed
     is_completed = purchase.payment_status in ["completed", "failed"]

@@ -12,8 +12,13 @@ delivered once to the durable group, not once per pod) to:
                                   _process_successful_payment provisioning.
                                   IDEMPOTENT — already-completed purchases are
                                   skipped, so a redelivery never double-provisions.
-    auth.user.*                 → best-effort upsert/sync of the local User
-                                  (the ISP user) from the auth-api identity event.
+    auth.tenant.*               → upsert the local Organization (ISP provider)
+                                  keyed by auth_tenant_id; keeps Organization.uuid
+                                  == auth tenant UUID for treasury/subscriptions
+                                  tenant-scoping. auth-api is the SoT.
+    auth.user.*                 → upsert the local User (the ISP user) from the
+                                  auth-api identity event, reusing the SSO JIT
+                                  mapping (provision_sso_user). Idempotent.
     subscription.*              → no-op / log for now (placeholder for later).
 
 This is the PRIMARY confirmation path when NATS is configured. The Phase-2
@@ -39,6 +44,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.events import (
+    SUB_AUTH_TENANT,
     SUB_AUTH_USER,
     SUB_SUBSCRIPTION,
     SUB_TREASURY_PAYMENT_SUCCEEDED,
@@ -143,59 +149,194 @@ async def handle_treasury_payment_succeeded(envelope: Dict[str, Any]) -> None:
         await _process_successful_payment(db, purchase, organization)
 
 
-async def handle_auth_user(envelope: Dict[str, Any]) -> None:
-    """Best-effort sync of the local User (ISP user) from an auth.user.* event.
+async def handle_auth_tenant(envelope: Dict[str, Any]) -> None:
+    """Mirror an ISP-provider tenant from an auth.tenant.created/updated event.
 
-    Links/updates by ``auth_service_user_id`` (the central SSO subject), falling
-    back to email. NEVER creates duplicates and never raises out of the handler.
-    Mirrors the lightweight identity-sync other services do; purely additive.
+    auth-api is the SoT for tenants. We upsert a local ``Organization`` keyed by
+    ``auth_tenant_id`` (the auth tenant UUID). To keep treasury/subscriptions
+    tenant-scoping aligned, the local ``Organization.uuid`` is set to the SAME
+    auth tenant UUID — so the local uuid IS the auth tenant UUID.
+
+    Only ISP-use-case tenants are mirrored: auth-api is multi-product, so a
+    non-isp ``use_case`` is ignored here (other services consume those).
+    Idempotent: a redelivery just refreshes name/slug. Never raises out (the
+    callback naks on exception for redelivery).
     """
-    from datetime import datetime
+    import uuid as uuidlib
+    from datetime import datetime, timedelta
 
-    from app.models.user import User
+    from app.models.organization import (
+        Organization,
+        OrganizationStatus,
+        OrganizationType,
+    )
+
+    p = _payload(envelope)
+    auth_tenant_id = (
+        p.get("tenant_id") or p.get("id") or envelope.get("tenant_id") or envelope.get("aggregate_id")
+    )
+    if not auth_tenant_id:
+        logger.info("auth.tenant.*: no tenant_id in payload — skipping")
+        return
+    auth_tenant_id = str(auth_tenant_id)
+
+    name = p.get("name") or p.get("tenant_name") or "ISP Provider"
+    slug = (p.get("slug") or p.get("tenant_slug") or "").strip().lower() or None
+    use_case = (p.get("use_case") or "").strip().lower()
+
+    # auth-api is multi-product; only mirror ISP tenants. Empty use_case is
+    # treated as ISP-eligible (older events may omit it) — adjust if auth-api
+    # always stamps a use_case.
+    if use_case and use_case not in ("isp", "isp_billing", "ispbilling", "internet"):
+        logger.info(
+            "auth.tenant.*: ignoring non-isp tenant %s (use_case=%s)",
+            auth_tenant_id,
+            use_case,
+        )
+        return
+
+    # Coerce the auth tenant UUID into a real UUID for the Organization.uuid
+    # column (kept in sync so treasury/subscriptions tenant-scoping lines up).
+    try:
+        tenant_uuid = uuidlib.UUID(auth_tenant_id)
+    except (ValueError, TypeError):
+        logger.warning("auth.tenant.*: tenant_id %s is not a valid UUID — skipping", auth_tenant_id)
+        return
+
+    async with AsyncSessionLocal() as db:
+        # 1) Match by auth_tenant_id, then by uuid (covers an org created before
+        #    this column existed whose uuid already equals the auth tenant id).
+        res = await db.execute(
+            select(Organization).where(Organization.auth_tenant_id == auth_tenant_id)
+        )
+        org: Optional[Organization] = res.scalar_one_or_none()
+        if org is None:
+            res = await db.execute(
+                select(Organization).where(Organization.uuid == tenant_uuid)
+            )
+            org = res.scalar_one_or_none()
+        # 3) Fall back to slug (links a pre-existing local org to its auth tenant).
+        if org is None and slug:
+            res = await db.execute(
+                select(Organization).where(Organization.slug == slug)
+            )
+            org = res.scalar_one_or_none()
+
+        if org is not None:
+            changed = False
+            if org.auth_tenant_id != auth_tenant_id:
+                org.auth_tenant_id = auth_tenant_id
+                changed = True
+            # Keep the local uuid == auth tenant uuid for tenant scoping.
+            if str(org.uuid) != str(tenant_uuid):
+                org.uuid = tenant_uuid
+                changed = True
+            if name and org.name != name:
+                org.name = name
+                changed = True
+            if slug and org.slug != slug:
+                # Only adopt the auth slug if it is not already taken by another org.
+                existing = await db.execute(
+                    select(Organization).where(
+                        Organization.slug == slug, Organization.id != org.id
+                    )
+                )
+                if existing.scalar_one_or_none() is None:
+                    org.slug = slug
+                    changed = True
+            if changed:
+                await db.commit()
+                logger.info(
+                    "auth.tenant.*: synced Organization %s (auth_tenant_id=%s)",
+                    org.id,
+                    auth_tenant_id,
+                )
+            else:
+                logger.info(
+                    "auth.tenant.*: Organization %s already in sync (auth_tenant_id=%s)",
+                    org.id,
+                    auth_tenant_id,
+                )
+            return
+
+        # 4) Create a fresh local Organization (the ISP HQ). De-dupe slug/email.
+        base_slug = slug or f"isp-{auth_tenant_id[:8]}"
+        final_slug = base_slug
+        suffix = 1
+        while True:
+            exists = await db.execute(
+                select(Organization).where(Organization.slug == final_slug)
+            )
+            if exists.scalar_one_or_none() is None:
+                break
+            final_slug = f"{base_slug}-{suffix}"[:100]
+            suffix += 1
+
+        org = Organization(
+            uuid=tenant_uuid,  # local uuid == auth tenant uuid (tenant scoping)
+            auth_tenant_id=auth_tenant_id,
+            name=name,
+            slug=final_slug,
+            organization_type=OrganizationType.HOTSPOT,
+            status=OrganizationStatus.TRIAL,
+            email=p.get("contact_email") or f"{final_slug}@sso.local",
+            phone=p.get("contact_phone"),
+            trial_ends_at=datetime.utcnow() + timedelta(days=14),
+        )
+        db.add(org)
+        await db.commit()
+        logger.info(
+            "auth.tenant.*: created local Organization %s (auth_tenant_id=%s slug=%s)",
+            org.id,
+            auth_tenant_id,
+            final_slug,
+        )
+        # NOTE: isp-billing has no separate Outlet/Branch model — the
+        # Organization itself is the ISP HQ, and network nodes are Routers
+        # (provisioned later). So there is no default-HQ-outlet row to create.
+
+
+async def handle_auth_user(envelope: Dict[str, Any]) -> None:
+    """Upsert the local ISP User from an auth.user.created/updated event.
+
+    auth-api is the SoT for users. We reuse the SSO JIT mapping
+    (``provision_sso_user``) by translating the event payload into the same
+    claims shape, so create + link + role-mapping logic is shared with the
+    on-first-API-call SSO path. Idempotent: re-running links/refreshes by
+    ``auth_service_user_id`` (then email) and never duplicates. Never raises out
+    of the handler (the callback naks on exception for redelivery).
+    """
+    from app.core.sso import provision_sso_user
 
     p = _payload(envelope)
     auth_user_id = p.get("user_id") or p.get("id") or envelope.get("aggregate_id")
     email = (p.get("email") or "").strip().lower() or None
     if not auth_user_id and not email:
+        logger.info("auth.user.*: no user_id/email in payload — skipping")
         return
 
+    # Translate the auth.user.* payload into the SSO-claims shape that
+    # provision_sso_user expects. tenant_slug/tenant_id let it resolve + link the
+    # local Organization (which handle_auth_tenant keeps in sync, uuid == auth
+    # tenant id), so the user is attached to the right org.
+    claims: Dict[str, Any] = {
+        "sub": str(auth_user_id) if auth_user_id else None,
+        "email": email,
+        "full_name": p.get("full_name") or p.get("name"),
+        "roles": p.get("roles") or [],
+        "tenant_id": p.get("tenant_id") or envelope.get("tenant_id"),
+        "tenant_slug": p.get("tenant_slug"),
+        "is_platform_owner": bool(p.get("is_platform_owner")),
+    }
+
     async with AsyncSessionLocal() as db:
-        user: Optional[User] = None
-        if auth_user_id:
-            res = await db.execute(
-                select(User).where(User.auth_service_user_id == str(auth_user_id))
-            )
-            user = res.scalar_one_or_none()
-        if user is None and email:
-            res = await db.execute(select(User).where(User.email == email))
-            user = res.scalar_one_or_none()
-
-        if user is None:
-            # No local user to link. We do NOT auto-create accounts here (account
-            # creation stays with the existing SSO JIT path on first API call) —
-            # this consumer only keeps already-known users in sync. Log and skip.
-            logger.info(
-                "auth.user.*: no local user for auth_id=%s email=%s — skipping sync",
-                auth_user_id,
-                email,
-            )
-            return
-
-        changed = False
-        if auth_user_id and not user.auth_service_user_id:
-            user.auth_service_user_id = str(auth_user_id)
-            changed = True
-        full_name = p.get("full_name") or p.get("name")
-        if full_name and not (user.first_name and user.last_name):
-            parts = str(full_name).split(" ", 1)
-            user.first_name = user.first_name or parts[0]
-            user.last_name = user.last_name or (parts[1] if len(parts) > 1 else parts[0])
-            changed = True
-        if changed:
-            user.auth_synced_at = datetime.utcnow()
-            await db.commit()
-            logger.info("auth.user.*: synced local user %s (auth_id=%s)", user.id, auth_user_id)
+        user = await provision_sso_user(db, claims)
+        logger.info(
+            "auth.user.*: upserted local user %s (auth_id=%s org=%s)",
+            user.id,
+            auth_user_id,
+            user.organization_id,
+        )
 
 
 async def handle_subscription(envelope: Dict[str, Any]) -> None:
@@ -209,6 +350,7 @@ async def handle_subscription(envelope: Dict[str, Any]) -> None:
 # Map a consumed subject pattern → (durable suffix, async handler).
 _ROUTES = [
     (SUB_TREASURY_PAYMENT_SUCCEEDED, "treasury-payment", handle_treasury_payment_succeeded),
+    (SUB_AUTH_TENANT, "auth-tenant", handle_auth_tenant),
     (SUB_AUTH_USER, "auth-user", handle_auth_user),
     (SUB_SUBSCRIPTION, "subscription", handle_subscription),
 ]
