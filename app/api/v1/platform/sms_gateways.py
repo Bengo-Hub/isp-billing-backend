@@ -20,8 +20,7 @@ from app.api.deps import get_db, get_current_active_user
 from app.core.config import settings
 from app.models.user import User, UserRole
 from app.models.sms_credit import SMSGatewayConfig, SMSProviderType, SMSGatewayStatus, PlatformSMSSettings
-from app.integrations.payment_gateways import PaymentGatewayFactory  # For encryption/decryption
-from app.integrations.sms.factory import SMSProviderFactory
+from app.utils.credentials import encrypt_credentials, decrypt_credentials
 
 router = APIRouter(prefix="/sms-gateways", tags=["Platform - SMS Gateways"])
 
@@ -218,34 +217,12 @@ async def get_platform_sms_balance(
             message="Gateway credentials not configured",
         )
 
+    # SMS DELIVERY (and provider balance) is owned by the central notifications-api.
+    # isp-billing no longer ships a local SMS provider, so a live provider balance
+    # lookup is not available here. We validate that the stored credentials are
+    # well-formed and report that balance lives upstream.
     try:
-        # Decrypt credentials
-        encryption_key = getattr(settings, 'encryption_key', None)
-        if encryption_key:
-            credentials = PaymentGatewayFactory._decrypt_credentials(
-                gateway.credentials, encryption_key
-            )
-        else:
-            import json
-            credentials = json.loads(gateway.credentials)
-
-        # Create provider and get balance
-        provider = await SMSProviderFactory.create(
-            provider_type=gateway.provider_type,
-            credentials=credentials,
-            is_active=gateway.is_active,
-        )
-
-        balance, currency = await provider.get_account_balance()
-
-        return PlatformSMSBalanceResponse(
-            success=True,
-            balance=balance,
-            currency=currency,
-            provider=gateway.provider_type.value,
-            environment=gateway.environment or "sandbox",
-        )
-
+        decrypt_credentials(gateway.credentials)
     except Exception as e:
         return PlatformSMSBalanceResponse(
             success=False,
@@ -253,8 +230,17 @@ async def get_platform_sms_balance(
             currency="KES",
             provider=gateway.provider_type.value,
             environment=gateway.environment or "sandbox",
-            message=str(e),
+            message=f"Invalid stored credentials: {e}",
         )
+
+    return PlatformSMSBalanceResponse(
+        success=True,
+        balance=0,
+        currency="KES",
+        provider=gateway.provider_type.value,
+        environment=gateway.environment or "sandbox",
+        message="SMS delivery and balance are managed by the central notifications-api",
+    )
 
 
 @router.get("/providers")
@@ -314,7 +300,7 @@ async def create_platform_sms_gateway(
     credentials_dict["is_sandbox"] = data.environment == "sandbox"
 
     # Encrypt credentials
-    encrypted_credentials = PaymentGatewayFactory.encrypt_credentials(credentials_dict)
+    encrypted_credentials = encrypt_credentials(credentials_dict)
 
     if existing:
         # Update existing gateway (upsert behavior)
@@ -569,7 +555,7 @@ async def update_platform_sms_gateway(
             # Add is_sandbox based on environment
             env = data.environment or gateway.environment or "sandbox"
             credentials_dict["is_sandbox"] = env == "sandbox"
-            gateway.credentials = PaymentGatewayFactory.encrypt_credentials(credentials_dict)
+            gateway.credentials = encrypt_credentials(credentials_dict)
             gateway.status = SMSGatewayStatus.PENDING_VERIFICATION
 
     await db.commit()
@@ -651,26 +637,13 @@ async def test_platform_sms_gateway(
         )
 
     try:
-        # Decrypt credentials using the same method as payment gateways
-        encryption_key = getattr(settings, 'encryption_key', None)
-        if encryption_key:
-            credentials = PaymentGatewayFactory._decrypt_credentials(gateway.credentials, encryption_key)
-        else:
-            # Development mode - try plain JSON
-            import json
-            credentials = json.loads(gateway.credentials)
+        # SMS delivery is owned by the central notifications-api. We can no longer
+        # do a live provider balance check locally; instead validate that the
+        # stored credentials decrypt to a well-formed blob and mark active.
+        credentials = decrypt_credentials(gateway.credentials)
+        if not isinstance(credentials, dict) or not credentials:
+            raise ValueError("stored credentials are empty or malformed")
 
-        # Create SMS provider instance
-        provider = await SMSProviderFactory.create(
-            provider_type=gateway.provider_type,
-            credentials=credentials,
-            is_active=gateway.is_active,
-        )
-
-        # Test connection by getting account balance
-        balance, currency = await provider.get_account_balance()
-
-        # Update gateway status
         gateway.status = SMSGatewayStatus.ACTIVE
         gateway.last_error = None
         gateway.last_error_at = None
@@ -678,11 +651,7 @@ async def test_platform_sms_gateway(
 
         return TestConnectionResponse(
             success=True,
-            message="Connection successful",
-            details={
-                "balance": float(balance),
-                "currency": currency,
-            },
+            message="Credentials valid. SMS delivery is handled by the central notifications-api.",
         )
 
     except Exception as e:

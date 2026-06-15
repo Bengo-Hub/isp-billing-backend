@@ -172,14 +172,13 @@ class WhatsAppProviderFactory:
         and any usage accounting done by the caller are unaffected — this method only
         performs the wire send. WhatsApp is never plan-blocked.
 
-        Returns a ``WhatsAppResult``. When central is enabled but unconfigured / fails,
-        or the flag is off, it delegates to ``provider.send_message`` (the existing
-        APIWAP path) so behaviour is unchanged unless explicitly switched on.
+        Returns a ``WhatsAppResult``. Central delivery (notifications-api) is the
+        primary path; if it is unconfigured or fails, it delegates to
+        ``provider.send_message`` (APIWAP) as a resilience fallback.
         """
-        from app.core.config import settings
         from .base import WhatsAppResult, WhatsAppDeliveryStatus
 
-        if getattr(settings, "use_central_notifications", False) and message_type == "text":
+        if message_type == "text":
             try:
                 from app.services.notifications_client import get_notifications_client
 

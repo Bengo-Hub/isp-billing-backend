@@ -54,14 +54,10 @@ class Settings(BaseSettings):
     internal_service_key: Optional[str] = None
 
     # ── Treasury payments (centralized — treasury-api is the ONLY path) ──
-    # CUSTOMER (hotspot) payments are fully centralized on the central
-    # treasury-api (intent → shared pay page; NATS consumer + get_status poll for
-    # confirmation). isp-billing no longer has its own customer-payment gateway
-    # path, so this flag is now forced True and retained only for backward
-    # compatibility with any env that still sets USE_TREASURY_PAYMENTS — the
-    # purchase path no longer branches on it. Setting it False has no effect on
-    # the customer purchase flow.
-    use_treasury_payments: bool = True
+    # ALL payments (customer hotspot/PPPoE purchases, SMS-credit + WhatsApp
+    # top-ups) are centralized on the central treasury-api (intent → shared pay
+    # page; NATS consumer + get_status poll for confirmation). isp-billing has no
+    # local payment-gateway path anymore; there is no flag to disable this.
     # Internal (S2S) base URL for treasury-api — used for create-intent / get-status
     # calls authenticated with internal_service_key (X-API-Key). e.g.
     # http://treasury-api.finance.svc.cluster.local:8080
@@ -85,20 +81,14 @@ class Settings(BaseSettings):
     # Request timeout (seconds) for S2S subscriptions calls.
     subscriptions_request_timeout: float = 10.0
 
-    # ── Central notifications-api (Phase 4, ADDITIVE / FLAGGED) ──
-    # Internal (S2S) base URL for the central notifications-api, used to route
-    # notification DELIVERY (SMS / WhatsApp / email) instead of calling the
-    # local SMS/WhatsApp providers directly. Authenticated with
-    # internal_service_key (X-API-Key). e.g.
-    # http://notifications-api.bengobox.svc.cluster.local:4000
+    # ── Central notifications-api (centralized — the ONLY delivery path) ──
+    # Internal (S2S) base URL for the central notifications-api, which owns ALL
+    # notification DELIVERY (SMS / WhatsApp / email). isp-billing no longer has
+    # local SMS/WhatsApp/email providers. Authenticated with internal_service_key
+    # (X-API-Key). e.g. http://notifications-api.bengobox.svc.cluster.local:4000
     #
-    # IMPORTANT: this moves DELIVERY only. All SMS-credit and WhatsApp-subscription
+    # IMPORTANT: this is DELIVERY only. All SMS-credit and WhatsApp-subscription
     # BILLING / top-up / usage logic stays local in isp-billing.
-    #
-    # use_central_notifications is the master switch. Default False so nothing
-    # changes until explicitly enabled — when off, the existing direct-provider
-    # delivery path is used unchanged.
-    use_central_notifications: bool = False
     notifications_api_url: Optional[str] = None
     # Request timeout (seconds) for S2S notifications calls.
     notifications_request_timeout: float = 10.0
