@@ -123,26 +123,45 @@ async def get_current_user_oauth2(
 
 
 async def get_current_user(
+    request: Request,
     token: str = Depends(security_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    """Get current authenticated user (supports both OAuth2 and Bearer token)."""
+    """Get current authenticated user.
+
+    Accepts EITHER the local HS256 JWT (back-compat, tried first) OR a central
+    SSO RS256 JWT (validated via JWKS, JIT-provisioned on first sight). The entire
+    API authorizes through this resolver — directly, or via get_current_active_user
+    and the tenant/org dependencies in deps_tenant.py / deps_org.py — so making it
+    SSO-aware lets every protected endpoint serve SSO-authenticated users, not just
+    /auth/me. Previously SSO tokens 401'd everywhere except the unified endpoints.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Not authenticated",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
+    # 1) Local HS256 JWT first (unchanged back-compat path).
     token_data = verify_token(token)
-    if token_data is None:
+    if token_data is not None:
+        user_service = UserService(db)
+        user = await user_service.get_by_id(token_data.user_id)
+        if user is not None:
+            return user
         raise credentials_exception
 
-    user_service = UserService(db)
-    user = await user_service.get_by_id(token_data.user_id)
-    if user is None:
-        raise credentials_exception
+    # 2) SSO RS256 fall-through — validate via JWKS + JIT-provision/link. Stash
+    #    the claims on request.state for downstream enrichment/gating (mirrors
+    #    get_current_user_unified).
+    from app.core.sso import get_optional_sso_claims, provision_sso_user
 
-    return user
+    claims = await get_optional_sso_claims(request)
+    if claims is not None:
+        request.state.sso_claims = claims
+        return await provision_sso_user(db, claims)
+
+    raise credentials_exception
 
 
 # ──────────────────────────────────────────────────────────────────────────
