@@ -328,6 +328,7 @@ def _collect_effective_permissions(user: User) -> list:
 @router.get("/me")
 async def get_current_user_info(
     request: Request,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_unified),
 ):
     """Get current user information (wrapped in `data`).
@@ -338,6 +339,27 @@ async def get_current_user_info(
     """
     user_payload = UserSchema.model_validate(current_user).model_dump()
     user_payload["permissions"] = _collect_effective_permissions(current_user)
+
+    # Always include the org slug/name so the UI can build the role-based
+    # dashboard URL (/{slug}/dashboard) even when the SSO token didn't carry a
+    # tenant_slug claim (e.g. a direct login without ?tenant=). Resolved from
+    # organization_id with an explicit query — the relationship is not eager-
+    # loaded on SSO-provisioned users, so a lazy access would fail under async.
+    user_payload["organization_slug"] = None
+    user_payload["organization_name"] = None
+    if current_user.organization_id:
+        from sqlalchemy import select
+        from app.models.organization import Organization
+        org_row = (
+            await db.execute(
+                select(Organization.slug, Organization.name).where(
+                    Organization.id == current_user.organization_id
+                )
+            )
+        ).first()
+        if org_row:
+            user_payload["organization_slug"] = org_row[0]
+            user_payload["organization_name"] = org_row[1]
 
     # Enrich with SSO context when the request was SSO-authenticated.
     claims = getattr(request.state, "sso_claims", None)
