@@ -178,7 +178,7 @@ class Settings(BaseSettings):
     mikrotik_api_password: str = "Vertex2020!"  # MUST be changed via env variable
 
     # Router Agent (polling agent installed on MikroTik routers)
-    agent_default_poll_interval: int = 30  # seconds between agent polls
+    agent_default_poll_interval: int = 10  # seconds between agent polls (low so hotspot create_user lands fast for post-redeem/payment auto-login)
     agent_offline_threshold_multiplier: int = 3  # offline if no poll in interval * multiplier
     agent_command_expiry_hours: int = 1  # default command expiry
     agent_max_commands_per_poll: int = 10  # max commands returned per poll

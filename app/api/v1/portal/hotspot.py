@@ -879,6 +879,64 @@ async def redeem_voucher(
     )
 
 
+@router.get("/{org_slug}/connection-status")
+async def get_connection_status(
+    org_slug: str,
+    username: str = Query(..., description="Hotspot username to check readiness for"),
+    db: AsyncSession = Depends(get_db),
+    organization: Organization = Depends(get_organization_by_slug),
+):
+    """Report whether the hotspot user has actually been created on the router.
+
+    The captive page polls this right after a voucher redeem / confirmed payment
+    so it can AUTO-LOGIN the moment the user exists, instead of submitting the
+    login form blindly ~600ms later and racing the agent's create_user (which
+    only lands on the agent's next poll). For direct-API (non-agent / VPN-reachable)
+    routers the user is created synchronously, so there is no queued command and
+    we report ready immediately.
+
+    Public endpoint (captive client is unauthenticated).
+    """
+    from app.models.router_command import RouterCommand, CommandStatus
+
+    router_result = await db.execute(
+        select(Router).where(
+            Router.organization_id == organization.id,
+            Router.is_active == True,
+        ).limit(1)
+    )
+    router_obj = router_result.scalar_one_or_none()
+    if not router_obj:
+        return {"ready": False, "status": "no_router"}
+
+    # Most recent create_user command for this username on the org's router.
+    # params is a JSON column; filter in Python over a bounded recent window to
+    # avoid depending on a JSON ->> operator cast.
+    cmd_result = await db.execute(
+        select(RouterCommand)
+        .where(
+            RouterCommand.router_id == router_obj.id,
+            RouterCommand.action == "create_user",
+        )
+        .order_by(RouterCommand.created_at.desc())
+        .limit(50)
+    )
+    cmd = next(
+        (c for c in cmd_result.scalars().all() if (c.params or {}).get("username") == username),
+        None,
+    )
+
+    # No queued command => direct path already created the user (or the router
+    # has no agent), so there is nothing to wait on.
+    if cmd is None:
+        return {"ready": True, "status": "ready"}
+    if cmd.status == CommandStatus.SUCCESS:
+        return {"ready": True, "status": "ready"}
+    if cmd.status == CommandStatus.FAILED:
+        return {"ready": False, "status": "failed", "message": cmd.result_message}
+    return {"ready": False, "status": "pending"}
+
+
 @router.get("/{org_slug}/session/status", response_model=SessionStatusResponse)
 async def get_session_status(
     org_slug: str,
