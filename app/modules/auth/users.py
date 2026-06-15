@@ -255,14 +255,24 @@ class UserService:
         size: int = 20,
         status: Optional[UserStatus] = None,
         search: Optional[str] = None,
+        outlet_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Get ISP customer users (CUSTOMER role) for a tenant."""
+        """Get ISP customer users (CUSTOMER role) for a tenant.
+
+        ``outlet_id`` (Phase 5, ADDITIVE multi-outlet scope) is an OPTIONAL extra
+        filter. It is only applied when both a value is supplied AND the User
+        model actually has an ``outlet_id`` column — so it is a safe no-op today
+        (no such column yet) and becomes active automatically once an outlet
+        column is added, without changing this signature again.
+        """
         query = select(User).where(User.role == UserRole.CUSTOMER)
 
         if organization_id is not None:
             query = query.where(User.organization_id == organization_id)
         if status:
             query = query.where(User.status == status)
+        if outlet_id is not None and hasattr(User, "outlet_id"):
+            query = query.where(User.outlet_id == outlet_id)
         query = self._apply_search(query, search)
         return await self._paginated_query(query, page, size)
 

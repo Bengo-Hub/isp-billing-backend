@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
     get_current_user,
+    get_outlet_id,
     get_pagination_params,
     PaginationParams,
     require_technician_or_admin,
@@ -26,12 +27,17 @@ async def get_customer_users(
     search: Optional[str] = Query(None, description="Search in username, email, or name"),
     organization_id: Optional[int] = Query(None, description="Filter by organization (platform owners only)"),
     current_user: User = Depends(require_technician_or_admin()),
+    outlet_id: Optional[int] = Depends(get_outlet_id),
     db: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
     """Get ISP customer users.
 
     Platform owners can optionally filter by organization_id.
     ISP staff are automatically scoped to their own organization.
+
+    Phase 5 (ADDITIVE): when an ``X-Outlet-ID`` header is present it further
+    scopes results to that outlet. Optional — omitting it preserves the existing
+    org-wide behavior exactly.
     """
     user_service = UserService(db)
 
@@ -46,6 +52,7 @@ async def get_customer_users(
         size=pagination.size,
         status=status,
         search=search,
+        outlet_id=outlet_id,
     )
 
     result["users"] = [UserSchema.model_validate(u) for u in result["users"]]
