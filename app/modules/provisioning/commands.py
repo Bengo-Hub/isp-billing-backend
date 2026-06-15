@@ -692,6 +692,14 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
     # Default walled garden hosts for the captive portal
     walled_garden_hosts = list(config.get("walled_garden_hosts", []))
 
+    # Cloud portal/API hostnames (NON-wildcard) that an unauthenticated client must
+    # reach over HTTPS *before* it can buy/redeem. We also pin these by resolved IP
+    # below (see the :resolve walled-garden-ip block) because MikroTik's by-host
+    # (SNI) walled-garden does NOT reliably pass unauth HTTPS — the TLS connection
+    # gets swept into the hs-unauth redirect and is closed (ERR_CONNECTION_CLOSED),
+    # so the buy page never loads even though the captive redirect itself fired.
+    cloud_hosts: List[str] = []
+
     # Auto-add billing server to walled garden if configured
     billing_server = config.get("billing_server_url", "")
     if billing_server:
@@ -702,6 +710,8 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
             billing_host = match.group(1)
             if billing_host not in walled_garden_hosts:
                 walled_garden_hosts.append(billing_host)
+            if not _re.match(r'^[0-9.]+$', billing_host) and billing_host not in cloud_hosts:
+                cloud_hosts.append(billing_host)
 
     # Add API server to walled garden (for package purchases)
     api_server = config.get("api_server_url", "")
@@ -711,6 +721,8 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
             api_host = match.group(1)
             if api_host not in walled_garden_hosts:
                 walled_garden_hosts.append(api_host)
+            if not _re.match(r'^[0-9.]+$', api_host) and api_host not in cloud_hosts:
+                cloud_hosts.append(api_host)
 
     # Add common payment gateways to walled garden (for online payments)
     payment_hosts = [
@@ -779,16 +791,18 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
         "spectrum.s3.amazonaws.com",
     ]
 
-    # Add DNS static entries pointing to hotspot gateway with short TTL
-    for domain in captive_portal_detection_domains:
-        commands.append(
-            {
-                "type": "api_call",
-                "command": f'/ip/dns/static/add name="{domain}" address={gateway} ttl=1m comment=codevertex-captive-portal-detection',
-                "description": f"DNS static entry for captive portal detection: {domain}",
-                "critical": False,
-            }
-        )
+    # IMPORTANT: We intentionally DO NOT hijack these probe domains to the gateway
+    # anymore. Diagnosis (Playwright captive-probe on a live RB951) proved the hijack
+    # BACKFIRES: pointing e.g. connectivitycheck.gstatic.com/generate_204 at the
+    # gateway IP makes it a *local* request, which the hotspot serves from its login
+    # server as a plain 404 — NOT the 302 redirect the OS needs — so the
+    # "Sign in to network" popup never fires. The non-hijacked control (neverssl.com)
+    # was correctly 302-redirected to the buy page by the standard hs-unauth
+    # intercept. So we let probe domains resolve to their REAL IPs and rely on the
+    # built-in HTTP interception (rule: hs-unauth -> redirect to login) to issue the
+    # 302, which is exactly what triggers the captive popup. The list above is kept
+    # only so the clean-slate step can purge any hijack entries left by older runs.
+    _ = captive_portal_detection_domains  # retained for clean-slate removal only
 
     # =========================================================================
     # DNS REDIRECT NAT RULES - Force ALL DNS traffic through the router
@@ -895,6 +909,30 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
                 "type": "api_call",
                 "command": f"/ip/hotspot/walled-garden/ip/add dst-address={ip} action=accept comment=codevertex-portal",
                 "description": f"Allow unauthenticated access to IP {ip}",
+                "critical": False,
+            }
+        )
+
+    # CRITICAL: Pin the cloud portal/API hostnames to the walled-garden BY IP.
+    # The by-host (SNI) entries above are necessary for HTTP but do NOT reliably let
+    # an unauthenticated client complete an HTTPS handshake to the cloud — the TLS
+    # connection is swept into the hs-unauth redirect and closed
+    # (ERR_CONNECTION_CLOSED), so the buy page never loads even after the captive
+    # redirect fires. Resolving the hostname ON THE ROUTER (so we get the PUBLIC IP,
+    # not an internal/cluster IP the backend pod might see) and accepting that IP
+    # lets the HTTPS pass straight through to the real server (which presents its own
+    # valid cert). on-error guarded: if DNS fails at provision time the by-host entry
+    # still serves HTTP. comment=codevertex-portal-ip so clean-slate can re-pin it.
+    for _host in cloud_hosts:
+        commands.append(
+            {
+                "type": "api_call",
+                "command": (
+                    f':do {{ /ip/hotspot/walled-garden/ip/add '
+                    f'dst-address=[:resolve "{_host}"] action=accept '
+                    f'comment=codevertex-portal-ip }} on-error={{}}'
+                ),
+                "description": f"Pin cloud host {_host} to walled-garden by resolved IP (unauth HTTPS passthrough)",
                 "critical": False,
             }
         )
