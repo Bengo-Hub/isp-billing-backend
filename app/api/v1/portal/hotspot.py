@@ -593,6 +593,143 @@ async def _sync_hotspot_user_to_router(
         return None
 
 
+async def _purchase_via_treasury(
+    *,
+    db: AsyncSession,
+    request: Request,
+    organization: Organization,
+    org_slug: str,
+    plan: ServicePlan,
+    data: "PurchaseRequest",
+) -> Optional[PurchaseResponse]:
+    """Create a treasury payment intent and return the shared pay-page checkout.
+
+    ADDITIVE Phase-2 path (only called when settings.use_treasury_payments). The
+    intent is created under the ISP's tenant UUID with source_service="isp", so
+    treasury attributes + settles the revenue to that ISP. A local
+    CustomerPurchase snapshot is still written (status "pending") with the
+    treasury intent id stored on it, so the existing payment/status poller can
+    verify the intent and run the unchanged voucher + hotspot-user provisioning.
+
+    Returns a PurchaseResponse whose checkout_url is the treasury-ui pay page
+    (with redirect back to isp-billing's payment/callback). Returns None when
+    treasury cannot be used (not configured / call failed) so the caller can
+    fall back to the direct-gateway flow rather than hard-breaking the purchase.
+    """
+    from app.services.treasury_client import TreasuryClient, TreasuryError
+
+    client = TreasuryClient()
+    if not client.is_configured:
+        logger.warning(
+            "use_treasury_payments is on but treasury client is not configured; "
+            "falling back to direct gateway for org %s",
+            organization.id,
+        )
+        return None
+
+    import uuid
+
+    reference = f"HS-{organization.slug[:6].upper()}-{uuid.uuid4().hex[:8].upper()}"
+    client_ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent", "")
+
+    # Local snapshot first (so the poller can find it by reference even if the
+    # browser returns before treasury's webhook/poll confirms).
+    purchase = CustomerPurchase(
+        organization_id=organization.id,
+        phone_number=data.phone_number,
+        email=data.email,
+        plan_id=plan.id,
+        amount=plan.price,
+        currency=plan.currency,
+        payment_method="treasury",
+        payment_reference=reference,
+        payment_status="pending",
+        ip_address=client_ip,
+        user_agent=user_agent,
+    )
+    db.add(purchase)
+    await db.commit()
+
+    # Build the isp-billing callback the customer returns to after paying. We
+    # pass reference={our payment_reference} so the existing callback poll of
+    # /payment/status?reference=... resolves THIS CustomerPurchase (and thus the
+    # Phase-0 captive-device login still runs).
+    origin = request.headers.get("origin", "") or (app_settings_frontend_url() or "")
+    redirect_url = (
+        f"{origin}/payment/callback"
+        f"?payment_type=hotspot_purchase&org={org_slug}&reference={reference}"
+    )
+
+    try:
+        intent = await client.create_payment_intent(
+            tenant=str(organization.uuid),
+            amount=str(plan.price),
+            currency=plan.currency,
+            reference_id=reference,
+            reference_type="hotspot_purchase",
+            source_service="isp",
+            description=f"{plan.name} - {organization.name}",
+            idempotency_key=reference,
+            customer_email=data.email,
+            customer_phone=data.phone_number or None,
+            callback_url=redirect_url,
+            metadata={
+                "organization_id": organization.id,
+                "plan_id": plan.id,
+                "purchase_id": purchase.id,
+                "payment_reference": reference,
+            },
+        )
+    except TreasuryError as exc:
+        logger.error("treasury create_payment_intent failed for %s: %s", reference, exc)
+        # Mark the snapshot failed and fall back to direct gateway.
+        purchase.payment_status = "failed"
+        await db.commit()
+        return None
+
+    intent_id = intent.get("intent_id") or intent.get("id")
+    if not intent_id:
+        logger.error("treasury intent response missing intent_id: %s", intent)
+        purchase.payment_status = "failed"
+        await db.commit()
+        return None
+
+    purchase.treasury_payment_intent_id = str(intent_id)
+    purchase.payment_status = "processing"
+    await db.commit()
+
+    checkout_url = client.build_pay_page_url(
+        tenant=str(organization.uuid),
+        intent_id=str(intent_id),
+        amount=str(plan.price),
+        currency=plan.currency,
+        reference_id=reference,
+        reference_type="hotspot_purchase",
+        redirect_url=redirect_url,
+        description=f"{plan.name} - {organization.name}",
+        initiate_url=intent.get("initiate_url"),
+        button_text="Start Browsing",
+    )
+
+    return PurchaseResponse(
+        success=True,
+        reference=reference,
+        message="Choose a payment method to complete your purchase.",
+        checkout_url=checkout_url,
+        status="pending",
+    )
+
+
+def app_settings_frontend_url() -> Optional[str]:
+    """Frontend base URL used to build the treasury return/callback URL when the
+    request carries no Origin header (e.g. server-initiated). Falls back to the
+    configured frontend_url setting."""
+    from app.core.config import settings as _s
+
+    return _s.frontend_url
+
+
 @router.post("/{org_slug}/purchase", response_model=PurchaseResponse)
 async def purchase_package(
     org_slug: str,
@@ -622,6 +759,28 @@ async def purchase_package(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Package not found"
         )
+
+    # ── Phase 2 (ADDITIVE): treasury-api payment path, behind a config flag ──
+    # When settings.use_treasury_payments is True, route the customer payment
+    # through the central treasury-api (invoice-first intent + shared pay page)
+    # instead of isp-billing's own Paystack/M-PESA gateways. The direct-gateway
+    # path below is left untouched and remains the default + fallback.
+    from app.core.config import settings as app_settings
+
+    if app_settings.use_treasury_payments:
+        result = await _purchase_via_treasury(
+            db=db,
+            request=request,
+            organization=organization,
+            org_slug=org_slug,
+            plan=plan,
+            data=data,
+        )
+        if result is not None:
+            return result
+        # _purchase_via_treasury returns None only when treasury is not usable
+        # for this org (e.g. unconfigured); fall through to the direct gateway so
+        # the flag never hard-breaks a working purchase.
 
     # Determine gateway type based on payment method
     requested_gateway_type = None
@@ -1114,6 +1273,77 @@ async def get_payment_status(
             "is_completed": False,
             "message": "Payment reference not found",
         }
+
+    # Phase 2 (ADDITIVE): when the purchase was routed through treasury, verify
+    # the intent status against treasury-api (the confirmation source) instead
+    # of the local Paystack gateway. On success we run the SAME voucher +
+    # hotspot-user provisioning, so the response still carries the credentials
+    # the Phase-0 captive callback needs.
+    if (
+        purchase.payment_status == "processing"
+        and purchase.treasury_payment_intent_id
+    ):
+        try:
+            from app.services.treasury_client import TreasuryClient, TreasuryError
+
+            client = TreasuryClient()
+            if client.is_configured:
+                intent = await client.get_status(
+                    tenant=str(organization.uuid),
+                    intent_id=purchase.treasury_payment_intent_id,
+                )
+                treasury_status = str(intent.get("status", "")).lower()
+                if treasury_status in ("succeeded", "success", "completed", "paid"):
+                    logger.info(
+                        "treasury intent %s succeeded for reference %s, provisioning",
+                        purchase.treasury_payment_intent_id,
+                        reference,
+                    )
+                    await _process_successful_payment(db, purchase, organization)
+                elif treasury_status in ("failed", "cancelled", "canceled", "expired"):
+                    purchase.payment_status = "failed"
+                    await db.commit()
+        except TreasuryError as e:
+            logger.error("Error verifying treasury intent for %s: %s", reference, e)
+            # Keep current status; the customer can retry / webhook may land.
+
+        # Re-evaluate completion below using the (possibly updated) status.
+        is_completed = purchase.payment_status in ["completed", "failed"]
+        is_success = purchase.payment_status == "completed"
+        response = {
+            "status": purchase.payment_status,
+            "is_completed": is_completed,
+            "message": "Payment successful" if is_success else (
+                "Payment failed" if purchase.payment_status == "failed" else "Payment pending"
+            ),
+        }
+        if is_success and purchase.voucher_code_id:
+            voucher_result = await db.execute(
+                select(VoucherCode).where(VoucherCode.id == purchase.voucher_code_id)
+            )
+            voucher = voucher_result.scalar_one_or_none()
+            if voucher:
+                response["voucher_code"] = voucher.code
+                response["username"] = voucher.hotspot_username
+                response["password"] = voucher.hotspot_password
+                if voucher.hotspot_username:
+                    response["hotspot_username"] = voucher.hotspot_username
+                    response["hotspot_password"] = voucher.hotspot_password
+                    router_result = await db.execute(
+                        select(Router).where(
+                            Router.organization_id == organization.id,
+                            Router.is_active == True,
+                        ).limit(1)
+                    )
+                    router_obj = router_result.scalar_one_or_none()
+                    if router_obj:
+                        gw = _resolve_hotspot_gateway(router_obj)
+                        response["login_url"] = (
+                            f"http://{gw}/login"
+                            f"?username={voucher.hotspot_username}"
+                            f"&password={voucher.hotspot_password}"
+                        )
+        return response
 
     # If payment is still processing, try to verify with gateway (webhook fallback)
     if purchase.payment_status == "processing":
