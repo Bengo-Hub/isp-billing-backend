@@ -153,7 +153,7 @@ async def assign_lead(
 @router.post("/{lead_id}/convert", response_model=Lead)
 async def convert_lead(
     lead_id: int,
-    converted_to_user_id: int = Query(..., description="Customer user ID"),
+    converted_to_user_id: Optional[int] = Query(None, description="Customer user ID (optional; lead is marked converted even if not linked)"),
     org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

@@ -152,18 +152,24 @@ class ServicePlan(Base):
             hours = min(hours, self.time_limit) if hours > 0 else self.time_limit
         return hours
 
-    def access_expiry_from(self, activated_at):
+    def access_expiry_from(self, activated_at, fallback_churn_days: int | None = None):
         """Absolute access expiry for a package activated at ``activated_at``.
 
-        Returns ``None`` when there is no finite window (caller decides — e.g. rely
-        on router-side time/data limits instead).
+        When the plan defines a finite window (validity_days / time_limit) that
+        binds. Otherwise — a plan with NO specific duration — we churn the user
+        after ``fallback_churn_days`` (the ISP's configured auto_suspend_days,
+        default 14) so unlimited/duration-less packages don't grant access
+        forever. Returns ``None`` only when there is neither a plan window nor a
+        churn fallback (caller then relies purely on router-side limits).
         """
         from datetime import timedelta
 
         hours = self.access_window_hours()
-        if hours <= 0:
-            return None
-        return activated_at + timedelta(hours=hours)
+        if hours > 0:
+            return activated_at + timedelta(hours=hours)
+        if fallback_churn_days and fallback_churn_days > 0:
+            return activated_at + timedelta(days=fallback_churn_days)
+        return None
 
     def __repr__(self) -> str:
         """String representation."""

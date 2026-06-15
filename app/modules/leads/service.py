@@ -164,7 +164,7 @@ class LeadService:
     async def convert_lead(
         self,
         lead_id: int,
-        converted_to_user_id: int
+        converted_to_user_id: Optional[int] = None
     ) -> Optional[Lead]:
         """Convert a lead to a customer."""
         lead = await self.get_by_id(lead_id)

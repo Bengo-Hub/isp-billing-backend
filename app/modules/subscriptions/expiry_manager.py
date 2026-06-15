@@ -38,9 +38,16 @@ from app.models.customer_portal import (
     CustomerPurchase,
 )
 from app.integrations.mikrotik import get_mikrotik_client
+from app.models.organization import OrganizationSettings
 from .router_sync import SubscriptionRouterSyncService
 
 logger = get_logger(__name__)
+
+# Default churn window (days) applied to a hotspot/PPPoE account that has NO
+# specific duration on its plan. The ISP can override per-tenant via
+# OrganizationSettings.auto_suspend_days; this is the system fallback so that a
+# duration-less ("unlimited") package never grants access forever.
+DEFAULT_CHURN_DAYS = 14
 
 
 class SubscriptionExpiryManager:
@@ -89,6 +96,33 @@ class SubscriptionExpiryManager:
         try:
             # Find expired subscriptions
             grace_cutoff = datetime.utcnow() - timedelta(minutes=grace_period_minutes)
+
+            # CHURN duration-less subscriptions: a PPPoE/hotspot Subscription created
+            # with NO end_date (no specific duration) would otherwise never expire.
+            # Backfill an effective end_date = start + the org's auto_suspend_days
+            # (default 14) so it enters the normal expiry path once the churn window
+            # passes. Idempotent (recomputes the same date from start each run).
+            churn_cache: Dict[int, int] = {}
+            perpetual = (
+                await self.db.execute(
+                    select(Subscription)
+                    .where(
+                        Subscription.status == SubscriptionStatus.ACTIVE,
+                        Subscription.end_date.is_(None),
+                    )
+                    .limit(batch_size)
+                )
+            ).scalars().all()
+            for _sub in perpetual:
+                _start = _sub.start_date or _sub.created_at
+                if not _start:
+                    continue
+                _churn_days = await self._churn_days_for_org(
+                    _sub.organization_id, churn_cache
+                )
+                _sub.end_date = _start + timedelta(days=_churn_days)
+            if perpetual:
+                await self.db.flush()
 
             expired_query = select(Subscription).where(
                 and_(
@@ -169,6 +203,33 @@ class SubscriptionExpiryManager:
             results["errors"].append({"error": str(e), "stage": "query"})
             return results
 
+    async def _churn_days_for_org(self, org_id: Optional[int], cache: Dict[int, int]) -> int:
+        """Configured churn window (days) for an org's duration-less accounts.
+
+        Reads OrganizationSettings.auto_suspend_days, falling back to
+        DEFAULT_CHURN_DAYS (14) when unset/zero or settings are missing. Cached
+        per call so a batch loop does one query per org, not per row.
+        """
+        if org_id is None:
+            return DEFAULT_CHURN_DAYS
+        if org_id in cache:
+            return cache[org_id]
+        days = DEFAULT_CHURN_DAYS
+        try:
+            settings = (
+                await self.db.execute(
+                    select(OrganizationSettings).where(
+                        OrganizationSettings.organization_id == org_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if settings and settings.auto_suspend_days and settings.auto_suspend_days > 0:
+                days = settings.auto_suspend_days
+        except Exception:  # pragma: no cover - defensive; fall back to default
+            days = DEFAULT_CHURN_DAYS
+        cache[org_id] = days
+        return days
+
     async def process_expired_hotspot_users(
         self,
         grace_period_minutes: int = 2,
@@ -235,6 +296,7 @@ class SubscriptionExpiryManager:
             )
 
             results["checked"] = len(candidates)
+            churn_cache: Dict[int, int] = {}
 
             for voucher, activated_at in candidates:
                 try:
@@ -251,9 +313,14 @@ class SubscriptionExpiryManager:
 
                     # Effective window honours BOTH validity_days and time_limit
                     # (a "1 hour" package has validity_days=1 but time_limit=1h).
-                    expiry = plan.access_expiry_from(activated_at)
+                    # A duration-less plan churns after the org's auto_suspend_days
+                    # (default 14) so "unlimited" packages don't last forever.
+                    churn_days = await self._churn_days_for_org(
+                        voucher.organization_id, churn_cache
+                    )
+                    expiry = plan.access_expiry_from(activated_at, fallback_churn_days=churn_days)
                     if expiry is None:
-                        # No finite window (e.g. unlimited) -> rely on router-side
+                        # No plan window AND no churn fallback -> rely on router-side
                         # time/data limits; nothing to expire here.
                         continue
                     if now <= expiry + timedelta(minutes=grace_period_minutes):
