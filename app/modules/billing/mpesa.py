@@ -20,12 +20,23 @@ from app.core.logging import get_logger
 from app.core.exceptions import ExternalServiceError, ValidationError, BillingError
 from app.models.billing import Payment, PaymentStatus, PaymentMethod
 from app.models.user import User
-from app.integrations.payment_gateways.mpesa import (
-    MPesaPaybillGateway,
-    MPesaValidationError,
-)
+
+# NOTE (Phase 3 cleanup): the local M-PESA gateway integration package was removed —
+# customer/tenant payment initiation + confirmation are centralized on treasury-api.
+# MpesaService is retained importable for back-compat; its gateway-backed methods now
+# report that direct M-PESA processing is unavailable (use treasury-api instead).
 
 logger = get_logger(__name__)
+
+
+class MPesaValidationError(Exception):
+    """Retained local validation error (gateway package removed)."""
+
+
+_GATEWAY_RETIRED_MSG = (
+    "Direct M-PESA gateway processing has been retired in isp-billing — "
+    "payment initiation/confirmation is now handled by treasury-api."
+)
 
 
 def _get_mpesa_config() -> Dict[str, Any]:
@@ -68,18 +79,11 @@ class MpesaService:
         self.db = db
         self.logger = get_logger(__name__)
         self.environment = environment
-        self._is_configured = _is_mpesa_configured()
-
-        if self._is_configured:
-            config = _get_mpesa_config()
-            config["credentials"]["environment"] = environment
-            self.gateway = MPesaPaybillGateway(config)
-        else:
-            self.gateway = None
-            self.logger.warning(
-                "MPESA service initialized with incomplete credentials. "
-                "MPESA functionality will be disabled."
-            )
+        # Gateway integration retired (Phase 2/3) — treasury-api owns M-PESA
+        # initiation/confirmation. The service stays importable for back-compat but
+        # reports itself unconfigured so all gateway-backed methods short-circuit.
+        self._is_configured = False
+        self.gateway = None
 
     @property
     def is_configured(self) -> bool:
@@ -197,8 +201,10 @@ class MpesaService:
             if not payment:
                 raise ValidationError("Payment record not found")
 
-            # Update payment status based on MPESA response
-            from app.integrations.payment_gateways.base import PaymentStatus as GatewayPaymentStatus
+            # Update payment status based on MPESA response.
+            # (Gateway status enum retired with the integration package; aliased to the
+            # local enum so this now-unreachable branch references a defined name.)
+            from app.models.billing import PaymentStatus as GatewayPaymentStatus
 
             if result.status == GatewayPaymentStatus.COMPLETED:
                 payment.status = PaymentStatus.COMPLETED

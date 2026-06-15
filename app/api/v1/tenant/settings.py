@@ -400,32 +400,16 @@ async def get_subscription_details(
 
     ISP Admin only.
     """
-    from app.models.platform_billing import PlatformSubscriptionTier
-
-    tier = None
-    if organization.subscription_tier_id:
-        result = await db.execute(
-            select(PlatformSubscriptionTier).where(
-                PlatformSubscriptionTier.id == organization.subscription_tier_id
-            )
-        )
-        tier = result.scalar_one_or_none()
-
+    # Plan/tier is owned by subscriptions-api now (the UI reads it via the
+    # subscriptions service / link-out). We return only the local subscription
+    # status + limits snapshot here.
     return {
         "subscription_status": organization.subscription_status,
         "trial_ends_at": organization.trial_ends_at.isoformat() if organization.trial_ends_at else None,
         "subscription_expires_at": organization.subscription_expires_at.isoformat() if organization.subscription_expires_at else None,
         "is_subscription_active": organization.is_subscription_active,
         "days_remaining": organization.subscription_days_remaining,
-        "current_tier": {
-            "id": tier.id,
-            "name": tier.name,
-            "description": tier.description,
-            "base_monthly_fee": float(tier.base_monthly_fee) if tier.base_monthly_fee else None,
-            "max_routers": tier.max_routers,
-            "max_customers": tier.max_customers,
-            "features": tier.features,
-        } if tier else None,
+        "current_tier": None,
         "limits": {
             "max_routers": organization.max_routers,
             "max_customers": organization.max_customers,

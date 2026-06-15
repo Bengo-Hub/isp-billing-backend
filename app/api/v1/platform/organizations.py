@@ -17,7 +17,7 @@ from app.api.deps import get_db
 from app.api.deps_tenant import require_platform_owner
 from app.models.organization import Organization, OrganizationSettings, OrganizationType, OrganizationStatus
 from app.models.user import User
-from app.modules.platform_billing.service import PlatformBillingService
+from app.models.platform_billing import EarningsRecord
 
 router = APIRouter(prefix="/organizations", tags=["Platform - Organizations"])
 
@@ -44,7 +44,6 @@ class OrganizationCreate(BaseModel):
     notification_email: Optional[str] = None
     notification_phone: Optional[str] = None
     sms_sender_id: Optional[str] = None
-    subscription_tier_id: Optional[int] = None
     trial_days: int = 14
     max_routers: int = 5
     max_customers: int = 100
@@ -66,7 +65,6 @@ class OrganizationUpdate(BaseModel):
     portal_domain: Optional[str] = None
     portal_title: Optional[str] = None
     portal_description: Optional[str] = None
-    subscription_tier_id: Optional[int] = None
     max_routers: Optional[int] = None
     max_customers: Optional[int] = None
     max_users: Optional[int] = None
@@ -90,7 +88,6 @@ class OrganizationResponse(BaseModel):
     logo_url: Optional[str]
     primary_color: str
     portal_domain: Optional[str]
-    subscription_tier_id: Optional[int]
     trial_ends_at: Optional[datetime]
     subscription_ends_at: Optional[datetime]
     max_routers: int
@@ -150,8 +147,9 @@ async def list_organizations(
 
     Platform owner only.
     """
-    # Only show ISP organizations (exclude platform org which has subscription_tier_id = NULL)
-    query = select(Organization).where(Organization.subscription_tier_id.isnot(None))
+    # Only show ISP organizations synced from auth (exclude any local platform org
+    # which has no auth_tenant_id).
+    query = select(Organization).where(Organization.auth_tenant_id.isnot(None))
 
     if status:
         query = query.where(Organization.status == status)
@@ -185,7 +183,6 @@ async def list_organizations(
         org_dict['uuid'] = str(org.uuid)  # Convert UUID to string
 
         # Add missing fields that to_dict() doesn't include
-        org_dict['subscription_tier_id'] = org.subscription_tier_id
         org_dict['trial_ends_at'] = org.trial_ends_at
         org_dict['subscription_ends_at'] = org.subscription_ends_at
 
@@ -219,7 +216,7 @@ async def get_organization_stats(
     # Total counts by status (exclude platform org)
     result = await db.execute(
         select(Organization.status, func.count(Organization.id))
-        .where(Organization.subscription_tier_id.isnot(None))
+        .where(Organization.auth_tenant_id.isnot(None))
         .group_by(Organization.status)
     )
     status_counts = {row[0]: row[1] for row in result.all()}
@@ -230,7 +227,7 @@ async def get_organization_stats(
         select(func.count(Organization.id))
         .where(
             Organization.created_at >= first_of_month,
-            Organization.subscription_tier_id.isnot(None)
+            Organization.auth_tenant_id.isnot(None)
         )
     )
     new_this_month = new_result.scalar() or 0
@@ -305,7 +302,6 @@ async def create_organization(
         notification_email=data.notification_email,
         notification_phone=data.notification_phone,
         sms_sender_id=data.sms_sender_id,
-        subscription_tier_id=data.subscription_tier_id,
         trial_ends_at=trial_ends_at,
         max_routers=data.max_routers,
         max_customers=data.max_customers,
@@ -493,16 +489,24 @@ async def suspend_organization(
 
     Platform owner only.
     """
-    billing_service = PlatformBillingService(db)
-    success = await billing_service.suspend_organization(organization_id, reason)
-
-    if not success:
+    result = await db.execute(
+        select(Organization).where(Organization.id == organization_id)
+    )
+    organization = result.scalar_one_or_none()
+    if not organization:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Organization not found"
         )
 
-    return {"message": "Organization suspended"}
+    organization.status = OrganizationStatus.SUSPENDED
+    organization.suspended_at = datetime.utcnow()
+    if reason:
+        organization.bypass_reason = None  # ensure no stale bypass keeps it active
+    organization.updated_by = current_user.id
+    await db.commit()
+
+    return {"message": "Organization suspended", "reason": reason}
 
 
 @router.post("/{organization_id}/reactivate")
@@ -516,16 +520,24 @@ async def reactivate_organization(
 
     Platform owner only.
     """
-    billing_service = PlatformBillingService(db)
-    success = await billing_service.reactivate_organization(organization_id)
-
-    if not success:
+    result = await db.execute(
+        select(Organization).where(Organization.id == organization_id)
+    )
+    organization = result.scalar_one_or_none()
+    if not organization:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot reactivate organization. Subscription may not be active."
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found"
         )
 
-    return {"message": "Organization reactivated"}
+    # Restore to TRIAL or ACTIVE based on remaining subscription window.
+    organization.status = OrganizationStatus.TRIAL if organization.is_trial else OrganizationStatus.ACTIVE
+    organization.suspended_at = None
+    organization.grace_period_ends_at = None
+    organization.updated_by = current_user.id
+    await db.commit()
+
+    return {"message": "Organization reactivated", "status": organization.status.value}
 
 
 @router.post("/{organization_id}/extend")
@@ -684,15 +696,23 @@ async def get_organization_earnings(
     if not end_date:
         end_date = datetime.utcnow()
 
-    billing_service = PlatformBillingService(db)
-    total_earnings, customer_count = await billing_service.get_organization_earnings(
-        organization_id, start_date, end_date
+    # Earnings are tracked locally in EarningsRecord (daily rollups).
+    earnings_result = await db.execute(
+        select(
+            func.coalesce(func.sum(EarningsRecord.net_amount), 0),
+            func.coalesce(func.sum(EarningsRecord.new_customers), 0),
+        ).where(
+            EarningsRecord.organization_id == organization_id,
+            EarningsRecord.date >= start_date,
+            EarningsRecord.date <= end_date,
+        )
     )
+    total_earnings, customer_count = earnings_result.one()
 
     return {
         "organization_id": organization_id,
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "total_earnings": float(total_earnings),
-        "customer_count": customer_count,
+        "total_earnings": float(total_earnings or 0),
+        "customer_count": int(customer_count or 0),
     }

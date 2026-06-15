@@ -13,7 +13,6 @@ from app.core.database import get_db
 from app.core.exceptions import ValidationError
 from app.models.user import User
 from app.models.billing import InvoiceStatus, PaymentStatus, PaymentMethod
-from app.models.platform_billing import BillingCycle
 from app.schemas.billing import (
     Invoice, InvoiceCreate, InvoiceUpdate, InvoiceList, InvoiceFilter,
     InvoiceItem, InvoiceItemCreate, InvoiceItemUpdate, Payment, PaymentCreate,
@@ -22,8 +21,9 @@ from app.schemas.billing import (
     InvoiceGenerationRequest, BulkInvoiceGenerationRequest
 )
 from app.modules.billing import BillingService
-from app.modules.platform_billing.schemas import PlatformInvoiceResponse
-from app.modules.platform_billing.service import PlatformBillingService
+
+# NOTE: the ISP-provider platform-subscription renewal endpoint was removed —
+# platform billing is owned by the central subscriptions-api now.
 
 router = APIRouter()
 
@@ -485,71 +485,3 @@ async def get_overdue_invoices(
     service = BillingService(db)
     invoices = await service.get_overdue_invoices()
     return invoices
-
-
-# Platform Subscription Renewal for ISP Admins
-class SubscriptionRenewalRequest(BaseModel):
-    """Request schema for subscription renewal."""
-    billing_cycle: BillingCycle = BillingCycle.MONTHLY
-
-
-@router.post("/subscription/renew", response_model=PlatformInvoiceResponse, status_code=status.HTTP_201_CREATED)
-async def renew_subscription(
-    renewal_request: SubscriptionRenewalRequest,
-    current_user: User = Depends(require_admin()),
-    db: AsyncSession = Depends(get_db),
-) -> PlatformInvoiceResponse:
-    """
-    Create a renewal invoice for the ISP admin's organization subscription.
-
-    This endpoint allows ISP admins to generate their own platform subscription
-    renewal invoice before initiating payment via Paystack.
-    """
-    if not current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User is not associated with an organization"
-        )
-
-    platform_billing_service = PlatformBillingService(db)
-
-    # Calculate the billing period for renewal
-    now = datetime.utcnow()
-
-    # Calculate period based on billing cycle
-    if renewal_request.billing_cycle == BillingCycle.MONTHLY:
-        billing_period_start = now
-        billing_period_end = now + timedelta(days=30)
-    elif renewal_request.billing_cycle == BillingCycle.QUARTERLY:
-        billing_period_start = now
-        billing_period_end = now + timedelta(days=90)
-    elif renewal_request.billing_cycle == BillingCycle.YEARLY:
-        billing_period_start = now
-        billing_period_end = now + timedelta(days=365)
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid billing cycle: {renewal_request.billing_cycle}"
-        )
-
-    try:
-        # Generate the platform invoice
-        invoice = await platform_billing_service.generate_invoice(
-            organization_id=current_user.organization_id,
-            billing_period_start=billing_period_start,
-            billing_period_end=billing_period_end,
-            billing_cycle=renewal_request.billing_cycle,
-        )
-
-        return PlatformInvoiceResponse.model_validate(invoice)
-
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate renewal invoice: {str(e)}"
-        )

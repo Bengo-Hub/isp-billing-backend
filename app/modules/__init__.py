@@ -25,10 +25,6 @@ _module_mapping = {
     "RouterService": ("app.modules.routers", "RouterService"),
     "MikroTikOperations": ("app.modules.routers", "MikroTikOperations"),
     "DeviceOperations": ("app.modules.routers", "DeviceOperations"),
-    # Licences
-    "LicenceService": ("app.modules.licences", "LicenceService"),
-    "KeyOperations": ("app.modules.licences", "KeyOperations"),
-    "AnalyticsOperations": ("app.modules.licences", "AnalyticsOperations"),
     # System
     "ConfigurationService": ("app.modules.system", "ConfigurationService"),
     "initialization_service": ("app.modules.system", "initialization_service"),

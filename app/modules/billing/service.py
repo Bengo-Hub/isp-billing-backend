@@ -21,15 +21,22 @@ from app.models.billing import (
 )
 from app.models.subscription import Subscription, SubscriptionStatus
 from app.models.user import User
-from app.models.payment_gateway import PaymentGatewayConfig, PaymentTransaction, GatewayType
+from app.models.payment_gateway import PaymentTransaction
 from app.modules.billing.mpesa import MpesaService
-from app.integrations.payment_gateways import PaymentGatewayFactory
-from app.integrations.payment_gateways.base import PaymentStatus as GatewayPaymentStatus
 from app.api.deps import PaginationParams
 from app.core.logging import get_logger
 from app.core.exceptions import BillingError, PaymentError, ValidationError
 from app.core.datetime_utils import normalize_datetime
 from app.core.tenant_middleware import get_current_organization_id
+
+# NOTE (Phase 2/3): the local payment-gateway integration package was removed —
+# customer/tenant payment initiation + confirmation are centralized on treasury-api.
+# The Paystack helpers below are retained importable but report that direct gateway
+# charging is unavailable (callers should initiate payment via treasury-api).
+_GATEWAY_RETIRED_MSG = (
+    "Direct payment-gateway charging has been retired in isp-billing — "
+    "payments are now initiated and confirmed via treasury-api."
+)
 
 
 class BillingService:
@@ -573,99 +580,12 @@ class BillingService:
         Returns:
             Dict with checkout_url, reference, and status
         """
-        try:
-            # Get invoice
-            invoice = await self.get_invoice_by_id(invoice_id)
-            if not invoice:
-                return {"success": False, "error": "Invoice not found"}
-
-            if invoice.status == InvoiceStatus.PAID:
-                return {"success": False, "error": "Invoice is already paid"}
-
-            # Get user details
-            user = await self.db.get(User, invoice.user_id)
-            if not user:
-                return {"success": False, "error": "User not found"}
-
-            email = user_email or user.email or f"{user.phone}@customer.local"
-            phone = user_phone or user.phone or ""
-
-            # Get active Paystack gateway
-            gateway_config = await self._get_active_paystack_gateway()
-            if not gateway_config:
-                return {"success": False, "error": "Paystack gateway not configured"}
-
-            # Generate unique reference
-            reference = await self._generate_paystack_reference(invoice.invoice_number)
-
-            # Create transaction record
-            transaction = PaymentTransaction(
-                organization_id=invoice.organization_id if hasattr(invoice, 'organization_id') else 1,
-                gateway_id=gateway_config.id,
-                transaction_reference=reference,
-                amount=invoice.balance,
-                currency=invoice.currency if hasattr(invoice, 'currency') else "KES",
-                transaction_type="payment",
-                status="pending",
-                invoice_id=invoice_id,
-                subscription_id=invoice.subscription_id,
-                user_id=invoice.user_id,
-                phone_number=phone,
-                account_reference=invoice.invoice_number,
-            )
-            self.db.add(transaction)
-            await self.db.commit()
-            await self.db.refresh(transaction)
-
-            # Initialize payment with Paystack gateway
-            gateway = PaymentGatewayFactory.create(gateway_config)
-            initiation_result = await gateway.initiate_payment(
-                amount=invoice.balance,
-                phone_number=phone,
-                reference=reference,
-                description=f"Payment for invoice {invoice.invoice_number}",
-                callback_url=callback_url,
-                metadata={
-                    "email": email,
-                    "invoice_id": invoice_id,
-                    "subscription_id": invoice.subscription_id,
-                    "user_id": invoice.user_id,
-                    "invoice_number": invoice.invoice_number,
-                },
-            )
-
-            if initiation_result.success:
-                # Update transaction with gateway reference
-                transaction.external_reference = initiation_result.gateway_reference
-                transaction.extra_data = initiation_result.metadata
-                await self.db.commit()
-
-                self.logger.info(
-                    f"Paystack payment initiated for invoice {invoice.invoice_number}: ref={reference}"
-                )
-
-                return {
-                    "success": True,
-                    "checkout_url": initiation_result.checkout_url,
-                    "reference": reference,
-                    "access_code": initiation_result.metadata.get("access_code") if initiation_result.metadata else None,
-                }
-            else:
-                # Update transaction status to failed
-                transaction.status = "failed"
-                transaction.status_message = initiation_result.message
-                await self.db.commit()
-
-                self.logger.error(
-                    f"Paystack payment initiation failed for invoice {invoice.invoice_number}: "
-                    f"{initiation_result.message}"
-                )
-
-                return {"success": False, "error": initiation_result.message}
-
-        except Exception as e:
-            self.logger.error(f"Paystack payment initiation error: {e}")
-            return {"success": False, "error": str(e)}
+        # Retired: direct Paystack charging now routes through treasury-api.
+        self.logger.warning(
+            "initiate_paystack_payment called but local gateway charging is retired "
+            f"(invoice={invoice_id}); route via treasury-api."
+        )
+        return {"success": False, "error": _GATEWAY_RETIRED_MSG}
 
     async def verify_paystack_payment(self, reference: str) -> Dict[str, Any]:
         """
@@ -677,63 +597,12 @@ class BillingService:
         Returns:
             Dict with verification status and details
         """
-        try:
-            # Get transaction record
-            tx_result = await self.db.execute(
-                select(PaymentTransaction).where(
-                    PaymentTransaction.transaction_reference == reference
-                )
-            )
-            transaction = tx_result.scalar_one_or_none()
-
-            if not transaction:
-                return {"success": False, "status": "not_found", "message": "Transaction not found"}
-
-            # Get gateway
-            gateway_config = await self._get_active_paystack_gateway()
-            if not gateway_config:
-                return {"success": False, "status": "error", "message": "Paystack gateway not configured"}
-
-            # Verify with gateway
-            gateway = PaymentGatewayFactory.create(gateway_config)
-            verification = await gateway.verify_payment(reference)
-
-            result = {
-                "success": verification.success,
-                "status": verification.status.value if verification.status else "pending",
-                "message": verification.message,
-            }
-
-            if verification.success:
-                result["data"] = {
-                    "reference": reference,
-                    "amount": float(verification.amount) if verification.amount else None,
-                    "currency": verification.currency,
-                    "paid_at": verification.paid_at.isoformat() if verification.paid_at else None,
-                }
-
-                # Process successful payment if not already processed
-                if transaction.status != "completed":
-                    await self._process_paystack_success(
-                        transaction,
-                        verification.amount or Decimal("0"),
-                        verification.paid_at,
-                    )
-            else:
-                # Update transaction status
-                if verification.status == GatewayPaymentStatus.FAILED:
-                    transaction.status = "failed"
-                elif verification.status == GatewayPaymentStatus.CANCELLED:
-                    transaction.status = "cancelled"
-
-                transaction.status_message = verification.message
-                await self.db.commit()
-
-            return result
-
-        except Exception as e:
-            self.logger.error(f"Paystack verification error: {e}")
-            return {"success": False, "status": "error", "message": str(e)}
+        # Retired: payment verification is owned by treasury-api.
+        self.logger.warning(
+            f"verify_paystack_payment called but local gateway verification is retired "
+            f"(ref={reference}); treasury-api is the source of truth."
+        )
+        return {"success": False, "status": "error", "message": _GATEWAY_RETIRED_MSG}
 
     async def handle_paystack_webhook(
         self,
@@ -851,13 +720,6 @@ class BillingService:
             # Activate subscription if linked
             if transaction.subscription_id:
                 await self._activate_subscription_on_payment(transaction.subscription_id)
-
-            # Update gateway stats
-            gateway = await self.db.get(PaymentGatewayConfig, transaction.gateway_id)
-            if gateway:
-                gateway.total_transactions = (gateway.total_transactions or 0) + 1
-                gateway.total_amount = (gateway.total_amount or Decimal("0")) + amount
-                gateway.last_transaction_at = datetime.utcnow()
 
             await self.db.commit()
 
@@ -1021,24 +883,6 @@ class BillingService:
 
         except Exception as e:
             self.logger.error(f"Error activating WhatsApp subscription for invoice {invoice_id}: {e}")
-
-    async def _get_active_paystack_gateway(self) -> Optional[PaymentGatewayConfig]:
-        """
-        Get the active platform-level Paystack gateway configuration.
-
-        Uses the platform admin's Paystack gateway (organization_id IS NULL)
-        to ensure consistent payment processing across all organizations.
-        """
-        result = await self.db.execute(
-            select(PaymentGatewayConfig).where(
-                and_(
-                    PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
-                    PaymentGatewayConfig.is_active == True,
-                    PaymentGatewayConfig.organization_id.is_(None),  # Platform-level gateway
-                )
-            ).limit(1)
-        )
-        return result.scalar_one_or_none()
 
     async def _generate_paystack_reference(self, prefix: str = "PAY") -> str:
         """Generate unique Paystack transaction reference."""
