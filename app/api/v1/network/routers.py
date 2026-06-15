@@ -445,6 +445,21 @@ async def get_router_action_script(
             f":log info \"CVACTION: limits set for {u}\"\n"
         )
 
+    if action == "set_api_password":
+        # Sync the router's management/API user password to the backend's stored
+        # copy after a rotation, so the backend's direct-API path keeps working.
+        # The password is read from the DB here (NOT passed in the fetch URL), so
+        # it is never logged in the agent's queued URL.
+        uname = router_obj.username or "admin"
+        pw = router_obj.password or ""
+        if not pw:
+            return ":log warning \"CVACTION: set_api_password no stored password\"\n"
+        return (
+            f":do {{ /user set [find name=\"{uname}\"] password=\"{pw}\" }} "
+            f"on-error={{ :log warning \"CVACTION: set_api_password failed\" }}\n"
+            ":log info \"CVACTION: API user password synced\"\n"
+        )
+
     if action == "sync_hotspot":
         org_slug = ""
         if router_obj.organization_id:
@@ -1310,6 +1325,15 @@ async def regenerate_winbox_credentials(
 
     # Update router password in database
     await service.update_router(router_id, {"password": new_password})
+
+    # Push the new password to the router's API user so the backend's direct-API
+    # path stays in sync with the DB (NAT-safe via the agent; the set_api_password
+    # action-script reads the new password from the DB, not from the URL/logs).
+    try:
+        if getattr(router_obj, "agent_installed", False) and getattr(router_obj, "agent_token", None):
+            await _queue_agent_action(db, router_obj, "set_api_password", current_user.id)
+    except Exception:
+        pass
 
     # Get remote Winbox URL if configured
     remote_winbox_url = await service.get_winbox_url(router_id)
