@@ -206,6 +206,46 @@ def map_global_roles_to_isp_role(
     return UserRole.CUSTOMER
 
 
+def _isp_role_to_rbac_role_name(role: UserRole) -> str:
+    """Map the ISP ``UserRole`` enum to the seeded RBAC ``Role.name``.
+
+    The RBAC ``Role`` row (seeded in ``_seed_rbac``) is what actually carries the
+    permission set; these names must match the roles created there
+    (superuser / admin / technician / customer).
+    """
+    return {
+        UserRole.PLATFORM_OWNER: "superuser",
+        UserRole.ISP_ADMIN: "admin",
+        UserRole.ISP_TECHNICIAN: "technician",
+        UserRole.CUSTOMER: "customer",
+    }.get(role, "customer")
+
+
+async def _sync_role_obj(db: AsyncSession, user: User) -> None:
+    """Link ``user.role_obj`` to the RBAC ``Role`` matching ``user.role``.
+
+    SSO/JIT provisioning sets the ``UserRole`` enum column but historically never
+    linked the ``Role`` FK. Because the permission set lives on the ``Role``
+    (``role_obj.permissions``), an unlinked ``role_obj`` makes ``/auth/me`` return
+    an empty ``permissions`` list for every SSO user. This (idempotently) resolves
+    the matching Role — with its permissions eagerly loaded — and assigns it.
+    Only writes when the link is missing or stale.
+    """
+    from app.models.rbac import Role
+    from sqlalchemy.orm import selectinload
+
+    desired = _isp_role_to_rbac_role_name(user.role)
+    # Always (re)assign rather than reading the current role_obj first: reading the
+    # relationship on a freshly-refreshed user could trigger an async lazy-load,
+    # whereas *setting* it never does, and re-assigning the same Role is harmless.
+    res = await db.execute(
+        select(Role).where(Role.name == desired).options(selectinload(Role.permissions))
+    )
+    role = res.scalar_one_or_none()
+    if role is not None:
+        user.role_obj = role
+
+
 async def _resolve_organization_id(
     db: AsyncSession, claims: Dict[str, Any]
 ) -> Optional[int]:
@@ -316,9 +356,15 @@ async def provision_sso_user(db: AsyncSession, claims: Dict[str, Any]) -> User:
                 user.role = isp_role
         if org_id is not None and user.organization_id is None and not is_platform_owner:
             user.organization_id = org_id
+        # Link the RBAC Role (carries the permission set) to the (possibly just
+        # updated) enum role. Heals already-provisioned SSO users whose role_obj
+        # was never linked — the cause of empty /auth/me permissions.
+        await _sync_role_obj(db, user)
         await db.commit()
-        await db.refresh(user)
-        return user
+        # Re-fetch with RBAC relationships eagerly loaded so downstream readers
+        # (e.g. /auth/me) can access role_obj.permissions without a lazy load.
+        res = await db.execute(select(User).where(User.id == user.id).options(*eager))
+        return res.scalar_one()
 
     # 3) Create a fresh local user (JIT).
     first, last = _split_name(claims.get("full_name"), email)
@@ -352,6 +398,9 @@ async def provision_sso_user(db: AsyncSession, claims: Dict[str, Any]) -> User:
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    # Link the RBAC Role so role_obj.permissions resolves for /auth/me.
+    await _sync_role_obj(db, user)
+    await db.commit()
     logger.info(
         "JIT-provisioned SSO user id=%s email=%s role=%s org=%s",
         user.id, user.email, isp_role.value, user.organization_id,
