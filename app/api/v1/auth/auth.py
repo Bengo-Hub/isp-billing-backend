@@ -3,11 +3,16 @@
 from datetime import timedelta, datetime
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_pagination_params, PaginationParams
+from app.api.deps import (
+    get_current_user,
+    get_current_user_unified,
+    get_pagination_params,
+    PaginationParams,
+)
 from app.core.database import get_db
 from app.core.security import create_token_pair, verify_token
 from app.models.user import User
@@ -279,21 +284,14 @@ async def logout(
     return {"message": "Successfully logged out"}
 
 
-@router.get("/me")
-async def get_current_user_info(
-    current_user: User = Depends(get_current_user),
-):
-    """Get current user information (wrapped in `data`)."""
-    # Convert SQLAlchemy model to Pydantic schema
-    user_payload = UserSchema.model_validate(current_user).model_dump()
-
-    # Attach effective permissions
-    permissions = []
-    seen = set()
+def _collect_effective_permissions(user: User) -> list:
+    """Compute a user's effective permissions (role-derived + overrides)."""
+    permissions: list = []
+    seen: set = set()
     now = datetime.utcnow()
 
-    if getattr(current_user, "role_obj", None) and getattr(current_user.role_obj, "permissions", None):
-        for p in current_user.role_obj.permissions:
+    if getattr(user, "role_obj", None) and getattr(user.role_obj, "permissions", None):
+        for p in user.role_obj.permissions:
             permissions.append({
                 "id": p.id,
                 "module": p.module.value if hasattr(p.module, "value") else str(p.module),
@@ -303,7 +301,7 @@ async def get_current_user_info(
             })
             seen.add(p.id)
 
-    for up in getattr(current_user, "permission_overrides", []) or []:
+    for up in getattr(user, "permission_overrides", []) or []:
         if up.expires_at and up.expires_at < now:
             continue
         p = up.permission
@@ -324,8 +322,73 @@ async def get_current_user_info(
             if p.id in seen:
                 seen.remove(p.id)
 
-    user_payload["permissions"] = permissions
+    return permissions
+
+
+@router.get("/me")
+async def get_current_user_info(
+    request: Request,
+    current_user: User = Depends(get_current_user_unified),
+):
+    """Get current user information (wrapped in `data`).
+
+    Phase 1b: now resolves via the unified dependency, so it works for BOTH
+    local-JWT and SSO-authenticated users. When the request arrived via SSO,
+    the payload is enriched with `global_roles` + tenant context from the JWT.
+    """
+    user_payload = UserSchema.model_validate(current_user).model_dump()
+    user_payload["permissions"] = _collect_effective_permissions(current_user)
+
+    # Enrich with SSO context when the request was SSO-authenticated.
+    claims = getattr(request.state, "sso_claims", None)
+    if claims:
+        user_payload["auth_source"] = "sso"
+        user_payload["global_roles"] = claims.get("roles") or []
+        user_payload["tenant_id"] = claims.get("tenant_id")
+        user_payload["tenant_slug"] = claims.get("tenant_slug")
+        user_payload["is_platform_owner"] = bool(claims.get("is_platform_owner"))
+    else:
+        user_payload["auth_source"] = "local"
+
     return {"data": user_payload}
+
+
+@router.get("/sso-me")
+async def get_sso_current_user_info(
+    request: Request,
+    current_user: User = Depends(get_current_user_unified),
+):
+    """SSO-oriented identity view (wrapped in `data`).
+
+    Returns the resolved local identity plus the global SSO context: user_id,
+    email, tenant_id/slug, global_roles, the resolved ISP role, and the
+    effective local-RBAC permissions. Works for SSO users (full context) and
+    local users (global_roles empty, auth_source=local).
+    """
+    claims = getattr(request.state, "sso_claims", None) or {}
+    return {
+        "data": {
+            "user_id": current_user.id,
+            "auth_service_user_id": current_user.auth_service_user_id,
+            "email": current_user.email,
+            "full_name": current_user.full_name,
+            "tenant_id": claims.get("tenant_id"),
+            "tenant_slug": claims.get("tenant_slug"),
+            "organization_id": current_user.organization_id,
+            "global_roles": claims.get("roles") or [],
+            "isp_role": current_user.role.value if current_user.role else None,
+            "is_platform_owner": bool(claims.get("is_platform_owner")) or current_user.is_platform_owner,
+            "auth_source": "sso" if claims else "local",
+            "subscription": {
+                "status": claims.get("sub_status"),
+                "plan": claims.get("sub_plan"),
+                "features": claims.get("sub_features") or [],
+                "limits": claims.get("sub_limits") or {},
+                "expires": claims.get("sub_expires"),
+            } if claims else None,
+            "permissions": _collect_effective_permissions(current_user),
+        }
+    }
 
 
 @router.post("/verify")

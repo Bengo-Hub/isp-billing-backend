@@ -145,6 +145,68 @@ async def get_current_user(
     return user
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Unified current-user (Phase 1b): accept EITHER the existing local HS256 JWT
+# OR a central SSO RS256 JWT (with JIT provisioning). Local path is tried
+# first for full back-compat; SSO is a fall-through. Nothing here changes the
+# behavior of the local-only ``get_current_user`` above.
+# ──────────────────────────────────────────────────────────────────────────
+async def get_current_user_unified(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Resolve the current user from a local JWT or an SSO JWT.
+
+    Order:
+    1. Local HS256 JWT (existing behavior, unchanged) — back-compat first.
+    2. SSO RS256 JWT -> validate via JWKS -> JIT-provision/link a local User.
+
+    The resolved SSO claims (when present) are stashed on ``request.state.sso_claims``
+    for downstream enrichment/gating.
+    """
+    from app.core.sso import get_optional_sso_claims, provision_sso_user, _extract_bearer
+    from app.core.security import verify_token as _verify_local
+
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    token = _extract_bearer(request)
+    if not token:
+        raise credentials_exception
+
+    # 1) Local JWT first (back-compat). verify_token returns None on RS256/SSO.
+    token_data = _verify_local(token)
+    if token_data is not None:
+        user_service = UserService(db)
+        user = await user_service.get_by_id(token_data.user_id)
+        if user is not None:
+            return user
+        raise credentials_exception
+
+    # 2) SSO fall-through (RS256). JIT-provision on first sight.
+    claims = await get_optional_sso_claims(request)
+    if claims is not None:
+        request.state.sso_claims = claims
+        return await provision_sso_user(db, claims)
+
+    raise credentials_exception
+
+
+async def get_current_active_user_unified(
+    current_user: User = Depends(get_current_user_unified),
+) -> User:
+    """Active-user variant of the unified (local-or-SSO) dependency."""
+    if not current_user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Inactive user",
+        )
+    return current_user
+
+
 async def get_current_active_user(
     current_user: User = Depends(get_current_user),
 ) -> User:
@@ -274,3 +336,58 @@ def get_pagination_params(
 ) -> PaginationParams:
     """Get pagination parameters."""
     return PaginationParams(page=page, size=size)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Subscription gating (Phase 1b) — OPT-IN dependency.
+#
+# For MUTATING requests (POST/PUT/PATCH/DELETE) made by an SSO user who is NOT
+# a platform owner / superuser, returns 403 {code: "subscription_inactive",
+# upgrade: true} when the SSO subscription status is not ACTIVE. Reads (GET,
+# HEAD, OPTIONS) are always allowed. Local-JWT users and S2S callers are NOT
+# gated (no SSO subscription claims), preserving existing behavior.
+#
+# This is a DEPENDENCY (not global middleware) precisely so it is never
+# accidentally applied to the public captive-portal / hotspot / pppoe routes.
+# Wire it into ISP-admin business routers only, e.g.:
+#     router = APIRouter(dependencies=[Depends(enforce_subscription_active)])
+# ──────────────────────────────────────────────────────────────────────────
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+async def enforce_subscription_active(request: Request) -> None:
+    """Gate mutating SSO requests on an ACTIVE subscription. Opt-in."""
+    if request.method.upper() in _SAFE_METHODS:
+        return
+
+    from app.core.sso import get_optional_sso_claims, is_internal_service_request
+
+    # Trusted S2S callers bypass subscription gating.
+    if is_internal_service_request(request):
+        return
+
+    # Only SSO-authenticated requests carry subscription claims. Local-JWT
+    # users have none and are intentionally not gated here (back-compat).
+    claims = getattr(request.state, "sso_claims", None)
+    if claims is None:
+        claims = await get_optional_sso_claims(request)
+    if claims is None:
+        return
+
+    # Platform owners / superusers are never gated.
+    if claims.get("is_platform_owner"):
+        return
+    roles = {str(r).strip().lower() for r in (claims.get("roles") or [])}
+    if roles & {"platform_owner", "superuser"}:
+        return
+
+    sub_status = str(claims.get("sub_status", "")).strip().upper()
+    if sub_status != "ACTIVE":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "subscription_inactive",
+                "upgrade": True,
+                "message": "An active subscription is required for this action.",
+            },
+        )
