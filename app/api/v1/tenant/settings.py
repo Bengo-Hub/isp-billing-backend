@@ -103,11 +103,34 @@ class BrandingSettingsResponse(BaseModel):
     portal_welcome_message: Optional[str] = None
 
 
+class BrandingSettingsUpdate(BaseModel):
+    """Schema for updating branding settings (JSON body)."""
+
+    logo_url: Optional[str] = None
+    favicon_url: Optional[str] = None
+    primary_color: Optional[str] = None
+    secondary_color: Optional[str] = None
+    custom_css: Optional[str] = None
+    portal_title: Optional[str] = None
+    portal_welcome_message: Optional[str] = None
+
+
 class BusinessSettingsResponse(BaseModel):
     """Schema for business settings response."""
 
     currency: str
     tax_rate: float
+    invoice_prefix: Optional[str] = None
+    invoice_notes: Optional[str] = None
+    terms_and_conditions: Optional[str] = None
+    privacy_policy: Optional[str] = None
+
+
+class BusinessSettingsUpdate(BaseModel):
+    """Schema for updating business settings (JSON body)."""
+
+    currency: Optional[str] = None
+    tax_rate: Optional[float] = None
     invoice_prefix: Optional[str] = None
     invoice_notes: Optional[str] = None
     terms_and_conditions: Optional[str] = None
@@ -229,13 +252,7 @@ async def get_branding_settings(
 
 @router.patch("/branding", response_model=BrandingSettingsResponse)
 async def update_branding_settings(
-    logo_url: Optional[str] = None,
-    favicon_url: Optional[str] = None,
-    primary_color: Optional[str] = None,
-    secondary_color: Optional[str] = None,
-    custom_css: Optional[str] = None,
-    portal_title: Optional[str] = None,
-    portal_welcome_message: Optional[str] = None,
+    data: BrandingSettingsUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_isp_admin),
     organization: Organization = Depends(get_current_organization),
@@ -245,11 +262,12 @@ async def update_branding_settings(
 
     ISP Admin only.
     """
-    # Update organization fields
-    if logo_url is not None:
-        organization.logo_url = logo_url
-    if primary_color is not None:
-        organization.primary_color = primary_color
+    # Update organization fields (primary_color/logo_url live on Organization,
+    # which is what the captive portal config reads).
+    if data.logo_url is not None:
+        organization.logo_url = data.logo_url
+    if data.primary_color is not None:
+        organization.primary_color = data.primary_color
 
     # Get or create settings
     result = await db.execute(
@@ -263,16 +281,16 @@ async def update_branding_settings(
         settings = OrganizationSettings(organization_id=organization.id)
         db.add(settings)
 
-    if favicon_url is not None:
-        settings.favicon_url = favicon_url
-    if secondary_color is not None:
-        settings.secondary_color = secondary_color
-    if custom_css is not None:
-        settings.custom_css = custom_css
-    if portal_title is not None:
-        settings.portal_title = portal_title
-    if portal_welcome_message is not None:
-        settings.portal_welcome_message = portal_welcome_message
+    if data.favicon_url is not None:
+        settings.favicon_url = data.favicon_url
+    if data.secondary_color is not None:
+        settings.secondary_color = data.secondary_color
+    if data.custom_css is not None:
+        settings.custom_css = data.custom_css
+    if data.portal_title is not None:
+        settings.portal_title = data.portal_title
+    if data.portal_welcome_message is not None:
+        settings.portal_welcome_message = data.portal_welcome_message
 
     await db.commit()
     await db.refresh(organization)
@@ -320,12 +338,7 @@ async def get_business_settings(
 
 @router.patch("/business", response_model=BusinessSettingsResponse)
 async def update_business_settings(
-    currency: Optional[str] = None,
-    tax_rate: Optional[float] = None,
-    invoice_prefix: Optional[str] = None,
-    invoice_notes: Optional[str] = None,
-    terms_and_conditions: Optional[str] = None,
-    privacy_policy: Optional[str] = None,
+    data: BusinessSettingsUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_isp_admin),
     organization: Organization = Depends(get_current_organization),
@@ -336,8 +349,8 @@ async def update_business_settings(
     ISP Admin only.
     """
     # Update organization fields
-    if currency is not None:
-        organization.currency = currency
+    if data.currency is not None:
+        organization.currency = data.currency
 
     # Get or create settings
     result = await db.execute(
@@ -351,16 +364,16 @@ async def update_business_settings(
         settings = OrganizationSettings(organization_id=organization.id)
         db.add(settings)
 
-    if tax_rate is not None:
-        settings.tax_rate = tax_rate
-    if invoice_prefix is not None:
-        settings.invoice_prefix = invoice_prefix
-    if invoice_notes is not None:
-        settings.invoice_notes = invoice_notes
-    if terms_and_conditions is not None:
-        settings.terms_and_conditions = terms_and_conditions
-    if privacy_policy is not None:
-        settings.privacy_policy = privacy_policy
+    if data.tax_rate is not None:
+        settings.tax_rate = data.tax_rate
+    if data.invoice_prefix is not None:
+        settings.invoice_prefix = data.invoice_prefix
+    if data.invoice_notes is not None:
+        settings.invoice_notes = data.invoice_notes
+    if data.terms_and_conditions is not None:
+        settings.terms_and_conditions = data.terms_and_conditions
+    if data.privacy_policy is not None:
+        settings.privacy_policy = data.privacy_policy
 
     await db.commit()
     await db.refresh(organization)
