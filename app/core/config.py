@@ -83,6 +83,28 @@ class Settings(BaseSettings):
     # Request timeout (seconds) for S2S subscriptions calls.
     subscriptions_request_timeout: float = 10.0
 
+    # ── Central notifications-api (Phase 4, ADDITIVE / FLAGGED) ──
+    # Internal (S2S) base URL for the central notifications-api, used to route
+    # notification DELIVERY (SMS / WhatsApp / email) instead of calling the
+    # local SMS/WhatsApp providers directly. Authenticated with
+    # internal_service_key (X-API-Key). e.g.
+    # http://notifications-api.bengobox.svc.cluster.local:4000
+    #
+    # IMPORTANT: this moves DELIVERY only. All SMS-credit and WhatsApp-subscription
+    # BILLING / top-up / usage logic stays local in isp-billing.
+    #
+    # use_central_notifications is the master switch. Default False so nothing
+    # changes until explicitly enabled — when off, the existing direct-provider
+    # delivery path is used unchanged.
+    use_central_notifications: bool = False
+    notifications_api_url: Optional[str] = None
+    # Request timeout (seconds) for S2S notifications calls.
+    notifications_request_timeout: float = 10.0
+    # Tenant id used on the notifications-api send endpoint path
+    # (POST /{tenant_id}/notifications/messages). May be an Organization.uuid or
+    # the platform tenant slug; when empty the caller-supplied tenant_id is used.
+    notifications_tenant_id: Optional[str] = None
+
     # Encryption (NEW)
     encryption_key: Optional[str] = None
     master_password: Optional[str] = None

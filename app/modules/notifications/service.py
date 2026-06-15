@@ -166,6 +166,16 @@ class NotificationService:
         message: str
     ) -> Dict[str, Any]:
         """Send SMS notification using platform gateway credentials."""
+        # Phase 4 (ADDITIVE/FLAGGED): route DELIVERY via the central
+        # notifications-api when enabled. This path carries no local SMS-credit
+        # accounting (that lives in SMSSendingService), so there is nothing to
+        # preserve here beyond the send itself. SMS is never plan-blocked.
+        if getattr(settings, "use_central_notifications", False):
+            central = await self._send_central_sms(to_phone, message)
+            if central is not None:
+                return central
+            # central not configured / failed → fall through to direct gateway
+
         try:
             from sqlalchemy import and_
             from app.models.sms_credit import SMSGatewayConfig, SMSProviderType, SMSGatewayStatus
@@ -310,6 +320,68 @@ class NotificationService:
         except ClientError as e:
             logger.error(f"SES email sending failed: {e}")
             return {"status": "error", "message": str(e)}
+
+    async def _send_central_sms(
+        self,
+        to_phone: str,
+        message: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Deliver an SMS via the central notifications-api (Phase 4).
+
+        Returns a result dict on success, or ``None`` when the central client is
+        not configured / the call fails so the caller falls back to the local
+        direct gateway. Delivery-only: no local credit/billing side effects.
+        """
+        try:
+            from app.services.notifications_client import get_notifications_client
+
+            client = get_notifications_client()
+            if not client.is_configured:
+                return None
+            resp = await client.send(
+                channel="sms",
+                template="ispbilling/raw_message",
+                to=[to_phone],
+                data={"body": message},
+            )
+            logger.info(f"SMS delivered via central notifications-api to {to_phone}")
+            return {"status": "success", "message": "SMS sent via notifications-api", "provider": "notifications-api", "raw": resp}
+        except Exception as e:
+            logger.warning(
+                f"central notifications SMS delivery failed ({e}); falling back to direct gateway"
+            )
+            return None
+
+    async def _send_central_whatsapp(
+        self,
+        to_phone: str,
+        message: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Deliver a WhatsApp message via the central notifications-api (Phase 4).
+
+        Delivery-only. The local WhatsApp-subscription billing (app/models/whatsapp.py)
+        is unaffected. Returns ``None`` when central is not configured / fails so the
+        caller can fall back to the local APIWAP provider. WhatsApp is never plan-blocked.
+        """
+        try:
+            from app.services.notifications_client import get_notifications_client
+
+            client = get_notifications_client()
+            if not client.is_configured:
+                return None
+            resp = await client.send(
+                channel="whatsapp",
+                template="ispbilling/raw_message",
+                to=[to_phone],
+                data={"body": message},
+            )
+            logger.info(f"WhatsApp delivered via central notifications-api to {to_phone}")
+            return {"status": "success", "message": "WhatsApp sent via notifications-api", "provider": "notifications-api", "raw": resp}
+        except Exception as e:
+            logger.warning(
+                f"central notifications WhatsApp delivery failed ({e}); falling back to local provider"
+            )
+            return None
 
     async def _send_africas_talking_sms(
         self,

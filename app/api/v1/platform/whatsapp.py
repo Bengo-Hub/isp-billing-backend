@@ -306,11 +306,14 @@ async def test_whatsapp_gateway(
             credentials=credentials
         )
 
-        # Send test message
-        result = await provider.send_message(
+        # Send test message. Routes via the central notifications-api when
+        # settings.use_central_notifications is enabled (Phase 4, DELIVERY-only);
+        # otherwise delegates to the local APIWAP provider unchanged.
+        result = await WhatsAppProviderFactory.deliver_message(
+            provider=provider,
             to=data.phone_number,
             message=data.test_message,
-            message_type="text"
+            message_type="text",
         )
 
         if result.success:

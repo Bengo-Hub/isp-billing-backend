@@ -157,6 +157,63 @@ class WhatsAppProviderFactory:
         }
 
     @classmethod
+    async def deliver_message(
+        cls,
+        provider: WhatsAppProviderInterface,
+        to: str,
+        message: str,
+        message_type: str = "text",
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        """Deliver one WhatsApp message, routing via the central notifications-api
+        when ``settings.use_central_notifications`` is enabled (Phase 4, ADDITIVE).
+
+        DELIVERY-only: the local WhatsApp-subscription billing (app/models/whatsapp.py)
+        and any usage accounting done by the caller are unaffected — this method only
+        performs the wire send. WhatsApp is never plan-blocked.
+
+        Returns a ``WhatsAppResult``. When central is enabled but unconfigured / fails,
+        or the flag is off, it delegates to ``provider.send_message`` (the existing
+        APIWAP path) so behaviour is unchanged unless explicitly switched on.
+        """
+        from app.core.config import settings
+        from .base import WhatsAppResult, WhatsAppDeliveryStatus
+
+        if getattr(settings, "use_central_notifications", False) and message_type == "text":
+            try:
+                from app.services.notifications_client import get_notifications_client
+
+                client = get_notifications_client()
+                if client.is_configured:
+                    resp = await client.send(
+                        channel="whatsapp",
+                        template="ispbilling/raw_message",
+                        to=[to],
+                        data={"body": message},
+                        metadata=metadata or None,
+                    )
+                    logger.info(f"WhatsApp delivered via central notifications-api to {to}")
+                    return WhatsAppResult(
+                        success=True,
+                        status=WhatsAppDeliveryStatus.SENT,
+                        recipient=to,
+                        message="accepted by notifications-api",
+                        raw_response=resp or {},
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"central notifications WhatsApp delivery failed ({exc}); "
+                    "falling back to local provider"
+                )
+
+        return await provider.send_message(
+            to=to,
+            message=message,
+            message_type=message_type,
+            metadata=metadata,
+        )
+
+    @classmethod
     async def create_from_config(
         cls,
         config_dict: Dict[str, Any],
