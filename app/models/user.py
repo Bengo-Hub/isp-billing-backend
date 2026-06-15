@@ -71,6 +71,12 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     is_verified = Column(Boolean, default=False, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
+
+    # SSO / JIT provisioning (Phase 1b - ADDITIVE, nullable for back-compat).
+    # Links a local user to its central SSO (auth-api) subject. Nullable +
+    # unique so existing local-only users are unaffected.
+    auth_service_user_id = Column(String(255), unique=True, index=True, nullable=True)
+    auth_synced_at = Column(DateTime, nullable=True)
     
     # Profile
     role = Column(Enum(UserRole), default=UserRole.CUSTOMER, nullable=False)

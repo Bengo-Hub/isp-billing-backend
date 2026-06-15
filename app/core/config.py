@@ -42,6 +42,17 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
 
+    # ── SSO (Phase 1b: central auth-api / Codevertex SSO) ──
+    # ADDITIVE: accepted alongside the existing local HS256 JWT. The local
+    # login path is unchanged; these only configure RS256 SSO acceptance.
+    sso_issuer: str = "https://sso.codevertexitsolutions.com"
+    # When empty, the JWKS URL is derived as <issuer>/.well-known/jwks.json.
+    sso_jwks_url: Optional[str] = None
+    # Audience this service expects in SSO tokens (the isp-billing client id).
+    sso_audience: str = "isp-billing-ui"
+    # Shared secret for trusted service-to-service (S2S) callers via X-API-Key.
+    internal_service_key: Optional[str] = None
+
     # Encryption (NEW)
     encryption_key: Optional[str] = None
     master_password: Optional[str] = None
