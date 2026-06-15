@@ -569,6 +569,8 @@ class PPPoESettingsResponse(BaseModel):
     allow_self_registration: bool
     session_timeout_minutes: int
     auto_disconnect_expired: bool
+    # Churn window for duration-less accounts (system default 14).
+    auto_suspend_days: int
 
 
 class PPPoESettingsUpdate(BaseModel):
@@ -578,6 +580,8 @@ class PPPoESettingsUpdate(BaseModel):
     allow_self_registration: Optional[bool] = None
     session_timeout_minutes: Optional[int] = Field(None, ge=1, le=1440)
     auto_disconnect_expired: Optional[bool] = None
+    # Days after which duration-less hotspot/PPPoE accounts are suspended.
+    auto_suspend_days: Optional[int] = Field(None, ge=1, le=365)
 
 
 @router.get("/pppoe", response_model=PPPoESettingsResponse)
@@ -610,6 +614,7 @@ async def get_pppoe_settings(
         allow_self_registration=settings.allow_self_registration,
         session_timeout_minutes=settings.session_timeout_minutes,
         auto_disconnect_expired=settings.auto_disconnect_expired,
+        auto_suspend_days=settings.auto_suspend_days,
     )
 
 
@@ -646,6 +651,8 @@ async def update_pppoe_settings(
         settings.session_timeout_minutes = data.session_timeout_minutes
     if data.auto_disconnect_expired is not None:
         settings.auto_disconnect_expired = data.auto_disconnect_expired
+    if data.auto_suspend_days is not None:
+        settings.auto_suspend_days = data.auto_suspend_days
 
     await db.commit()
     await db.refresh(settings)
@@ -655,6 +662,7 @@ async def update_pppoe_settings(
         allow_self_registration=settings.allow_self_registration,
         session_timeout_minutes=settings.session_timeout_minutes,
         auto_disconnect_expired=settings.auto_disconnect_expired,
+        auto_suspend_days=settings.auto_suspend_days,
     )
 
 
