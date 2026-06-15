@@ -270,6 +270,67 @@ class SMSSendingService:
             self.logger.error(f"Failed to decrypt platform gateway credentials: {e}")
             return None
     
+    async def _deliver_sms(
+        self,
+        provider: SMSProviderInterface,
+        to: str,
+        message: str,
+        sender_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SMSResult:
+        """Deliver one SMS, routing via the central notifications-api when enabled.
+
+        Phase 4: DELIVERY-only consolidation. SMS-credit billing (balance checks,
+        cost calc, transaction recording) stays in the caller; this method just
+        performs the wire send. Per feedback_notification_policies, SMS is never
+        plan-blocked, so we never gate the send on a subscription/plan check here.
+
+        When ``settings.use_central_notifications`` is on and the client is
+        configured, the already-rendered ``message`` is sent through the central
+        send endpoint (channel=sms, template=ispbilling/raw_message). Any failure
+        or misconfiguration falls back to the local direct provider so delivery is
+        never silently dropped.
+        """
+        if getattr(settings, "use_central_notifications", False):
+            try:
+                from app.services.notifications_client import get_notifications_client
+
+                client = get_notifications_client()
+                if client.is_configured:
+                    resp = await client.send(
+                        channel="sms",
+                        template="ispbilling/raw_message",
+                        to=[to],
+                        data={"body": message},
+                        metadata=({"sender_id": sender_id} if sender_id else None),
+                    )
+                    self.logger.info(
+                        "SMS delivered via central notifications-api to %s (%s)",
+                        to,
+                        (resp or {}).get("requestId") or (resp or {}).get("status"),
+                    )
+                    return SMSResult(
+                        success=True,
+                        status=SMSDeliveryStatus.SENT,
+                        recipient=to,
+                        message="accepted by notifications-api",
+                        raw_response=resp or {},
+                    )
+            except Exception as exc:
+                # Best-effort: fall back to the local provider rather than dropping.
+                self.logger.warning(
+                    "central notifications SMS delivery failed (%s); "
+                    "falling back to local provider",
+                    exc,
+                )
+
+        return await provider.send_sms(
+            to=to,
+            message=message,
+            sender_id=sender_id,
+            metadata=metadata,
+        )
+
     async def send_sms(
         self,
         to: str,
@@ -332,7 +393,13 @@ class SMSSendingService:
         
         # Send SMS
         try:
-            result = await provider.send_sms(
+            # Phase 4 (ADDITIVE/FLAGGED): route DELIVERY via the central
+            # notifications-api when enabled. Local SMS-credit accounting above
+            # and the transaction record below are unchanged — only the actual
+            # wire send moves. When the flag is off (default) or the central
+            # client is unconfigured, fall through to the local provider.
+            result = await self._deliver_sms(
+                provider=provider,
                 to=to,
                 message=message,
                 sender_id=sender_id,
