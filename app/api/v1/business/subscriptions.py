@@ -6,11 +6,27 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_technician_or_admin, PaginationParams
+from sqlalchemy import func, select
+
+from app.api.deps import (
+    get_current_user,
+    require_technician_or_admin,
+    PaginationParams,
+    enforce_plan_limit,
+)
 from app.api.deps_org import get_org_id_for_query
 from app.core.database import get_db
 from app.models.user import User
-from app.models.subscription import SubscriptionStatus, SubscriptionType
+from app.models.subscription import Subscription as SubscriptionModel, SubscriptionStatus, SubscriptionType
+
+
+async def _count_subscriptions(db: AsyncSession, organization_id: Optional[int]) -> int:
+    """Count existing subscriber subscriptions — used by the max_customers plan gate."""
+    query = select(func.count()).select_from(SubscriptionModel)
+    if organization_id is not None:
+        query = query.where(SubscriptionModel.organization_id == organization_id)
+    result = await db.execute(query)
+    return int(result.scalar() or 0)
 from app.schemas.subscription import (
     Subscription, SubscriptionCreate, SubscriptionUpdate, SubscriptionList,
     SubscriptionStats, SubscriptionFilter, SubscriptionRenewalRequest,
@@ -50,14 +66,24 @@ async def get_subscriptions(
     return SubscriptionList(**result)
 
 
-@router.post("/", response_model=Subscription, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    response_model=Subscription,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(enforce_plan_limit("max_customers", _count_subscriptions))],
+)
 async def create_subscription(
     subscription_data: SubscriptionCreate,
     org_id: int = Depends(get_org_id_for_query),
     current_user: User = Depends(require_technician_or_admin()),
     db: AsyncSession = Depends(get_db),
 ) -> Subscription:
-    """Create a new subscription."""
+    """Create a new subscription.
+
+    Phase 3: gated by the central subscriptions-api ``max_customers`` plan limit
+    via ``enforce_plan_limit`` (fail-open during migration; superuser /
+    platform-owner bypass).
+    """
     service = SubscriptionService(db)
     try:
         subscription = await service.create_subscription(

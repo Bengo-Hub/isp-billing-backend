@@ -1,7 +1,7 @@
 """API dependencies and middleware."""
 
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional, Union
+from typing import Any, AsyncGenerator, Optional, Union
 
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
@@ -391,3 +391,164 @@ async def enforce_subscription_active(request: Request) -> None:
                 "message": "An active subscription is required for this action.",
             },
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Plan-LIMIT gating (Phase 3) — central subscriptions-api migration.
+#
+# enforce_plan_limit(limit_key, count_fn) returns a FastAPI dependency that
+# blocks a CREATE/mutation when the tenant has reached the per-plan limit
+# (e.g. max_routers, max_customers) defined in the central subscriptions-api.
+#
+# Limit resolution (fast → slow):
+#   1. SSO JWT claims `sub_limits` (enriched by auth-api from subscriptions-api)
+#   2. fallback: live read via SubscriptionsClient.get_subscription(tenant_uuid)
+#
+# DEGRADES SAFELY (migration-safe): if NO subscription limit information is
+# available — local-JWT user, no SSO claims, subscriptions-api not configured /
+# unreachable, tenant not yet subscribed, or the limit key absent — the action
+# is ALLOWED (current behavior preserved) and a warning is logged. A limit value
+# of -1 (or 0) means unlimited. Superuser / platform owner always bypass.
+# ──────────────────────────────────────────────────────────────────────────
+def _limit_is_unlimited(value: Any) -> bool:
+    """A plan limit of -1 (convention) or non-positive means "no cap"."""
+    try:
+        return int(value) <= 0
+    except (TypeError, ValueError):
+        return True
+
+
+def _claims_bypass_limits(claims: dict) -> bool:
+    """Platform owners / superusers are never limit-gated."""
+    if claims.get("is_platform_owner"):
+        return True
+    roles = {str(r).strip().lower() for r in (claims.get("roles") or [])}
+    return bool(roles & {"platform_owner", "superuser"})
+
+
+def enforce_plan_limit(limit_key: str, count_fn):
+    """Build a dependency enforcing a per-plan numeric limit on a CREATE.
+
+    Args:
+        limit_key: the limit name in `sub_limits` / subscription `limits`
+            (e.g. "max_routers", "max_customers").
+        count_fn: ``async (db, organization_id) -> int`` returning the tenant's
+            current usage count for that resource. ``organization_id`` may be
+            ``None`` (platform-wide); count_fn should handle that.
+
+    The returned dependency raises 403 {code: "usage_limit_exceeded",
+    upgrade: true} when current usage >= the resolved limit; otherwise allows.
+    """
+
+    async def _dep(
+        request: Request,
+        current_user: "User" = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+    ) -> None:
+        import logging as _logging
+
+        log = _logging.getLogger(__name__)
+
+        from app.core.sso import get_optional_sso_claims, is_internal_service_request
+
+        # Trusted S2S callers are never limit-gated.
+        if is_internal_service_request(request):
+            return
+
+        # Local-platform-owner role also bypasses (mirrors org-id "see all").
+        if getattr(current_user, "role", None) == UserRole.PLATFORM_OWNER:
+            return
+
+        claims = getattr(request.state, "sso_claims", None)
+        if claims is None:
+            claims = await get_optional_sso_claims(request)
+
+        # No SSO claims → local-JWT request: no central subscription context.
+        # Migration-safe: ALLOW (local Licence model still governs limits).
+        if not claims:
+            log.warning(
+                "enforce_plan_limit(%s): no SSO claims on request — allowing "
+                "(local Licence model still authoritative during migration)",
+                limit_key,
+            )
+            return
+
+        if _claims_bypass_limits(claims):
+            return
+
+        # 1) Fast path: limit from JWT sub_limits claim.
+        limit_value: Any = None
+        sub_limits = claims.get("sub_limits") or {}
+        if isinstance(sub_limits, dict) and limit_key in sub_limits:
+            limit_value = sub_limits.get(limit_key)
+
+        tenant_id = claims.get("tenant_id")
+
+        # 2) Slow path: live read from subscriptions-api when the claim is absent.
+        if limit_value is None and tenant_id:
+            try:
+                from app.services.subscriptions_client import get_subscriptions_client
+
+                sub = await get_subscriptions_client().get_subscription(str(tenant_id))
+                if sub:
+                    limits = sub.get("limits") or {}
+                    if isinstance(limits, dict):
+                        limit_value = limits.get(limit_key)
+            except Exception as exc:  # never block on a subscriptions outage
+                log.warning(
+                    "enforce_plan_limit(%s): subscriptions-api lookup failed "
+                    "(%s) — allowing (fail-open during migration)",
+                    limit_key,
+                    exc,
+                )
+                return
+
+        # No limit info anywhere → migration-safe ALLOW.
+        if limit_value is None:
+            log.warning(
+                "enforce_plan_limit(%s): no limit found in claims or "
+                "subscriptions-api — allowing (fail-open during migration)",
+                limit_key,
+            )
+            return
+
+        if _limit_is_unlimited(limit_value):
+            return
+
+        try:
+            limit_int = int(limit_value)
+        except (TypeError, ValueError):
+            return  # unparseable limit → allow rather than block
+
+        org_id = (
+            None
+            if getattr(current_user, "role", None) == UserRole.PLATFORM_OWNER
+            else getattr(current_user, "organization_id", None)
+        )
+        try:
+            current = int(await count_fn(db, org_id))
+        except Exception as exc:  # counting failed → don't block the user
+            log.warning(
+                "enforce_plan_limit(%s): usage count failed (%s) — allowing",
+                limit_key,
+                exc,
+            )
+            return
+
+        if current >= limit_int:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "usage_limit_exceeded",
+                    "upgrade": True,
+                    "limit": limit_int,
+                    "current": current,
+                    "limit_key": limit_key,
+                    "message": (
+                        f"Your plan allows up to {limit_int} for {limit_key}. "
+                        "Upgrade your plan to add more."
+                    ),
+                },
+            )
+
+    return _dep

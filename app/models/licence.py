@@ -1,4 +1,16 @@
-"""CodeVertex licence management models."""
+"""CodeVertex licence management models.
+
+DEPRECATED (Phase 3): platform-level ISP-provider licensing is migrating to the
+central subscriptions-api (TenantSubscription + ISP_* plans) with treasury
+auto-invoicing. These local ``Licence`` / ``LicencePayment`` / ``LicenceUsageLog``
+/ ``LicenceFeature`` / ``LicenceAlert`` models, their endpoints, and the licence
+Celery crons are kept INTACT during the migration so the running
+platform-billing UI is not broken mid-flight. Do NOT delete them; once every ISP
+provider tenant is subscribed via subscriptions-api and the platform-billing UI
+reads from there, this module can be retired. New per-plan limit enforcement
+(max_routers / max_customers) now flows from subscriptions-api claims via
+``app.api.deps.enforce_plan_limit``, not from this model.
+"""
 
 import json
 from datetime import datetime, timedelta
