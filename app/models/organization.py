@@ -61,6 +61,16 @@ class Organization(Base):
     id = Column(Integer, primary_key=True, index=True)
     uuid = Column(UUID(as_uuid=True), default=uuid.uuid4, unique=True, index=True, nullable=False)
 
+    # ── Auth-api tenant linkage (SoT = auth-api) ──
+    # The central auth-api tenant UUID this Organization mirrors. ISP providers
+    # now sign up via SSO; auth-api publishes auth.tenant.created / auth.user.*
+    # which this service consumes (see app/events/consumer.py) to upsert the
+    # local Organization + Users keyed by this id. Nullable + unique so existing
+    # local-only orgs are unaffected. For tenant scoping against treasury /
+    # subscriptions, ``uuid`` is kept in sync with this value (see the consumer)
+    # so the local uuid IS the auth tenant UUID.
+    auth_tenant_id = Column(String(36), unique=True, index=True, nullable=True)
+
     # Basic information
     name = Column(String(200), nullable=False, index=True)
     slug = Column(String(100), unique=True, index=True, nullable=False)  # URL-friendly identifier

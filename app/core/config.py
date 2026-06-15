@@ -53,13 +53,15 @@ class Settings(BaseSettings):
     # Shared secret for trusted service-to-service (S2S) callers via X-API-Key.
     internal_service_key: Optional[str] = None
 
-    # ── Treasury payments (Phase 2, ADDITIVE behind a flag) ──
-    # When use_treasury_payments is True, customer (hotspot/PPPoE) payments are
-    # routed through the central treasury-api (intent → shared pay page) instead
-    # of isp-billing's own Paystack/M-PESA gateways. Default False keeps the
-    # just-fixed direct-gateway flow as the live path; treasury is opt-in per
-    # environment. The direct-gateway code remains the fallback while this is off.
-    use_treasury_payments: bool = False
+    # ── Treasury payments (centralized — treasury-api is the ONLY path) ──
+    # CUSTOMER (hotspot) payments are fully centralized on the central
+    # treasury-api (intent → shared pay page; NATS consumer + get_status poll for
+    # confirmation). isp-billing no longer has its own customer-payment gateway
+    # path, so this flag is now forced True and retained only for backward
+    # compatibility with any env that still sets USE_TREASURY_PAYMENTS — the
+    # purchase path no longer branches on it. Setting it False has no effect on
+    # the customer purchase flow.
+    use_treasury_payments: bool = True
     # Internal (S2S) base URL for treasury-api — used for create-intent / get-status
     # calls authenticated with internal_service_key (X-API-Key). e.g.
     # http://treasury-api.finance.svc.cluster.local:8080

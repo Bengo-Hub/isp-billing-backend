@@ -72,6 +72,16 @@ class PaymentGatewayConfig(Base):
 
     When organization_id is set, this is an organization-specific gateway.
     Credentials are stored encrypted.
+
+    DEPRECATED for CUSTOMER (hotspot) payments
+    ------------------------------------------
+    Customer hotspot purchases are now centralized on treasury-api, which owns
+    gateway initiation + confirmation. The customer purchase path in
+    app/api/v1/portal/hotspot.py no longer reads this model or uses
+    PaymentGatewayFactory. This model (and the /payments gateway admin endpoints)
+    is retained as importable for the remaining legacy/admin flows that still
+    read it (SMS-credit top-up, WhatsApp-subscription top-up, PPPoE renewal,
+    platform gateway admin/settings). Do NOT add new customer-payment usage here.
     """
 
     __tablename__ = "payment_gateway_configs"
