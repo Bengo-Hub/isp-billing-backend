@@ -1,4 +1,12 @@
-"""Platform Billing models for ISP provider subscription management."""
+"""Platform Billing models for ISP provider subscription management.
+
+DEPRECATED (Phase 3): the platform -> ISP-provider subscription/licence is
+migrating to the central subscriptions-api (ISP_* plans) with treasury
+auto-invoicing. These local models (PlatformSubscriptionTier, PlatformInvoice,
+etc.) and their endpoints are kept INTACT during the migration so the running
+platform-billing UI keeps working. Do NOT delete; retire once every ISP provider
+tenant is subscribed via subscriptions-api.
+"""
 
 from datetime import datetime
 from enum import Enum as PyEnum

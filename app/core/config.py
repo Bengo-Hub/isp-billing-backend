@@ -71,6 +71,18 @@ class Settings(BaseSettings):
     # Request timeout (seconds) for S2S treasury calls.
     treasury_request_timeout: float = 20.0
 
+    # ── Central subscriptions-api (Phase 3, ADDITIVE) ──
+    # Internal (S2S) base URL for subscriptions-api — used to read an ISP
+    # provider tenant's subscription (plan / status / features / limits) and to
+    # subscribe a tenant to an ISP plan, both authenticated with
+    # internal_service_key (X-API-Key). e.g.
+    # http://subscriptions-api.platform.svc.cluster.local:8080
+    # When empty, plan-limit gating degrades to ALLOW (migration-safe) and the
+    # local Licence model remains the source of truth.
+    subscriptions_api_url: Optional[str] = None
+    # Request timeout (seconds) for S2S subscriptions calls.
+    subscriptions_request_timeout: float = 10.0
+
     # Encryption (NEW)
     encryption_key: Optional[str] = None
     master_password: Optional[str] = None

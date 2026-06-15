@@ -7,7 +7,12 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_technician_or_admin, PaginationParams
+from app.api.deps import (
+    get_current_user,
+    require_technician_or_admin,
+    PaginationParams,
+    enforce_plan_limit,
+)
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.exceptions import ValidationError, RouterOperationError
@@ -28,6 +33,21 @@ def _get_org_id(current_user: User) -> Optional[int]:
     if current_user.role == UserRole.PLATFORM_OWNER:
         return None  # No filter for platform owners
     return current_user.organization_id
+
+
+async def _count_routers(db: AsyncSession, organization_id: Optional[int]) -> int:
+    """Count existing routers for a tenant — used by the max_routers plan gate.
+
+    organization_id may be None (platform-wide); then all routers are counted.
+    """
+    from sqlalchemy import func
+    from app.models.router import Router as RouterModel
+
+    query = select(func.count()).select_from(RouterModel)
+    if organization_id is not None:
+        query = query.where(RouterModel.organization_id == organization_id)
+    result = await db.execute(query)
+    return int(result.scalar() or 0)
 
 
 async def _queue_agent_action(db: AsyncSession, router_obj, action: str, user_id: Optional[int], extra_query: Optional[dict] = None) -> str:
@@ -86,7 +106,12 @@ async def get_routers(
     return RouterList(**result)
 
 
-@router.post("/", response_model=Router, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    response_model=Router,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(enforce_plan_limit("max_routers", _count_routers))],
+)
 async def create_router(
     router_data: RouterCreate,
     current_user: User = Depends(require_technician_or_admin()),
@@ -96,6 +121,10 @@ async def create_router(
 
     Credentials are automatically pulled from environment settings
     (MIKROTIK_API_USERNAME, MIKROTIK_API_PASSWORD). Frontend should not send credentials.
+
+    Phase 3: gated by the central subscriptions-api ``max_routers`` plan limit
+    via ``enforce_plan_limit`` (fail-open during migration; superuser /
+    platform-owner bypass).
     """
     from app.core.config import settings
 

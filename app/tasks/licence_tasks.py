@@ -195,7 +195,14 @@ def send_licence_expiry_notifications(self):
 
 @celery_app.task(bind=True)
 def process_licence_auto_renewals(self):
-    """Process automatic licence renewals."""
+    """Process automatic licence renewals.
+
+    DEPRECATED (Phase 3): local-Licence auto-renewal is superseded by the
+    central subscriptions-api renewal/invoicing jobs once ISP-provider tenants
+    are subscribed there. Kept running during the migration so existing
+    licence-based ISPs are not interrupted; do NOT remove until the platform
+    billing UI reads renewals from subscriptions-api.
+    """
     logger.info("Processing licence auto-renewals")
     
     try:
