@@ -288,7 +288,7 @@ async def list_licences(
 ):
     """List all licences."""
     rbac_service = RBACService(db)
-    licences = db.query(Licence).all()
+    licences = db.query(SystemLicence).all()
     return licences
 
 

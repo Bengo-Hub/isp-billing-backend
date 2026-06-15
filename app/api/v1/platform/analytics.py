@@ -16,13 +16,9 @@ from app.api.deps import get_db
 from app.api.deps_tenant import require_platform_owner
 from app.models.user import User
 from app.models.organization import Organization, OrganizationStatus
-from app.models.platform_billing import (
-    PlatformInvoice,
-    PlatformPayment,
-    EarningsRecord,
-    InvoiceStatus,
-    PaymentStatus,
-)
+# Platform revenue/invoices are owned by treasury now; the platform-billing models
+# (PlatformInvoice/PlatformPayment/tiers) were retired. Revenue metrics here read 0
+# (the authoritative figures live in treasury / the books console link-out).
 
 router = APIRouter(prefix="/analytics", tags=["Platform - Analytics"])
 
@@ -119,7 +115,7 @@ async def get_dashboard_stats(
     # Organization counts by status (exclude platform org)
     org_result = await db.execute(
         select(Organization.status, func.count(Organization.id))
-        .where(Organization.subscription_tier_id.isnot(None))
+        .where(Organization.auth_tenant_id.isnot(None))
         .group_by(Organization.status)
     )
     org_counts = {row[0]: row[1] for row in org_result.all()}
@@ -129,32 +125,10 @@ async def get_dashboard_stats(
     trial_orgs = org_counts.get(OrganizationStatus.TRIAL, 0)
     suspended_orgs = org_counts.get(OrganizationStatus.SUSPENDED, 0)
 
-    # Revenue this month (from platform payments)
-    this_month_revenue = await db.execute(
-        select(func.sum(PlatformPayment.amount))
-        .where(
-            PlatformPayment.status == PaymentStatus.COMPLETED,
-            PlatformPayment.created_at >= first_of_month,
-        )
-    )
-    revenue_this_month = float(this_month_revenue.scalar() or 0)
-
-    # Revenue last month
-    last_month_revenue = await db.execute(
-        select(func.sum(PlatformPayment.amount))
-        .where(
-            PlatformPayment.status == PaymentStatus.COMPLETED,
-            PlatformPayment.created_at >= first_of_last_month,
-            PlatformPayment.created_at < first_of_month,
-        )
-    )
-    revenue_last_month = float(last_month_revenue.scalar() or 0)
-
-    # Revenue growth
-    if revenue_last_month > 0:
-        growth = ((revenue_this_month - revenue_last_month) / revenue_last_month) * 100
-    else:
-        growth = 100 if revenue_this_month > 0 else 0
+    # Platform revenue is owned by treasury now — report 0 (books console link-out).
+    revenue_this_month = 0.0
+    revenue_last_month = 0.0
+    growth = 0
 
     # Total end customers (from all organizations)
     total_customers = await db.execute(
@@ -172,7 +146,7 @@ async def get_dashboard_stats(
         select(func.count(Organization.id))
         .where(
             Organization.created_at >= first_of_month,
-            Organization.subscription_tier_id.isnot(None)
+            Organization.auth_tenant_id.isnot(None)
         )
     )
     new_signups_count = new_signups.scalar() or 0
@@ -183,7 +157,7 @@ async def get_dashboard_stats(
         .where(
             Organization.status == OrganizationStatus.SUSPENDED,
             Organization.suspended_at >= first_of_month,
-            Organization.subscription_tier_id.isnot(None)
+            Organization.auth_tenant_id.isnot(None)
         )
     )
     churn_count = churned.scalar() or 0
@@ -194,30 +168,10 @@ async def get_dashboard_stats(
     else:
         churn_rate = 0
 
-    # Pending and overdue payments
-    pending_payments = await db.execute(
-        select(func.sum(PlatformInvoice.total_amount))
-        .where(PlatformInvoice.status == InvoiceStatus.PENDING)
-    )
-    pending = float(pending_payments.scalar() or 0)
-
-    overdue_payments = await db.execute(
-        select(func.sum(PlatformInvoice.total_amount))
-        .where(PlatformInvoice.status == InvoiceStatus.OVERDUE)
-    )
-    overdue = float(overdue_payments.scalar() or 0)
-
-    # Collection rate
-    total_invoiced = await db.execute(
-        select(func.sum(PlatformInvoice.total_amount))
-        .where(PlatformInvoice.created_at >= first_of_month)
-    )
-    invoiced = float(total_invoiced.scalar() or 0)
-
-    if invoiced > 0:
-        collection_rate = (revenue_this_month / invoiced) * 100
-    else:
-        collection_rate = 100
+    # Platform invoices/collections owned by treasury now — report 0.
+    pending = 0.0
+    overdue = 0.0
+    collection_rate = 100
 
     return DashboardStats(
         total_organizations=total_orgs,
@@ -252,32 +206,9 @@ async def get_revenue_chart(
     now = datetime.utcnow()
     start_date = now - timedelta(days=days)
 
-    # Get daily revenue from payments
-    result = await db.execute(
-        select(
-            func.date(PlatformPayment.created_at),
-            func.sum(PlatformPayment.amount),
-        )
-        .where(
-            PlatformPayment.status == PaymentStatus.COMPLETED,
-            PlatformPayment.created_at >= start_date,
-        )
-        .group_by(func.date(PlatformPayment.created_at))
-        .order_by(func.date(PlatformPayment.created_at))
-    )
-    revenue_by_date = {row[0]: float(row[1] or 0) for row in result.all()}
-
-    # Get daily invoiced amounts
-    invoiced_result = await db.execute(
-        select(
-            func.date(PlatformInvoice.created_at),
-            func.sum(PlatformInvoice.total_amount),
-        )
-        .where(PlatformInvoice.created_at >= start_date)
-        .group_by(func.date(PlatformInvoice.created_at))
-        .order_by(func.date(PlatformInvoice.created_at))
-    )
-    invoiced_by_date = {row[0]: float(row[1] or 0) for row in invoiced_result.all()}
+    # Platform revenue/invoices owned by treasury now — empty series here.
+    revenue_by_date: dict = {}
+    invoiced_by_date: dict = {}
 
     # Generate chart data for each day
     chart_data = []
@@ -315,7 +246,7 @@ async def get_organization_growth(
         select(Organization.created_at)
         .where(
             Organization.created_at >= start_date,
-            Organization.subscription_tier_id.isnot(None)
+            Organization.auth_tenant_id.isnot(None)
         )
     )
     signups_by_month = {}
@@ -329,7 +260,7 @@ async def get_organization_growth(
         .where(
             Organization.suspended_at >= start_date,
             Organization.suspended_at.isnot(None),
-            Organization.subscription_tier_id.isnot(None)
+            Organization.auth_tenant_id.isnot(None)
         )
     )
     churn_by_month = {}
@@ -381,7 +312,7 @@ async def get_top_organizations(
         select(Organization)
         .where(
             Organization.status.in_([OrganizationStatus.ACTIVE, OrganizationStatus.TRIAL]),
-            Organization.subscription_tier_id.isnot(None)  # Exclude platform org
+            Organization.auth_tenant_id.isnot(None)  # Exclude platform org
         )
         .order_by(Organization.total_revenue.desc())
         .limit(limit)

@@ -1,4 +1,12 @@
-"""Payment Gateway configuration models for multi-tenant payment processing."""
+"""Payment transaction / manual-record / payout models for multi-tenant payment processing.
+
+NOTE (Phase 3 cleanup): the ``PaymentGatewayConfig`` model (table
+``payment_gateway_configs``) and its ``GatewayType`` / ``GatewayStatus`` /
+``TransactionFeeType`` enums were REMOVED here — gateway configuration is now
+owned by treasury-api. ``PaymentTransaction.gateway_id`` is retained as a plain
+integer column (no FK) for historical reconciliation data; the live
+payment-initiation/confirmation path runs through treasury-api.
+"""
 
 from datetime import datetime
 from enum import Enum as PyEnum
@@ -25,234 +33,6 @@ if TYPE_CHECKING:
     from .organization import Organization
 
 
-class GatewayType(str, PyEnum):
-    """Payment gateway type enumeration."""
-
-    # M-PESA with API integration
-    MPESA_PAYBILL = "mpesa_paybill"
-    MPESA_TILL = "mpesa_till"
-
-    # M-PESA without API (manual reconciliation)
-    MPESA_PAYBILL_NO_API = "mpesa_paybill_no_api"
-    MPESA_TILL_NO_API = "mpesa_till_no_api"
-
-    # Bank account (via Paybill)
-    BANK_ACCOUNT = "bank_account"
-
-    # Other gateways
-    PAYSTACK = "paystack"
-    PAYPAL = "paypal"
-    PESAPAL = "pesapal"
-    KOPOKOPO = "kopokopo"
-
-
-class GatewayStatus(str, PyEnum):
-    """Gateway status enumeration."""
-
-    ACTIVE = "active"
-    INACTIVE = "inactive"
-    PENDING_VERIFICATION = "pending_verification"
-    ERROR = "error"
-
-
-class TransactionFeeType(str, PyEnum):
-    """Transaction fee type enumeration."""
-
-    PERCENTAGE = "percentage"
-    FIXED = "fixed"
-    HYBRID = "hybrid"  # percentage + fixed
-
-
-class PaymentGatewayConfig(Base):
-    """
-    Payment gateway configuration for platform or organization.
-
-    When organization_id is NULL, this is a platform-level gateway
-    where all customer payments are collected (Platform Owner config).
-
-    When organization_id is set, this is an organization-specific gateway.
-    Credentials are stored encrypted.
-
-    DEPRECATED for CUSTOMER (hotspot) payments
-    ------------------------------------------
-    Customer hotspot purchases are now centralized on treasury-api, which owns
-    gateway initiation + confirmation. The customer purchase path in
-    app/api/v1/portal/hotspot.py no longer reads this model or uses
-    PaymentGatewayFactory. This model (and the /payments gateway admin endpoints)
-    is retained as importable for the remaining legacy/admin flows that still
-    read it (SMS-credit top-up, WhatsApp-subscription top-up, PPPoE renewal,
-    platform gateway admin/settings). Do NOT add new customer-payment usage here.
-    """
-
-    __tablename__ = "payment_gateway_configs"
-
-    # Primary key
-    id = Column(Integer, primary_key=True, index=True)
-    # NULL = platform-level gateway (collects all customer payments)
-    # Set = organization-specific gateway
-    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
-
-    # Gateway information
-    gateway_type = Column(Enum(GatewayType), nullable=False, index=True)
-    name = Column(String(100), nullable=False)  # Display name (e.g., "M-PESA Business")
-    description = Column(Text, nullable=True)
-
-    # Status
-    status = Column(Enum(GatewayStatus), default=GatewayStatus.PENDING_VERIFICATION, nullable=False)
-    is_active = Column(Boolean, default=False, nullable=False)
-    is_primary = Column(Boolean, default=False, nullable=False)
-
-    # Environment (sandbox/production)
-    environment = Column(String(20), default="sandbox", nullable=False)
-
-    # Credentials (encrypted JSON)
-    credentials = Column(Text, nullable=True)  # Encrypted JSON with API keys, secrets
-
-    # Callback/Webhook URLs (auto-configured or custom override)
-    callback_url = Column(String(500), nullable=True)  # For payment confirmations
-    webhook_url = Column(String(500), nullable=True)  # For async notifications
-    callback_base_url = Column(String(500), nullable=True)  # Base URL override for callbacks
-    callback_secret = Column(String(255), nullable=True)  # For validating callbacks
-    urls_auto_configured = Column(Boolean, default=True, nullable=False)  # If True, URLs are auto-resolved
-
-    # M-PESA specific fields
-    paybill_number = Column(String(20), nullable=True)
-    till_number = Column(String(20), nullable=True)
-    account_number_format = Column(String(100), nullable=True)  # e.g., "PHONE" or "INVOICE_{invoice_id}"
-
-    # Bank specific fields
-    bank_name = Column(String(100), nullable=True)
-    bank_account_number = Column(String(50), nullable=True)
-    bank_account_name = Column(String(200), nullable=True)
-    bank_branch = Column(String(100), nullable=True)
-    bank_swift_code = Column(String(20), nullable=True)
-
-    # Transaction fees
-    transaction_fee_type = Column(Enum(TransactionFeeType), default=TransactionFeeType.PERCENTAGE, nullable=True)
-    transaction_fee_percentage = Column(Numeric(5, 2), default=0, nullable=False)  # e.g., 2.5%
-    transaction_fee_fixed = Column(Numeric(10, 2), default=0, nullable=False)  # Fixed amount
-
-    # Reconciliation settings
-    requires_manual_reconciliation = Column(Boolean, default=False, nullable=False)
-    reconciliation_email = Column(String(100), nullable=True)  # For manual reconciliation notifications
-    auto_reconcile = Column(Boolean, default=True, nullable=False)
-
-    # Limits
-    min_amount = Column(Numeric(10, 2), default=10, nullable=False)  # Minimum transaction
-    max_amount = Column(Numeric(10, 2), default=150000, nullable=False)  # Maximum transaction
-    daily_limit = Column(Numeric(12, 2), nullable=True)  # Daily transaction limit
-
-    # Usage stats
-    total_transactions = Column(Integer, default=0, nullable=False)
-    total_amount = Column(Numeric(14, 2), default=0, nullable=False)
-    last_transaction_at = Column(DateTime, nullable=True)
-    last_error = Column(Text, nullable=True)
-    last_error_at = Column(DateTime, nullable=True)
-
-    # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    verified_at = Column(DateTime, nullable=True)
-
-    # Relationships
-    organization = relationship("Organization", back_populates="payment_gateways")
-    transactions = relationship("PaymentTransaction", back_populates="gateway")
-
-    # Constraints
-    __table_args__ = (
-        UniqueConstraint('organization_id', 'gateway_type', 'paybill_number', name='uq_org_gateway_paybill'),
-    )
-
-    def __repr__(self) -> str:
-        """String representation."""
-        return f"<PaymentGatewayConfig(id={self.id}, org={self.organization_id}, type={self.gateway_type})>"
-
-    @property
-    def requires_api_credentials(self) -> bool:
-        """Check if this gateway type requires API credentials."""
-        return self.gateway_type not in [
-            GatewayType.MPESA_PAYBILL_NO_API,
-            GatewayType.MPESA_TILL_NO_API,
-            GatewayType.BANK_ACCOUNT,
-        ]
-
-    def get_display_name(self) -> str:
-        """Get user-friendly display name for gateway."""
-        type_names = {
-            GatewayType.MPESA_PAYBILL: "M-PESA Paybill",
-            GatewayType.MPESA_TILL: "M-PESA Till/Buy Goods",
-            GatewayType.MPESA_PAYBILL_NO_API: "M-PESA Paybill (Manual)",
-            GatewayType.MPESA_TILL_NO_API: "M-PESA Till (Manual)",
-            GatewayType.BANK_ACCOUNT: "Bank Account",
-            GatewayType.PAYSTACK: "Paystack",
-            GatewayType.PAYPAL: "PayPal",
-            GatewayType.PESAPAL: "PesaPal",
-            GatewayType.KOPOKOPO: "Kopo Kopo",
-        }
-        return type_names.get(self.gateway_type, self.gateway_type.value)
-
-    def get_integration_name(self) -> str:
-        """Get integration name for URL config service mapping."""
-        gateway_to_integration = {
-            GatewayType.MPESA_PAYBILL: "mpesa",
-            GatewayType.MPESA_TILL: "mpesa",
-            GatewayType.PAYSTACK: "paystack",
-            GatewayType.PESAPAL: "pesapal",
-            GatewayType.KOPOKOPO: "kopokopo",
-        }
-        return gateway_to_integration.get(self.gateway_type, "")
-
-    def get_effective_webhook_url(self, url_config_service=None) -> str:
-        """Get effective webhook URL (custom or auto-configured).
-        
-        Args:
-            url_config_service: Optional URLConfigService instance.
-            
-        Returns:
-            Webhook URL to use.
-        """
-        # Return custom URL if not using auto-configuration
-        if not self.urls_auto_configured and self.webhook_url:
-            return self.webhook_url
-
-        # Auto-configure from URLConfigService
-        if url_config_service:
-            integration = self.get_integration_name()
-            if integration:
-                try:
-                    return url_config_service.get_webhook_url(integration, "webhook")
-                except ValueError:
-                    pass
-
-        return self.webhook_url or ""
-
-    def get_effective_callback_url(self, url_config_service=None) -> str:
-        """Get effective callback URL (custom or auto-configured).
-        
-        Args:
-            url_config_service: Optional URLConfigService instance.
-            
-        Returns:
-            Callback URL to use.
-        """
-        # Return custom URL if not using auto-configuration
-        if not self.urls_auto_configured and self.callback_url:
-            return self.callback_url
-
-        # Auto-configure from URLConfigService
-        if url_config_service:
-            integration = self.get_integration_name()
-            if integration:
-                try:
-                    if integration == "mpesa":
-                        return url_config_service.get_callback_url(integration, "stk_callback")
-                    return url_config_service.get_callback_url(integration, "callback")
-                except ValueError:
-                    pass
-
-        return self.callback_url or ""
-
-
 class PaymentTransaction(Base):
     """
     Payment transaction record.
@@ -266,7 +46,8 @@ class PaymentTransaction(Base):
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
-    gateway_id = Column(Integer, ForeignKey("payment_gateway_configs.id"), nullable=False, index=True)
+    # Historical gateway reference (FK removed — payment_gateway_configs dropped; treasury owns gateways).
+    gateway_id = Column(Integer, nullable=True, index=True)
 
     # Transaction details
     transaction_reference = Column(String(100), unique=True, index=True, nullable=False)
@@ -309,7 +90,6 @@ class PaymentTransaction(Base):
     completed_at = Column(DateTime, nullable=True)
 
     # Relationships
-    gateway = relationship("PaymentGatewayConfig", back_populates="transactions")
     invoice = relationship("Invoice", backref="payment_transactions")
     subscription = relationship("Subscription", backref="payment_transactions")
     user = relationship("User", backref="payment_transactions")
@@ -332,7 +112,8 @@ class ManualPaymentRecord(Base):
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
-    gateway_id = Column(Integer, ForeignKey("payment_gateway_configs.id"), nullable=False, index=True)
+    # Historical gateway reference (FK removed — payment_gateway_configs dropped; treasury owns gateways).
+    gateway_id = Column(Integer, nullable=True, index=True)
 
     # Transaction details
     mpesa_code = Column(String(20), nullable=True, index=True)  # M-PESA transaction code
@@ -355,7 +136,6 @@ class ManualPaymentRecord(Base):
 
     # Relationships
     organization = relationship("Organization", backref="manual_payment_records")
-    gateway = relationship("PaymentGatewayConfig", backref="manual_records")
     matched_transaction = relationship("PaymentTransaction", backref="manual_records")
 
     def __repr__(self) -> str:

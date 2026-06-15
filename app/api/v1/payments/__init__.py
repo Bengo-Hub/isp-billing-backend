@@ -9,13 +9,8 @@ Public endpoints for payment processing:
 
 from fastapi import APIRouter
 
-from .paystack import router as paystack_router
-from .gateways import router as gateways_router
+# NOTE: the local Paystack + public payment-gateway routers were removed —
+# customer/tenant payments are centralized on treasury-api now. This router is
+# kept (empty) so the api.v1 registration import remains stable.
 
 router = APIRouter()
-
-# Paystack payment endpoints
-router.include_router(paystack_router)
-
-# Public payment gateway endpoints
-router.include_router(gateways_router)

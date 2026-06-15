@@ -18,7 +18,6 @@ from app.core.config import settings
 from app.core.security import get_password_hash, create_access_token
 from app.models.organization import Organization, OrganizationType, OrganizationStatus
 from app.models.user import User, UserRole, UserStatus
-from app.models.platform_billing import PlatformSubscriptionTier, TierType
 
 router = APIRouter(prefix="/onboarding", tags=["Onboarding"])
 
@@ -347,20 +346,10 @@ async def complete_registration(
         slug = f"{base_slug}-{counter}"
         counter += 1
 
-    # Get default tier based on business type
-    tier_type = TierType.HOTSPOT if business["business_type"] == OrganizationType.HOTSPOT else TierType.PPPOE
-    result = await db.execute(
-        select(PlatformSubscriptionTier).where(
-            PlatformSubscriptionTier.tier_type == tier_type,
-            PlatformSubscriptionTier.is_default == True,
-            PlatformSubscriptionTier.is_active == True,
-        )
-    )
-    default_tier = result.scalar_one_or_none()
-
-    # Calculate trial end date
-    trial_days = default_tier.trial_days if default_tier else get_default_trial_days()
-    trial_ends_at = datetime.utcnow() + timedelta(days=trial_days)
+    # Tiers/subscriptions are owned by subscriptions-api now; the auto-subscribe
+    # on tenant onboarding assigns the default plan + its 14-day trial. Locally we
+    # only stamp a provisional trial window + sane default limits.
+    trial_ends_at = datetime.utcnow() + timedelta(days=get_default_trial_days())
 
     # Create organization
     organization = Organization(
@@ -372,12 +361,11 @@ async def complete_registration(
         phone=business["phone"],
         country=business.get("country", "Kenya"),
         city=business.get("city"),
-        subscription_tier_id=default_tier.id if default_tier else None,
         trial_ends_at=trial_ends_at,
-        max_routers=default_tier.max_routers if default_tier else 5,
-        max_customers=default_tier.max_customers if default_tier else 50,
-        max_users=default_tier.max_staff_users if default_tier else 3,
-        features=default_tier.trial_features if default_tier and default_tier.trial_features else {},
+        max_routers=5,
+        max_customers=50,
+        max_users=3,
+        features={},
     )
     db.add(organization)
     await db.flush()  # Get organization ID

@@ -17,7 +17,6 @@ from app.models.configuration import Configuration, ConfigType
 from app.modules.system import ConfigurationService
 from app.modules.notifications import NotificationService
 from app.modules.billing.mpesa import MpesaService
-from app.integrations.payment_gateways.mpesa import MPesaPaybillGateway
 
 logger = get_logger(__name__)
 
@@ -323,44 +322,18 @@ class GatewayManagementService:
             }
 
     async def _test_mpesa_gateway(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Test MPESA payment gateway."""
-        try:
-            # Create gateway configuration
-            gateway_config = {
-                "credentials": {
-                    "consumer_key": config.get("consumer_key", ""),
-                    "consumer_secret": config.get("consumer_secret", ""),
-                    "passkey": config.get("passkey", ""),
-                    "shortcode": config.get("shortcode", ""),
-                    "environment": "sandbox",
-                },
-                "callback_url": config.get("callback_url", ""),
-            }
+        """Test MPESA payment gateway.
 
-            # Create gateway instance and test by getting access token
-            gateway = MPesaPaybillGateway(gateway_config)
-            token = await gateway._get_access_token()
-
-            if token:
-                return {
-                    "status": GatewayStatus.ONLINE,
-                    "success": True,
-                    "message": "MPESA gateway is operational",
-                    "provider_response": "Access token generated successfully"
-                }
-            else:
-                return {
-                    "status": GatewayStatus.ERROR,
-                    "success": False,
-                    "error": "Failed to generate MPESA access token"
-                }
-
-        except Exception as e:
-            return {
-                "status": GatewayStatus.ERROR,
-                "success": False,
-                "error": f"MPESA test failed: {str(e)}"
-            }
+        The local M-PESA gateway integration was retired (Phase 2/3) — payment
+        processing and connectivity are owned by treasury-api. The local tester
+        therefore reports the gateway as handled externally.
+        """
+        return {
+            "status": GatewayStatus.OFFLINE,
+            "success": False,
+            "message": "M-PESA processing is handled by treasury-api in this deployment.",
+            "provider_response": "Local M-PESA gateway retired.",
+        }
 
     async def _load_gateway_config(self, gateway_type: str, provider: str) -> Dict[str, Any]:
         """Load gateway configuration from database."""

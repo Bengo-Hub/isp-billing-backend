@@ -23,7 +23,6 @@ from app.models.rbac import (
     SystemLicence,
 )
 from app.models.platform_settings import PlatformSettings
-from app.models.platform_billing import PlatformSubscriptionTier, TierType
 from app.models.organization import Organization, OrganizationType, OrganizationStatus
 
 logger = logging.getLogger(__name__)
@@ -213,10 +212,10 @@ async def run_startup_seeds() -> None:
             # 3. Platform settings singleton
             await _seed_platform_settings(db, admin)
 
-            # 4. Default subscription tiers
-            await _seed_subscription_tiers(db)
+            # NOTE: ISP subscription tiers are owned by subscriptions-api (ISP_* plans)
+            # with treasury auto-invoicing — no local tier seeding.
 
-            # 5. Demo data (non-production only)
+            # 4. Demo data (non-production only)
             if not settings.is_production:
                 await _seed_demo_accounts(db, roles)
 
@@ -402,89 +401,6 @@ async def _seed_platform_settings(db: AsyncSession, admin: User) -> None:
     logger.info("Platform settings seeded")
 
 
-async def _seed_subscription_tiers(db: AsyncSession) -> None:
-    """Ensure default subscription tiers exist."""
-    result = await db.execute(select(PlatformSubscriptionTier))
-    if result.scalars().first() is not None:
-        return
-
-    logger.info("Seeding default subscription tiers...")
-
-    hotspot_tier = PlatformSubscriptionTier(
-        name="Hotspot Starter",
-        description="Starter package for Hotspot ISPs. Base fee + 2% on earnings above KES 10,000.",
-        tier_type=TierType.HOTSPOT,
-        is_active=True,
-        is_default=True,
-        base_monthly_fee=500,
-        base_quarterly_fee=1350,
-        base_yearly_fee=4800,
-        currency="KES",
-        earnings_threshold=10000,
-        earnings_percentage=2.0,
-        max_routers=5,
-        max_staff_users=3,
-        max_sms_per_month=100,
-        features={
-            "hotspot_portal": True,
-            "voucher_system": True,
-            "sms_notifications": True,
-            "basic_analytics": True,
-            "mpesa_integration": True,
-        },
-        trial_days=14,
-        trial_features={
-            "hotspot_portal": True,
-            "voucher_system": True,
-            "sms_notifications": False,
-            "basic_analytics": True,
-            "mpesa_integration": True,
-        },
-        display_order=1,
-        badge_text="Popular",
-        badge_color="#ec4899",
-    )
-    db.add(hotspot_tier)
-
-    pppoe_tier = PlatformSubscriptionTier(
-        name="PPPoE Starter",
-        description="Starter package for PPPoE ISPs. KES 25 per customer per month.",
-        tier_type=TierType.PPPOE,
-        is_active=True,
-        is_default=False,
-        base_monthly_fee=1000,
-        base_quarterly_fee=2700,
-        base_yearly_fee=9600,
-        currency="KES",
-        earnings_threshold=10000,
-        earnings_percentage=0,
-        min_customers=0,
-        max_customers=50,
-        per_customer_fee=25,
-        max_routers=5,
-        max_staff_users=3,
-        max_sms_per_month=100,
-        features={
-            "pppoe_management": True,
-            "bandwidth_control": True,
-            "sms_notifications": True,
-            "basic_analytics": True,
-            "mpesa_integration": True,
-        },
-        trial_days=14,
-        trial_features={
-            "pppoe_management": True,
-            "bandwidth_control": True,
-            "sms_notifications": False,
-            "basic_analytics": True,
-            "mpesa_integration": True,
-        },
-        display_order=2,
-    )
-    db.add(pppoe_tier)
-    logger.info("Default subscription tiers seeded")
-
-
 async def _seed_demo_accounts(db: AsyncSession, roles: dict) -> None:
     """Seed demo accounts in non-production environments."""
     # Demo organization
@@ -495,14 +411,6 @@ async def _seed_demo_accounts(db: AsyncSession, roles: dict) -> None:
 
     if not demo_org:
         logger.info("Creating demo organization (dev/staging only)...")
-        # Get the default hotspot tier for the demo org
-        tier_result = await db.execute(
-            select(PlatformSubscriptionTier)
-            .where(PlatformSubscriptionTier.tier_type == TierType.HOTSPOT)
-            .where(PlatformSubscriptionTier.is_default == True)
-        )
-        default_tier = tier_result.scalar_one_or_none()
-
         demo_org = Organization(
             name="Demo ISP Company",
             slug="demo-isp",
@@ -513,7 +421,6 @@ async def _seed_demo_accounts(db: AsyncSession, roles: dict) -> None:
             address="Demo Street, Nairobi",
             city="Nairobi",
             country="Kenya",
-            subscription_tier_id=default_tier.id if default_tier else None,
             trial_ends_at=datetime.utcnow() + timedelta(days=14),
             max_routers=5,
             max_customers=100,

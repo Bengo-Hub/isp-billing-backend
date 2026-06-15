@@ -98,7 +98,8 @@ class Organization(Base):
     privacy_policy = Column(Text, nullable=True)
 
     # Subscription and limits
-    subscription_tier_id = Column(Integer, ForeignKey("platform_subscription_tiers.id"), nullable=True)
+    # NOTE: subscription_tier_id (FK -> platform_subscription_tiers) was removed —
+    # ISP-provider subscriptions/limits are now owned by the central subscriptions-api.
     trial_ends_at = Column(DateTime, nullable=True)
     subscription_ends_at = Column(DateTime, nullable=True)
     max_routers = Column(Integer, default=5, nullable=False)
@@ -140,15 +141,12 @@ class Organization(Base):
     suspended_at = Column(DateTime, nullable=True)
 
     # Relationships
-    subscription_tier = relationship("PlatformSubscriptionTier", back_populates="organizations")
     users = relationship("User", back_populates="organization", foreign_keys="User.organization_id")
     routers = relationship("Router", back_populates="organization")
     service_plans = relationship("ServicePlan", back_populates="organization")
     subscriptions = relationship("Subscription", back_populates="organization")
     invoices = relationship("Invoice", back_populates="organization")
     payments = relationship("Payment", back_populates="organization")
-    payment_gateways = relationship("PaymentGatewayConfig", back_populates="organization")
-    platform_invoices = relationship("PlatformInvoice", back_populates="organization")
     voucher_codes = relationship("VoucherCode", back_populates="organization")
     whatsapp_subscription = relationship("WhatsAppOrganizationSubscription", back_populates="organization", uselist=False)
     expenses = relationship("Expense", back_populates="organization")

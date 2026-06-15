@@ -14,7 +14,6 @@ celery_app = Celery(
         "app.tasks.router_tasks",
         "app.tasks.provisioning_tasks",
         "app.tasks.subscription_tasks",
-        "app.tasks.licence_tasks",
         "app.tasks.event_tasks",
     ]
 )
@@ -98,27 +97,9 @@ celery_app.conf.update(
             "task": "app.tasks.subscription_tasks.generate_expiry_report",
             "schedule": 60.0 * 60 * 24,  # Daily
         },
-        # Platform license management tasks
-        "generate-renewal-invoices": {
-            "task": "app.tasks.licence_tasks.generate_renewal_invoices_for_expiring_subscriptions",
-            "schedule": 60.0 * 60 * 24,  # Daily at 00:00 UTC
-        },
-        "check-licence-grace-periods": {
-            "task": "app.tasks.licence_tasks.check_licence_grace_periods",
-            "schedule": 60.0 * 60,  # Hourly
-        },
-        "monitor-licence-expiry": {
-            "task": "app.tasks.licence_tasks.monitor_licence_expiry",
-            "schedule": 60.0 * 60 * 6,  # Every 6 hours
-        },
-        "send-licence-expiry-notifications": {
-            "task": "app.tasks.licence_tasks.send_licence_expiry_notifications",
-            "schedule": 60.0 * 60 * 12,  # Twice daily
-        },
-        "update-licence-usage-stats": {
-            "task": "app.tasks.licence_tasks.update_licence_usage_stats",
-            "schedule": 60.0 * 60,  # Hourly
-        },
+        # NOTE: platform-licence beat tasks removed — the local licence subsystem is
+        # retired; ISP subscription/renewal lifecycle is owned by subscriptions-api
+        # (with treasury auto-invoicing).
         # Phase 5: transactional-outbox publisher → NATS JetStream.
         # Inert when NATS_URL is unset (publishes 0 rows), so safe to always run.
         "publish-outbox-events": {

@@ -6,12 +6,11 @@ from app.core.database import Base as BaseModel
 # Multi-tenancy models (must be imported first due to FK references)
 from .organization import Organization, OrganizationSettings, OrganizationType, OrganizationStatus
 from .platform_billing import (
-    PlatformSubscriptionTier, PlatformInvoice, PlatformPayment, EarningsRecord,
+    EarningsRecord,
     BillingCycle as PlatformBillingCycle, TierType, InvoiceStatus as PlatformInvoiceStatus
 )
 from .payment_gateway import (
-    PaymentGatewayConfig, PaymentTransaction, ManualPaymentRecord,
-    GatewayType, GatewayStatus, TransactionFeeType,
+    PaymentTransaction, ManualPaymentRecord,
     PayoutConfig, PayoutRecord, PayoutScheduleType, PayoutRecipientType, PayoutStatus
 )
 from .customer_portal import (
@@ -38,9 +37,6 @@ from .provisioning import (
 )
 from .user_settings import (
     UserSettings, GlobalSearch, UIBulkOperation, SearchSuggestion, UIPreferences
-)
-from .licence import (
-    Licence, LicencePayment, LicenceUsageLog, LicenceFeature, LicenceAlert
 )
 from .package_template import (
     PackageTemplate, PackageAssignment, BulkOperation, PackageGuide,
@@ -73,22 +69,15 @@ __all__ = [
     "OrganizationType",
     "OrganizationStatus",
 
-    # Platform Billing
-    "PlatformSubscriptionTier",
-    "PlatformInvoice",
-    "PlatformPayment",
+    # Platform Billing (tiers/invoices/payments retired — owned by subscriptions-api)
     "EarningsRecord",
     "PlatformBillingCycle",
     "TierType",
     "PlatformInvoiceStatus",
 
-    # Payment Gateways
-    "PaymentGatewayConfig",
+    # Payment Gateways (config retired — owned by treasury-api)
     "PaymentTransaction",
     "ManualPaymentRecord",
-    "GatewayType",
-    "GatewayStatus",
-    "TransactionFeeType",
     "PayoutConfig",
     "PayoutRecord",
     "PayoutScheduleType",
@@ -177,13 +166,6 @@ __all__ = [
     "UIBulkOperation",
     "SearchSuggestion",
     "UIPreferences",
-
-    # Licence
-    "Licence",
-    "LicencePayment",
-    "LicenceUsageLog",
-    "LicenceFeature",
-    "LicenceAlert",
 
     # Package Templates
     "PackageTemplate",

@@ -18,7 +18,6 @@ from app.core.errors import register_exception_handlers
 from app.core.logging import setup_logging
 from app.core.seed_service import run_startup_seeds
 from app.core.tenant_middleware import TenantMiddleware
-from app.core.licence_middleware import LicenceEnforcementMiddleware
 from app.core.database import AsyncSessionLocal
 from app.modules.system import initialization_service
 
@@ -304,8 +303,8 @@ app.add_middleware(RequestIDMiddleware)
 # Add tenant middleware for multi-tenancy support (needs DB for slug/UUID/domain lookups)
 app.add_middleware(TenantMiddleware, db_session_factory=AsyncSessionLocal)
 
-# Add licence enforcement middleware (runs after tenant middleware resolves org)
-app.add_middleware(LicenceEnforcementMiddleware, db_session_factory=AsyncSessionLocal)
+# NOTE: local licence-enforcement middleware retired — ISP subscription gating is
+# enforced via subscriptions-api `sub_*` JWT claims (see app/services/subscriptions_client.py).
 
 # Add trusted host middleware for production
 if settings.is_production and settings.allowed_hosts:
