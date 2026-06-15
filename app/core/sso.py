@@ -296,10 +296,24 @@ async def provision_sso_user(db: AsyncSession, claims: Dict[str, Any]) -> User:
         if sub and user.auth_service_user_id != str(sub):
             user.auth_service_user_id = str(sub)
         user.auth_synced_at = datetime.utcnow()
-        # Keep role in step with SSO unless this is a local platform owner we
-        # must not downgrade by accident — SSO is source of truth here.
-        if user.role != isp_role:
-            user.role = isp_role
+        # Role sync WITHOUT clobbering: auth.user.* events don't carry tenant-
+        # membership roles (those live in auth's tenant_memberships + the login
+        # JWT), so an event-time sync would otherwise downgrade a real ISP_ADMIN
+        # back to CUSTOMER on every redelivery. Policy: only change the role when
+        # the incoming claims actually carry role info (a JWT login, or an event
+        # with roles); when roles are absent, keep the existing local role.
+        _rank = {
+            UserRole.CUSTOMER: 0,
+            UserRole.ISP_TECHNICIAN: 1,
+            UserRole.ISP_ADMIN: 2,
+            UserRole.PLATFORM_OWNER: 3,
+        }
+        incoming_has_roles = bool(roles) or is_platform_owner
+        if incoming_has_roles and user.role != isp_role:
+            # Apply upgrades always; apply an explicit demotion only when the
+            # incoming role is non-trivial (not the empty->CUSTOMER default).
+            if _rank.get(isp_role, 0) >= _rank.get(user.role, 0) or isp_role != UserRole.CUSTOMER:
+                user.role = isp_role
         if org_id is not None and user.organization_id is None and not is_platform_owner:
             user.organization_id = org_id
         await db.commit()
