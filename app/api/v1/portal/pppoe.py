@@ -512,10 +512,17 @@ async def renew_subscription(
     user_id: int = Query(..., description="Customer user ID"),
 ):
     """
-    Renew subscription with a new or same plan.
+    Renew subscription with a new or same plan via treasury-api.
 
-    Initiates payment via M-PESA.
+    Payments are centralized on treasury-api (the single payment path): a payment
+    intent is created under the ISP tenant's UUID and the customer is handed the
+    shared treasury pay page. Confirmation runs via the verify endpoint below
+    (treasury get_status) — there is no local-gateway fallback.
     """
+    import uuid
+    from app.models.billing import PaymentMethod
+    from app.services.treasury_topup import create_topup_intent
+
     # Get plan
     plan_result = await db.execute(
         select(ServicePlan).where(
@@ -531,61 +538,47 @@ async def renew_subscription(
             detail="Package not found"
         )
 
-    # All payments go through the platform-level gateway (organization_id IS NULL).
-    # The platform admin configures the Paystack account; payouts are disbursed to ISPs separately.
-    from app.models.payment_gateway import PaymentGatewayConfig
-
-    gateway_result = await db.execute(
-        select(PaymentGatewayConfig)
-        .where(
-            PaymentGatewayConfig.organization_id.is_(None),
-            PaymentGatewayConfig.is_active == True,
-        )
-        .order_by(PaymentGatewayConfig.is_primary.desc())
-        .limit(1)
-    )
-    gateway_config = gateway_result.scalar_one_or_none()
-
-    if not gateway_config:
+    tenant_uuid = str(organization.uuid) if getattr(organization, "uuid", None) else None
+    if not tenant_uuid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No payment method available"
+            detail="Unable to resolve billing tenant for this organization",
         )
 
-    # Create gateway and initiate payment
-    from app.integrations.payment_gateways import PaymentGatewayFactory
-    import uuid
-
-    gateway = PaymentGatewayFactory.create(gateway_config)
     reference = f"PPP-{organization.slug[:6].upper()}-{uuid.uuid4().hex[:8].upper()}"
 
-    # Create Payment record to track this transaction
+    # Create a pending Payment record (treasury intent id stored on transaction_id).
     payment = Payment(
         organization_id=organization.id,
         user_id=user_id,
+        payment_number=reference,
         amount=plan.price,
         currency=plan.currency,
-        payment_reference=reference,
-        payment_method=gateway_config.gateway_type.value,
+        reference_number=reference,
+        payment_method=PaymentMethod.OTHER,
         status=PaymentStatus.PENDING,
-        description=f"PPPoE Subscription Renewal - {plan.name}",
+        notes=f"PPPoE Subscription Renewal - {plan.name}",
     )
     db.add(payment)
     await db.commit()
+    await db.refresh(payment)
 
-    # Build callback URL for Paystack browser redirects with payment type context
-    callback_url = None
-    if gateway_config.gateway_type.value == "paystack":
-        origin = request.headers.get("origin", "")
-        if origin:
-            callback_url = f"{origin}/payment/callback?payment_type=pppoe_renewal&org={org_slug}"
+    # Build the isp-billing callback the customer returns to after paying.
+    origin = request.headers.get("origin", "")
+    redirect_url = (
+        f"{origin}/payment/callback?payment_type=pppoe_renewal&org={org_slug}&reference={reference}"
+        if origin else ""
+    )
 
-    result = await gateway.initiate_payment(
-        amount=Decimal(str(plan.price)),
-        phone_number=data.phone_number,
+    intent = await create_topup_intent(
+        tenant_uuid=tenant_uuid,
+        amount=str(plan.price),
+        currency=plan.currency,
         reference=reference,
+        reference_type="pppoe_renewal",
         description=f"Renewal - {plan.name}",
-        callback_url=callback_url,
+        redirect_url=redirect_url,
+        customer_phone=data.phone_number or None,
         metadata={
             "organization_id": organization.id,
             "user_id": user_id,
@@ -593,13 +586,25 @@ async def renew_subscription(
             "payment_id": payment.id,
             "type": "renewal",
         },
+        button_text="Renew",
     )
 
+    if intent is None:
+        payment.status = PaymentStatus.FAILED
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Payment service is temporarily unavailable. Please try again.",
+        )
+
+    payment.transaction_id = intent.intent_id
+    await db.commit()
+
     return RenewalResponse(
-        success=result.success,
+        success=True,
         reference=reference,
-        message=result.message or ("Payment request sent" if result.success else "Payment failed"),
-        checkout_url=result.checkout_url,
+        message="Choose a payment method to complete your renewal.",
+        checkout_url=intent.checkout_url,
     )
 
 
@@ -616,22 +621,22 @@ async def verify_pppoe_payment(
     organization: Organization = Depends(get_organization_by_slug),
 ):
     """
-    Verify a PPPoE payment by checking directly with Paystack API.
+    Verify a PPPoE renewal payment via treasury-api.
 
-    Called by the frontend callback page after Paystack redirects back.
-    This bypasses webhooks entirely, verifying payment status directly
-    with Paystack API and processing the subscription if successful.
+    Called by the frontend callback page after the customer returns from the
+    shared treasury pay page. Polls the treasury payment intent (get_status) for
+    the payment's stored intent id; on success renews the subscription. Treasury
+    owns confirmation (NATS consumer primary, this poll is the fallback).
     """
     import logging
-    from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
-    from app.integrations.payment_gateways import PaymentGatewayFactory
+    from app.services.treasury_topup import get_intent_status, SUCCESS_STATUSES, FAILURE_STATUSES
 
     logger = logging.getLogger(__name__)
 
     # 1. Find the payment record
     result = await db.execute(
         select(Payment).where(
-            Payment.payment_reference == reference,
+            Payment.reference_number == reference,
             Payment.organization_id == organization.id,
         )
     )
@@ -654,74 +659,63 @@ async def verify_pppoe_payment(
                 "reference": reference,
                 "amount": float(payment.amount),
                 "currency": payment.currency,
-                "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
             },
         }
 
-    # 3. Get platform-level Paystack gateway
-    gateway_result = await db.execute(
-        select(PaymentGatewayConfig).where(
-            PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
-            PaymentGatewayConfig.organization_id.is_(None),
-            PaymentGatewayConfig.is_active == True,
-        ).limit(1)
-    )
-    gateway_config = gateway_result.scalar_one_or_none()
-
-    if not gateway_config:
+    # 3. Verify with treasury-api
+    if not payment.transaction_id:
         return {
             "success": False,
             "status": "error",
-            "message": "Payment gateway not configured",
+            "message": "No treasury payment intent associated with this payment",
         }
 
-    # 4. Verify directly with Paystack API
-    try:
-        gateway = PaymentGatewayFactory.create(gateway_config)
-        verification = await gateway.verify_payment(reference)
+    tenant_uuid = str(organization.uuid) if getattr(organization, "uuid", None) else None
+    treasury_status = await get_intent_status(
+        tenant_uuid=tenant_uuid, intent_id=payment.transaction_id
+    ) if tenant_uuid else None
 
-        if not verification.success:
-            if verification.status in ["failed", "cancelled"]:
-                payment.status = PaymentStatus.FAILED
-                await db.commit()
-            return {
-                "success": False,
-                "status": str(verification.status.value) if hasattr(verification.status, 'value') else str(verification.status),
-                "message": verification.message or "Payment verification failed",
-            }
+    if treasury_status is None:
+        return {
+            "success": False,
+            "status": "error",
+            "message": "Unable to verify payment with treasury. Please try again.",
+        }
 
-        # 5. Payment confirmed! Update payment record
-        paid_at = verification.paid_at or datetime.utcnow()
-        if hasattr(paid_at, 'tzinfo') and paid_at.tzinfo is not None:
-            paid_at = paid_at.replace(tzinfo=None)
-        payment.status = PaymentStatus.COMPLETED
-        payment.paid_at = paid_at
-        await db.flush()
-
-        # 6. Process subscription renewal
-        await _process_pppoe_subscription_renewal(db, payment, organization, logger)
-
+    if treasury_status in FAILURE_STATUSES:
+        payment.status = PaymentStatus.FAILED
         await db.commit()
-
-        return {
-            "success": True,
-            "status": "success",
-            "message": "Payment verified and subscription renewed",
-            "data": {
-                "reference": reference,
-                "amount": float(verification.amount) if verification.amount else float(payment.amount),
-                "currency": verification.currency or payment.currency,
-                "paid_at": (verification.paid_at or payment.paid_at).isoformat() if (verification.paid_at or payment.paid_at) else None,
-            },
-        }
-
-    except Exception as e:
-        logger.error(f"Error verifying PPPoE payment {reference}: {e}")
         return {
             "success": False,
-            "status": "error",
-            "message": f"Payment verification error: {str(e)}",
+            "status": treasury_status,
+            "message": f"Payment {treasury_status}",
         }
+
+    if treasury_status not in SUCCESS_STATUSES:
+        return {
+            "success": False,
+            "status": "pending",
+            "message": "Payment is still pending",
+        }
+
+    # 4. Payment confirmed — renew the subscription
+    payment.status = PaymentStatus.COMPLETED
+    payment.payment_date = datetime.utcnow()
+    await db.flush()
+
+    await _process_pppoe_subscription_renewal(db, payment, organization, logger)
+    await db.commit()
+
+    return {
+        "success": True,
+        "status": "success",
+        "message": "Payment verified and subscription renewed",
+        "data": {
+            "reference": reference,
+            "amount": float(payment.amount),
+            "currency": payment.currency,
+        },
+    }
 
 
 async def _process_pppoe_subscription_renewal(

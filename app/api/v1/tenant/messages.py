@@ -154,17 +154,16 @@ async def tenant_sms_topup(
     current_user: User = Depends(get_current_user),
 ) -> TenantSMSTopUpResponse:
     """
-    Initiate SMS credit top-up for the current user's organization.
+    Initiate SMS credit top-up for the current user's organization via treasury-api.
 
-    This endpoint automatically finds or creates an SMS account for the
-    organization and initiates a Paystack payment.
+    Finds or creates the org's SMS account, creates a treasury payment intent and
+    returns the shared treasury pay-page checkout URL. Confirmation is by polling
+    the admin verify endpoint (treasury get_status). ``checkout_url`` name retained
+    for the UI.
     """
-    from app.models.payment_gateway import PaymentGatewayConfig, GatewayType
-    from app.models.sms_credit import PlatformSMSSettings, SMSGatewayConfig, SMSGatewayStatus
-    from app.integrations.payment_gateways import PaymentGatewayFactory
-    from app.integrations.sms import SMSProviderFactory
-    from app.core.config import settings
-    import math
+    from app.models.sms_credit import PlatformSMSSettings
+    from app.models.organization import Organization
+    from app.services.treasury_topup import create_topup_intent
 
     # 1. Get organization ID
     organization_id = current_user.organization_id
@@ -201,51 +200,7 @@ async def tenant_sms_topup(
             message=f"Minimum amount is KES {cost_per_sms} for 1 SMS",
         )
 
-    # 4. Check platform SMS gateway balance and limit purchase
-    result = await db.execute(
-        select(SMSGatewayConfig).where(
-            SMSGatewayConfig.organization_id.is_(None),
-            SMSGatewayConfig.is_active == True,
-            SMSGatewayConfig.is_primary == True,
-        )
-    )
-    platform_gateway = result.scalar_one_or_none()
-
-    if platform_gateway and platform_gateway.credentials:
-        try:
-            # Decrypt credentials and get balance
-            encryption_key = getattr(settings, 'encryption_key', None)
-            if encryption_key:
-                credentials = PaymentGatewayFactory._decrypt_credentials(
-                    platform_gateway.credentials, encryption_key
-                )
-            else:
-                import json
-                credentials = json.loads(platform_gateway.credentials)
-
-            provider = await SMSProviderFactory.create(
-                provider_type=platform_gateway.provider_type,
-                credentials=credentials,
-                is_active=platform_gateway.is_active,
-            )
-
-            platform_balance, currency = await provider.get_account_balance()
-
-            # Calculate max allowed SMS: floor(balance / 2) - half of available, truncated
-            max_allowed_sms = int(platform_balance / 2)  # Truncate, no rounding
-
-            if sms_credits > max_allowed_sms:
-                return TenantSMSTopUpResponse(
-                    success=False,
-                    message=f"Purchase limit exceeded. You can currently purchase up to {max_allowed_sms} SMS credits. "
-                            f"Platform balance allows maximum {max_allowed_sms} SMS at this time.",
-                )
-        except Exception as e:
-            # If we can't check the balance, log but allow the purchase
-            # (platform owner should monitor their balance)
-            pass
-
-    # 5. Find or create SMS account for this organization
+    # 4. Find or create SMS account for this organization
     result = await db.execute(
         select(SMSCreditAccount).where(
             SMSCreditAccount.organization_id == organization_id,
@@ -255,7 +210,6 @@ async def tenant_sms_topup(
     account = result.scalar_one_or_none()
 
     if not account:
-        # Create new SMS account for this organization
         account = SMSCreditAccount(
             organization_id=organization_id,
             account_name=f"SMS Account - Org {organization_id}",
@@ -270,23 +224,16 @@ async def tenant_sms_topup(
         db.add(account)
         await db.flush()
 
-    # 6. Get Paystack gateway
-    result = await db.execute(
-        select(PaymentGatewayConfig).where(
-            PaymentGatewayConfig.gateway_type == GatewayType.PAYSTACK,
-            PaymentGatewayConfig.is_active == True,
-            PaymentGatewayConfig.organization_id.is_(None),  # Platform-level gateway
-        ).limit(1)
-    )
-    gateway_config = result.scalar_one_or_none()
-
-    if not gateway_config:
+    # 5. Resolve the treasury tenant (the ISP organization's UUID)
+    org = await db.get(Organization, organization_id)
+    tenant_uuid = str(org.uuid) if org and getattr(org, "uuid", None) else None
+    if not tenant_uuid:
         return TenantSMSTopUpResponse(
             success=False,
-            message="Payment gateway not configured",
+            message="Unable to resolve billing tenant for your organization",
         )
 
-    # 7. Create top-up record
+    # 6. Create pending top-up record (treasury intent id stored on provider_order_id)
     reference = f"SMS-{account.id}-{uuid.uuid4().hex[:12].upper()}"
     top_up = SMSTopUp(
         top_up_reference=reference,
@@ -295,7 +242,7 @@ async def tenant_sms_topup(
         currency="KES",
         sms_credits=sms_credits,
         cost_per_sms=Decimal(str(cost_per_sms)),
-        payment_method="paystack",
+        payment_method="treasury",
         payment_reference=reference,
         status=SMSTransactionStatus.PENDING,
         requested_by=current_user.id,
@@ -305,51 +252,44 @@ async def tenant_sms_topup(
     await db.commit()
     await db.refresh(top_up)
 
-    # 8. Initialize Paystack payment
-    try:
-        gateway = PaymentGatewayFactory.create(gateway_config)
+    # 7. Create treasury intent + pay-page checkout
+    intent = await create_topup_intent(
+        tenant_uuid=tenant_uuid,
+        amount=str(Decimal(str(request.amount))),
+        currency="KES",
+        reference=reference,
+        reference_type="sms_credit_topup",
+        description=f"SMS Credit Top-up - {sms_credits} SMS",
+        redirect_url=request.callback_url or "",
+        customer_email=request.email,
+        metadata={
+            "top_up_id": top_up.id,
+            "account_id": account.id,
+            "organization_id": organization_id,
+            "sms_credits": sms_credits,
+            "type": "sms_top_up",
+        },
+        button_text="Add SMS Credits",
+    )
 
-        callback_url = request.callback_url or gateway_config.callback_url or ""
-
-        payment_result = await gateway.initiate_payment(
-            amount=Decimal(str(request.amount)),
-            phone_number="",
-            reference=reference,
-            description=f"SMS Credit Top-up - {sms_credits} SMS",
-            callback_url=callback_url,
-            metadata={
-                "email": request.email,
-                "top_up_id": top_up.id,
-                "account_id": account.id,
-                "organization_id": organization_id,
-                "sms_credits": sms_credits,
-                "type": "sms_top_up",
-            },
-        )
-
-        if payment_result.success:
-            return TenantSMSTopUpResponse(
-                success=True,
-                message="Redirecting to payment...",
-                checkout_url=payment_result.checkout_url,
-                reference=reference,
-                sms_credits=sms_credits,
-            )
-        else:
-            await db.delete(top_up)
-            await db.commit()
-            return TenantSMSTopUpResponse(
-                success=False,
-                message=payment_result.message or "Failed to initiate payment",
-            )
-
-    except Exception as e:
+    if intent is None:
         await db.delete(top_up)
         await db.commit()
         return TenantSMSTopUpResponse(
             success=False,
-            message=f"Payment error: {str(e)}",
+            message="Payment service is temporarily unavailable. Please try again.",
         )
+
+    top_up.provider_order_id = intent.intent_id
+    await db.commit()
+
+    return TenantSMSTopUpResponse(
+        success=True,
+        message="Choose a payment method to complete your top-up.",
+        checkout_url=intent.checkout_url,
+        reference=reference,
+        sms_credits=sms_credits,
+    )
 
 
 class MessageResponse(BaseModel):

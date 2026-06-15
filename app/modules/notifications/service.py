@@ -1,4 +1,11 @@
-"""Notification service."""
+"""Notification service.
+
+DELIVERY of SMS / WhatsApp / email is centralized on the notifications-api
+(see app.services.notifications_client). isp-billing no longer ships local
+SMS/WhatsApp/email providers — this service only persists Notification rows and
+routes the actual send to the central notifications-api. SMS-credit and
+WhatsApp-subscription BILLING stay local (see SMSSendingService / models).
+"""
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -31,7 +38,7 @@ class NotificationService:
             recipient=user.email,
             status=NotificationStatus.PENDING,
         )
-        
+
         self.db.add(notification)
         await self.db.commit()
 
@@ -45,7 +52,7 @@ class NotificationService:
             recipient=user.email,
             status=NotificationStatus.PENDING,
         )
-        
+
         self.db.add(notification)
         await self.db.commit()
 
@@ -62,7 +69,7 @@ class NotificationService:
             recipient=user.phone,
             status=NotificationStatus.PENDING,
         )
-        
+
         self.db.add(notification)
         await self.db.commit()
 
@@ -78,7 +85,7 @@ class NotificationService:
             recipient=user.username,
             status=NotificationStatus.PENDING,
         )
-        
+
         self.db.add(notification)
         await self.db.commit()
 
@@ -103,7 +110,7 @@ class NotificationService:
             )
         )
         notification = result.scalar_one_or_none()
-        
+
         if not notification:
             return False
 
@@ -131,11 +138,11 @@ class NotificationService:
             data=data,
             status=NotificationStatus.PENDING,
         )
-        
+
         self.db.add(notification)
         await self.db.commit()
         await self.db.refresh(notification)
-        
+
         return notification
 
     async def send_email_notification(
@@ -145,17 +152,38 @@ class NotificationService:
         body: str,
         is_html: bool = False
     ) -> Dict[str, Any]:
-        """Send email notification."""
+        """Send an email via the central notifications-api.
+
+        Email delivery is owned by notifications-api; there is no local SMTP /
+        SendGrid / SES path anymore. Returns an error dict (no raise) when the
+        central client is unconfigured or the call fails, so callers behave the
+        same as before (best-effort delivery).
+        """
         try:
-            if settings.email_provider == "smtp":
-                return await self._send_smtp_email(to_email, subject, body, is_html)
-            elif settings.email_provider == "sendgrid":
-                return await self._send_sendgrid_email(to_email, subject, body, is_html)
-            elif settings.email_provider == "ses":
-                return await self._send_ses_email(to_email, subject, body, is_html)
-            else:
-                logger.warning(f"Unknown email provider: {settings.email_provider}")
-                return {"status": "error", "message": "Email provider not configured"}
+            from app.services.notifications_client import get_notifications_client
+
+            client = get_notifications_client()
+            if not client.is_configured:
+                logger.warning(
+                    "notifications-api not configured; email to %s not delivered",
+                    to_email,
+                )
+                return {"status": "error", "message": "notifications-api not configured"}
+
+            resp = await client.send(
+                channel="email",
+                template="ispbilling/raw_message",
+                to=[to_email],
+                data={"subject": subject, "body": body, "is_html": is_html},
+                metadata={"subject": subject},
+            )
+            logger.info("Email delivered via central notifications-api to %s", to_email)
+            return {
+                "status": "success",
+                "message": "Email sent via notifications-api",
+                "provider": "notifications-api",
+                "raw": resp,
+            }
         except Exception as e:
             logger.error(f"Failed to send email to {to_email}: {e}")
             return {"status": "error", "message": str(e)}
@@ -165,45 +193,37 @@ class NotificationService:
         to_phone: str,
         message: str
     ) -> Dict[str, Any]:
-        """Send SMS notification using platform gateway credentials."""
-        # Phase 4 (ADDITIVE/FLAGGED): route DELIVERY via the central
-        # notifications-api when enabled. This path carries no local SMS-credit
-        # accounting (that lives in SMSSendingService), so there is nothing to
-        # preserve here beyond the send itself. SMS is never plan-blocked.
-        if getattr(settings, "use_central_notifications", False):
-            central = await self._send_central_sms(to_phone, message)
-            if central is not None:
-                return central
-            # central not configured / failed → fall through to direct gateway
+        """Send an SMS via the central notifications-api.
 
+        DELIVERY is owned by notifications-api (Africa's Talking etc.); there is
+        no local SMS provider anymore. This path carries no SMS-credit accounting
+        (that lives in SMSSendingService). SMS is never plan-blocked. Returns an
+        error dict (no raise) when central is unconfigured / fails.
+        """
         try:
-            from sqlalchemy import and_
-            from app.models.sms_credit import SMSGatewayConfig, SMSProviderType, SMSGatewayStatus
+            from app.services.notifications_client import get_notifications_client
 
-            # Get primary active platform-level gateway
-            result = await self.db.execute(
-                select(SMSGatewayConfig).where(
-                    and_(
-                        SMSGatewayConfig.organization_id.is_(None),
-                        SMSGatewayConfig.is_active == True,
-                        SMSGatewayConfig.is_primary == True,
-                        SMSGatewayConfig.status == SMSGatewayStatus.ACTIVE,
-                    )
+            client = get_notifications_client()
+            if not client.is_configured:
+                logger.warning(
+                    "notifications-api not configured; SMS to %s not delivered",
+                    to_phone,
                 )
+                return {"status": "error", "message": "notifications-api not configured"}
+
+            resp = await client.send(
+                channel="sms",
+                template="ispbilling/raw_message",
+                to=[to_phone],
+                data={"body": message},
             )
-            gateway = result.scalar_one_or_none()
-
-            if not gateway:
-                logger.warning("No primary active SMS gateway configured at platform level")
-                return {"status": "error", "message": "SMS gateway not configured"}
-
-            if gateway.provider_type == SMSProviderType.AFRICASTALKING:
-                return await self._send_africas_talking_sms(to_phone, message)
-            elif gateway.provider_type == SMSProviderType.TWILIO:
-                return await self._send_twilio_sms(to_phone, message)
-            else:
-                logger.warning(f"Unknown SMS provider type: {gateway.provider_type}")
-                return {"status": "error", "message": "Unknown SMS provider"}
+            logger.info("SMS delivered via central notifications-api to %s", to_phone)
+            return {
+                "status": "success",
+                "message": "SMS sent via notifications-api",
+                "provider": "notifications-api",
+                "raw": resp,
+            }
         except Exception as e:
             logger.error(f"Failed to send SMS to {to_phone}: {e}")
             return {"status": "error", "message": str(e)}
@@ -214,262 +234,3 @@ class NotificationService:
             select(Notification).where(Notification.status == NotificationStatus.PENDING)
         )
         return result.scalars().all()
-
-    async def _send_smtp_email(
-        self,
-        to_email: str,
-        subject: str,
-        body: str,
-        is_html: bool = False
-    ) -> Dict[str, Any]:
-        """Send email via SMTP."""
-        try:
-            import smtplib
-            from email.mime.text import MIMEText
-            from email.mime.multipart import MIMEMultipart
-
-            msg = MIMEMultipart()
-            msg['From'] = settings.smtp_username
-            msg['To'] = to_email
-            msg['Subject'] = subject
-
-            if is_html:
-                msg.attach(MIMEText(body, 'html'))
-            else:
-                msg.attach(MIMEText(body, 'plain'))
-
-            with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
-                if settings.smtp_use_tls:
-                    server.starttls()
-                server.login(settings.smtp_username, settings.smtp_password)
-                server.send_message(msg)
-
-            logger.info(f"Email sent successfully to {to_email}")
-            return {"status": "success", "message": "Email sent successfully"}
-        except Exception as e:
-            logger.error(f"SMTP email sending failed: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def _send_sendgrid_email(
-        self,
-        to_email: str,
-        subject: str,
-        body: str,
-        is_html: bool = False
-    ) -> Dict[str, Any]:
-        """Send email via SendGrid."""
-        try:
-            import sendgrid
-            from sendgrid.helpers.mail import Mail
-
-            sg = sendgrid.SendGridAPIClient(api_key=settings.sendgrid_api_key)
-            
-            message = Mail(
-                from_email=settings.smtp_username,
-                to_emails=to_email,
-                subject=subject,
-                plain_text_content=body if not is_html else None,
-                html_content=body if is_html else None
-            )
-
-            response = sg.send(message)
-            
-            if response.status_code == 202:
-                logger.info(f"SendGrid email sent successfully to {to_email}")
-                return {"status": "success", "message": "Email sent successfully"}
-            else:
-                logger.error(f"SendGrid email failed: {response.status_code}")
-                return {"status": "error", "message": f"SendGrid error: {response.status_code}"}
-        except Exception as e:
-            logger.error(f"SendGrid email sending failed: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def _send_ses_email(
-        self,
-        to_email: str,
-        subject: str,
-        body: str,
-        is_html: bool = False
-    ) -> Dict[str, Any]:
-        """Send email via AWS SES."""
-        try:
-            import boto3
-            from botocore.exceptions import ClientError
-
-            ses_client = boto3.client(
-                'ses',
-                region_name=settings.aws_region,
-                aws_access_key_id=settings.aws_access_key_id,
-                aws_secret_access_key=settings.aws_secret_access_key
-            )
-
-            response = ses_client.send_email(
-                Source=settings.smtp_username,
-                Destination={'ToAddresses': [to_email]},
-                Message={
-                    'Subject': {'Data': subject},
-                    'Body': {
-                        'Text': {'Data': body} if not is_html else None,
-                        'Html': {'Data': body} if is_html else None
-                    }
-                }
-            )
-
-            logger.info(f"SES email sent successfully to {to_email}")
-            return {"status": "success", "message": "Email sent successfully", "message_id": response['MessageId']}
-        except ClientError as e:
-            logger.error(f"SES email sending failed: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def _send_central_sms(
-        self,
-        to_phone: str,
-        message: str,
-    ) -> Optional[Dict[str, Any]]:
-        """Deliver an SMS via the central notifications-api (Phase 4).
-
-        Returns a result dict on success, or ``None`` when the central client is
-        not configured / the call fails so the caller falls back to the local
-        direct gateway. Delivery-only: no local credit/billing side effects.
-        """
-        try:
-            from app.services.notifications_client import get_notifications_client
-
-            client = get_notifications_client()
-            if not client.is_configured:
-                return None
-            resp = await client.send(
-                channel="sms",
-                template="ispbilling/raw_message",
-                to=[to_phone],
-                data={"body": message},
-            )
-            logger.info(f"SMS delivered via central notifications-api to {to_phone}")
-            return {"status": "success", "message": "SMS sent via notifications-api", "provider": "notifications-api", "raw": resp}
-        except Exception as e:
-            logger.warning(
-                f"central notifications SMS delivery failed ({e}); falling back to direct gateway"
-            )
-            return None
-
-    async def _send_central_whatsapp(
-        self,
-        to_phone: str,
-        message: str,
-    ) -> Optional[Dict[str, Any]]:
-        """Deliver a WhatsApp message via the central notifications-api (Phase 4).
-
-        Delivery-only. The local WhatsApp-subscription billing (app/models/whatsapp.py)
-        is unaffected. Returns ``None`` when central is not configured / fails so the
-        caller can fall back to the local APIWAP provider. WhatsApp is never plan-blocked.
-        """
-        try:
-            from app.services.notifications_client import get_notifications_client
-
-            client = get_notifications_client()
-            if not client.is_configured:
-                return None
-            resp = await client.send(
-                channel="whatsapp",
-                template="ispbilling/raw_message",
-                to=[to_phone],
-                data={"body": message},
-            )
-            logger.info(f"WhatsApp delivered via central notifications-api to {to_phone}")
-            return {"status": "success", "message": "WhatsApp sent via notifications-api", "provider": "notifications-api", "raw": resp}
-        except Exception as e:
-            logger.warning(
-                f"central notifications WhatsApp delivery failed ({e}); falling back to local provider"
-            )
-            return None
-
-    async def _send_africas_talking_sms(
-        self,
-        to_phone: str,
-        message: str
-    ) -> Dict[str, Any]:
-        """Send SMS via Africa's Talking using platform gateway credentials."""
-        try:
-            import json
-            from sqlalchemy import and_
-            from app.models.sms_credit import SMSGatewayConfig, SMSProviderType, SMSGatewayStatus
-            from app.integrations.payment_gateways import PaymentGatewayFactory
-
-            # Get platform-level AT gateway (organization_id IS NULL)
-            result = await self.db.execute(
-                select(SMSGatewayConfig).where(
-                    and_(
-                        SMSGatewayConfig.organization_id.is_(None),
-                        SMSGatewayConfig.provider_type == SMSProviderType.AFRICASTALKING,
-                        SMSGatewayConfig.is_active == True,
-                        SMSGatewayConfig.status == SMSGatewayStatus.ACTIVE,
-                    )
-                )
-            )
-            gateway = result.scalar_one_or_none()
-
-            if not gateway:
-                logger.error("No active Africa's Talking gateway configured at platform level")
-                return {"status": "error", "message": "SMS gateway not configured"}
-
-            # Decrypt credentials JSON (same approach as sms_gateways.py)
-            encryption_key = getattr(settings, 'encryption_key', None)
-            if encryption_key:
-                credentials = PaymentGatewayFactory._decrypt_credentials(
-                    gateway.credentials, encryption_key
-                )
-            else:
-                # Development mode - try plain JSON
-                try:
-                    credentials = json.loads(gateway.credentials) if gateway.credentials else {}
-                except json.JSONDecodeError:
-                    credentials = {}
-
-            username = credentials.get("username") or credentials.get("api_username")
-            api_key = credentials.get("api_key")
-
-            if not api_key or not username:
-                logger.error(f"Africa's Talking credentials not properly configured. Keys found: {list(credentials.keys())}")
-                return {"status": "error", "message": "SMS gateway credentials missing"}
-
-            # Ensure phone number has + prefix for Africa's Talking
-            formatted_phone = to_phone if to_phone.startswith('+') else f'+{to_phone}'
-
-            import africastalking
-            africastalking.initialize(username=username, api_key=api_key)
-
-            sms = africastalking.SMS
-            response = sms.send(message, [formatted_phone])
-
-            if response['SMSMessageData']['Recipients'][0]['statusCode'] == 101:
-                logger.info(f"Africa's Talking SMS sent successfully to {to_phone}")
-                return {"status": "success", "message": "SMS sent successfully"}
-            else:
-                logger.error(f"Africa's Talking SMS failed: {response}")
-                return {"status": "error", "message": "SMS sending failed"}
-        except Exception as e:
-            logger.error(f"Africa's Talking SMS sending failed: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def _send_twilio_sms(
-        self,
-        to_phone: str,
-        message: str
-    ) -> Dict[str, Any]:
-        """Send SMS via Twilio."""
-        try:
-            from twilio.rest import Client
-
-            client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
-
-            message_obj = client.messages.create(
-                body=message,
-                from_=settings.twilio_phone_number,
-                to=to_phone
-            )
-
-            logger.info(f"Twilio SMS sent successfully to {to_phone}")
-            return {"status": "success", "message": "SMS sent successfully", "message_id": message_obj.sid}
-        except Exception as e:
-            logger.error(f"Twilio SMS sending failed: {e}")
-            return {"status": "error", "message": str(e)}

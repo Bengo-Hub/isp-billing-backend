@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db
 from app.api.deps_tenant import require_platform_owner
 from app.core.config import settings
-from app.integrations.payment_gateways.factory import PaymentGatewayFactory
+from app.core.logging import get_logger
 from app.models.user import User
 from app.models.whatsapp import (
     WhatsAppGatewayConfig,
@@ -28,7 +28,9 @@ from app.models.whatsapp import (
     WhatsAppSubscriptionStatus,
     PlatformWhatsAppSettings,
 )
-from app.integrations.whatsapp import WhatsAppProviderFactory
+from app.utils.credentials import decrypt_credentials
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/whatsapp", tags=["Platform - WhatsApp"])
 
@@ -252,10 +254,6 @@ async def test_whatsapp_gateway(
 
     Platform Admin only.
     """
-    import json
-    from cryptography.fernet import Fernet
-    import os
-
     # Get gateway
     result = await db.execute(
         select(WhatsAppGatewayConfig).where(
@@ -277,74 +275,47 @@ async def test_whatsapp_gateway(
             detail="Gateway credentials not set"
         )
 
-    # Decrypt credentials using the same method as SMS gateways
-    encryption_key = getattr(settings, 'encryption_key', None)
-    if encryption_key:
-        try:
-            credentials = PaymentGatewayFactory._decrypt_credentials(
-                gateway.credentials, encryption_key
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to decrypt credentials: {str(e)}"
-            )
-    else:
-        # Development mode - try plain JSON
-        try:
-            credentials = json.loads(gateway.credentials)
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid credentials format: {str(e)}"
-            )
-
-    # Create provider instance and test
+    # Validate stored credentials are well-formed.
     try:
-        provider = await WhatsAppProviderFactory.create(
-            provider_type=WhatsAppProviderType.APIWAP.value,
-            credentials=credentials
+        credentials = decrypt_credentials(gateway.credentials)
+        if not isinstance(credentials, dict) or not credentials:
+            raise ValueError("stored credentials are empty or malformed")
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid credentials format: {str(e)}"
         )
 
-        # Send test message. Routes via the central notifications-api when
-        # settings.use_central_notifications is enabled (Phase 4, DELIVERY-only);
-        # otherwise delegates to the local APIWAP provider unchanged.
-        result = await WhatsAppProviderFactory.deliver_message(
-            provider=provider,
-            to=data.phone_number,
-            message=data.test_message,
-            message_type="text",
+    # WhatsApp DELIVERY is owned by the central notifications-api. Send the test
+    # message through it (channel=whatsapp). There is no local APIWAP provider.
+    try:
+        from app.services.notifications_client import get_notifications_client
+
+        client = get_notifications_client()
+        if not client.is_configured:
+            raise RuntimeError("notifications-api not configured")
+
+        resp = await client.send(
+            channel="whatsapp",
+            template="ispbilling/raw_message",
+            to=[data.phone_number],
+            data={"body": data.test_message},
         )
 
-        if result.success:
-            # Update gateway status
-            gateway.status = WhatsAppGatewayStatus.ACTIVE
-            gateway.is_active = True
-            gateway.verified_at = datetime.utcnow()
-            gateway.last_error = None
-            await db.commit()
+        gateway.status = WhatsAppGatewayStatus.ACTIVE
+        gateway.is_active = True
+        gateway.verified_at = datetime.utcnow()
+        gateway.last_error = None
+        await db.commit()
 
-            return {
-                "success": True,
-                "message": "Test message sent successfully",
-                "message_id": result.message_id,
-                "recipient": result.recipient,
-            }
-        else:
-            # Update error
-            gateway.status = WhatsAppGatewayStatus.ERROR
-            gateway.is_active = False
-            gateway.last_error = result.message
-            gateway.last_error_at = datetime.utcnow()
-            await db.commit()
-
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Failed to send test message: {result.message}"
-            )
+        return {
+            "success": True,
+            "message": "Test message sent via central notifications-api",
+            "message_id": (resp or {}).get("requestId"),
+            "recipient": data.phone_number,
+        }
 
     except Exception as e:
-        # Update error
         gateway.status = WhatsAppGatewayStatus.ERROR
         gateway.is_active = False
         gateway.last_error = str(e)
