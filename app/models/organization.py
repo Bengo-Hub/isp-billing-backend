@@ -272,7 +272,7 @@ class OrganizationSettings(Base):
     invoice_prefix = Column(String(10), default="INV", nullable=False)
     invoice_footer = Column(Text, nullable=True)
     payment_reminder_days = Column(Integer, default=3, nullable=False)
-    auto_suspend_days = Column(Integer, default=7, nullable=False)  # Days after due date
+    auto_suspend_days = Column(Integer, default=14, nullable=False)  # Days after due date / churn window for duration-less accounts (system default 14)
 
     # Notification settings
     notify_on_payment = Column(Boolean, default=True, nullable=False)
