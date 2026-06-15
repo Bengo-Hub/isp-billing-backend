@@ -187,7 +187,7 @@ async def handle_auth_tenant(envelope: Dict[str, Any]) -> None:
     # auth-api is multi-product; only mirror ISP tenants. Empty use_case is
     # treated as ISP-eligible (older events may omit it) — adjust if auth-api
     # always stamps a use_case.
-    if use_case and use_case not in ("isp", "isp_billing", "ispbilling", "internet"):
+    if use_case and use_case not in ("isp", "isp_billing", "ispbilling", "internet", "hotspot", "hotspot_business", "pppoe"):
         logger.info(
             "auth.tenant.*: ignoring non-isp tenant %s (use_case=%s)",
             auth_tenant_id,
@@ -294,6 +294,28 @@ async def handle_auth_tenant(envelope: Dict[str, Any]) -> None:
         # NOTE: isp-billing has no separate Outlet/Branch model — the
         # Organization itself is the ISP HQ, and network nodes are Routers
         # (provisioned later). So there is no default-HQ-outlet row to create.
+
+        # Auto-assign the default ISP plan (KES 500 ISP_HOTSPOT_STARTER) with its
+        # 14-day free trial via subscriptions-api. Best-effort — onboarding must
+        # never fail because subscriptions-api is briefly unavailable; the tenant
+        # can be (re)subscribed later. The plan's free_trial_days=14 drives the
+        # trial; generate_invoice is left off so no charge is raised during trial.
+        try:
+            from app.services.subscriptions_client import get_subscriptions_client
+
+            sub_client = get_subscriptions_client()
+            if sub_client.is_configured:
+                await sub_client.subscribe(
+                    auth_tenant_id, "ISP_HOTSPOT_STARTER", start_trial=True
+                )
+                logger.info(
+                    "auth.tenant.*: auto-subscribed %s to ISP_HOTSPOT_STARTER (14-day trial)",
+                    auth_tenant_id,
+                )
+        except Exception as exc:  # pragma: no cover - best-effort
+            logger.warning(
+                "auth.tenant.*: auto-subscribe failed for %s: %s", auth_tenant_id, exc
+            )
 
 
 async def handle_auth_user(envelope: Dict[str, Any]) -> None:
