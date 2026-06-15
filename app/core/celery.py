@@ -15,6 +15,7 @@ celery_app = Celery(
         "app.tasks.provisioning_tasks",
         "app.tasks.subscription_tasks",
         "app.tasks.licence_tasks",
+        "app.tasks.event_tasks",
     ]
 )
 
@@ -117,6 +118,12 @@ celery_app.conf.update(
         "update-licence-usage-stats": {
             "task": "app.tasks.licence_tasks.update_licence_usage_stats",
             "schedule": 60.0 * 60,  # Hourly
+        },
+        # Phase 5: transactional-outbox publisher → NATS JetStream.
+        # Inert when NATS_URL is unset (publishes 0 rows), so safe to always run.
+        "publish-outbox-events": {
+            "task": "app.tasks.event_tasks.publish_outbox_events",
+            "schedule": 5.0,  # Every 5 seconds
         },
     },
 )

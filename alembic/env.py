@@ -14,7 +14,7 @@ from app.core.config import settings
 # Import all models for autogenerate support
 from app.models import (
     user, router, router_command, plan, subscription, billing, notification, provisioning,
-    organization, payment_gateway, platform_billing, customer_portal, rbac
+    organization, payment_gateway, platform_billing, customer_portal, rbac, outbox
 )
 
 # this is the Alembic Config object, which provides

@@ -309,6 +309,27 @@ def require_customer_or_admin():
     return role_checker
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Multi-outlet scope (Phase 5) — OPTIONAL, ADDITIVE.
+#
+# Clients (e.g. a per-outlet POS/admin UI) may send an ``X-Outlet-ID`` header to
+# scope reads/writes to a single outlet. This dependency parses it and returns
+# it as ``Optional[int]`` — it NEVER requires the header and NEVER errors when
+# it is absent or malformed (returns None), so every existing caller that omits
+# it is completely unaffected. Routers thread it into queries only as an
+# additional ``WHERE`` filter when present.
+# ──────────────────────────────────────────────────────────────────────────
+def get_outlet_id(request: Request) -> Optional[int]:
+    """Return the X-Outlet-ID header as an int, or None when absent/invalid."""
+    raw = request.headers.get("X-Outlet-ID") or request.headers.get("x-outlet-id")
+    if not raw:
+        return None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 class PaginationParams:
     """Pagination parameters."""
 

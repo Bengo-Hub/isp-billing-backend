@@ -105,6 +105,30 @@ class Settings(BaseSettings):
     # the platform tenant slug; when empty the caller-supplied tenant_id is used.
     notifications_tenant_id: Optional[str] = None
 
+    # ── NATS / JetStream event integration (Phase 5, ADDITIVE) ──
+    # Inter-service event bus. isp-billing PUBLISHES isp.* events via a
+    # transactional outbox (outbox_events table + a Celery beat poller) and
+    # CONSUMES treasury.payment.succeeded / auth.user.* / subscription.* via a
+    # standalone durable consumer (app.events.consumer).
+    #
+    # When nats_url is EMPTY (default), the whole event subsystem is INERT:
+    #   - the outbox poller no-ops (rows accumulate harmlessly / are pruned),
+    #   - the consumer is simply not deployed,
+    #   - the existing Phase-2 treasury payment/status POLLING remains the live
+    #     confirmation path (it is never removed — it is the fallback).
+    # This keeps the feature fully additive and migration-safe.
+    nats_url: Optional[str] = None  # e.g. nats://nats.nats.svc.cluster.local:4222
+    # JetStream stream that carries the isp.* subjects this service publishes.
+    nats_stream_name: str = "isp"
+    # Durable consumer name (shared across replicas → queue/durable, multi-pod
+    # safe: each event delivered once to the group, not once per pod).
+    nats_durable_name: str = "isp-billing-consumer"
+    # Connection name reported to the NATS server (observability).
+    nats_connection_name: str = "isp-billing"
+    # Settle buffer (seconds) before the consumer's first bind attempt, to dodge
+    # the JetStream "consumer already bound" race on rolling redeploys.
+    nats_rebind_settle_seconds: int = 25
+
     # Encryption (NEW)
     encryption_key: Optional[str] = None
     master_password: Optional[str] = None

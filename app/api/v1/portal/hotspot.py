@@ -1479,6 +1479,58 @@ async def _process_successful_payment(
         # Link voucher to purchase
         purchase.voucher_code_id = voucher.id
 
+        # Phase 5 (ADDITIVE): emit domain events via the transactional outbox in
+        # the SAME transaction as the voucher/payment write. Best-effort and
+        # fully guarded — if anything here raises it must NOT break provisioning,
+        # and the rows are inert until NATS is configured. Subjects:
+        #   isp.payment.received    — a customer payment completed
+        #   isp.subscriber.created  — a hotspot subscriber/user was provisioned
+        try:
+            from app.events.outbox import record_event
+            from app.events import EVT_PAYMENT_RECEIVED, EVT_SUBSCRIBER_CREATED
+
+            tenant_uuid = str(organization.uuid) if organization.uuid else None
+            record_event(
+                db,
+                event_type=EVT_PAYMENT_RECEIVED,
+                tenant_id=tenant_uuid,
+                aggregate_id=str(purchase.id),
+                payload={
+                    "purchase_id": purchase.id,
+                    "organization_id": organization.id,
+                    "organization_slug": organization.slug,
+                    "plan_id": plan.id,
+                    "plan_name": plan.name,
+                    "amount": str(purchase.amount),
+                    "currency": purchase.currency,
+                    "payment_method": purchase.payment_method,
+                    "payment_reference": purchase.payment_reference,
+                    "treasury_payment_intent_id": purchase.treasury_payment_intent_id,
+                    "phone_number": purchase.phone_number,
+                    "email": purchase.email,
+                    "voucher_code": voucher_code,
+                },
+            )
+            record_event(
+                db,
+                event_type=EVT_SUBSCRIBER_CREATED,
+                tenant_id=tenant_uuid,
+                aggregate_id=str(voucher.id),
+                payload={
+                    "voucher_id": voucher.id,
+                    "voucher_code": voucher_code,
+                    "organization_id": organization.id,
+                    "organization_slug": organization.slug,
+                    "plan_id": plan.id,
+                    "plan_name": plan.name,
+                    "hotspot_username": hotspot_username,
+                    "subscriber_type": "hotspot",
+                    "purchase_id": purchase.id,
+                },
+            )
+        except Exception as evt_exc:  # eventing must never break provisioning
+            logger.warning("failed to record outbox events for purchase %s: %s", purchase.id, evt_exc)
+
         # Commit payment status and voucher first (critical data)
         await db.commit()
 

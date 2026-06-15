@@ -61,6 +61,7 @@ from .rbac import (
 )
 from .configuration import Configuration, ConfigType
 from .platform_settings import PlatformSettings
+from .outbox import OutboxEvent
 
 __all__ = [
     # Base
@@ -225,4 +226,7 @@ __all__ = [
 
     # Platform Settings
     "PlatformSettings",
+
+    # Event outbox (Phase 5)
+    "OutboxEvent",
 ]
