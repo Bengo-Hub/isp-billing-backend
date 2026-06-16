@@ -174,18 +174,26 @@ async def upsert_router(
     service = RouterService(db, organization_id=current_user.organization_id)
 
     try:
-        # Check if router with this IP already exists
-        query = select(RouterModel).where(RouterModel.ip_address == router_data.ip_address)
+        # Match an existing router by IP OR by NAME within the org. The router's
+        # name (identity) is stable across provisions while its IP can change
+        # (NAT / WireGuard), so matching by IP alone would miss it and the create
+        # path would then violate the unique name constraint ("already exists").
+        from sqlalchemy import or_
+        match_conds = [RouterModel.ip_address == router_data.ip_address]
+        if router_data.name:
+            match_conds.append(RouterModel.name == router_data.name)
+        query = select(RouterModel).where(or_(*match_conds))
         if current_user.organization_id:
             query = query.where(RouterModel.organization_id == current_user.organization_id)
 
         result = await db.execute(query)
-        existing_router = result.scalar_one_or_none()
+        existing_router = result.scalars().first()
 
         if existing_router:
-            # Update existing router
+            # Update existing router (refresh IP too — it may have changed).
             update_data = {
                 "name": router_data.name,
+                "ip_address": router_data.ip_address,
                 "port": router_data.port,
                 "router_type": router_data.router_type,
             }
