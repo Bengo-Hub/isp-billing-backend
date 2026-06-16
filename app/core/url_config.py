@@ -38,14 +38,8 @@ class URLConfigService:
             "callback": "/api/v1/integrations/paystack/callback/",
             "redirect": "/payments/verify",  # Frontend redirect
         },
-        "africastalking": {
-            "delivery_report": "/api/v1/integrations/sms/africastalking/delivery/",
-            "incoming": "/api/v1/integrations/sms/africastalking/incoming/",
-        },
-        "twilio": {
-            "status_callback": "/api/v1/integrations/sms/twilio/status/",
-            "incoming": "/api/v1/integrations/sms/twilio/incoming/",
-        },
+        # NOTE (Phase C1): africastalking / twilio SMS callback URLs removed — SMS
+        # delivery is owned by notifications-api now.
         "kopokopo": {
             "webhook": "/api/v1/integrations/kopokopo/webhook/",
             "callback": "/api/v1/integrations/kopokopo/callback/",

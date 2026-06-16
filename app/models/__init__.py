@@ -42,15 +42,8 @@ from .package_template import (
     PackageTemplate, PackageAssignment, BulkOperation, PackageGuide,
     QuickSetup, PackageCategoryConfig, PackageRating
 )
-from .sms_credit import (
-    SMSCreditAccount, SMSTransaction, SMSTopUp, SMSCreditAlert,
-    PhoneNumberManagement, SMSCreditUsageStats
-)
-from .whatsapp import (
-    WhatsAppGatewayConfig, WhatsAppSubscriptionPackage, WhatsAppOrganizationSubscription,
-    WhatsAppSubscriptionPayment, WhatsAppMessage, PlatformWhatsAppSettings,
-    WhatsAppProviderType, WhatsAppGatewayStatus, WhatsAppSubscriptionStatus, WhatsAppTransactionStatus
-)
+# NOTE (Phase C1): SMS-credit + WhatsApp models removed — SMS/WhatsApp messaging,
+# credits and subscriptions are centralized on notifications-api now.
 from .rbac import (
     Role, Permission, UserPermission, SystemLicence,
     PermissionModule, PermissionAction, UserRole
@@ -175,26 +168,6 @@ __all__ = [
     "QuickSetup",
     "PackageCategoryConfig",
     "PackageRating",
-
-    # SMS
-    "SMSCreditAccount",
-    "SMSTransaction",
-    "SMSTopUp",
-    "SMSCreditAlert",
-    "PhoneNumberManagement",
-    "SMSCreditUsageStats",
-
-    # WhatsApp
-    "WhatsAppGatewayConfig",
-    "WhatsAppSubscriptionPackage",
-    "WhatsAppOrganizationSubscription",
-    "WhatsAppSubscriptionPayment",
-    "WhatsAppMessage",
-    "PlatformWhatsAppSettings",
-    "WhatsAppProviderType",
-    "WhatsAppGatewayStatus",
-    "WhatsAppSubscriptionStatus",
-    "WhatsAppTransactionStatus",
 
     # RBAC
     "Role",

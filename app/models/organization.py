@@ -116,7 +116,8 @@ class Organization(Base):
     # Notification settings
     notification_email = Column(String(100), nullable=True)
     notification_phone = Column(String(20), nullable=True)
-    sms_sender_id = Column(String(11), nullable=True)  # Custom SMS sender ID
+    # NOTE (Phase C1): sms_sender_id removed — SMS sending/sender-id is owned by
+    # notifications-api now (column dropped via migration).
 
     # Analytics
     total_revenue = Column(Integer, default=0, nullable=False)  # In cents
@@ -148,7 +149,8 @@ class Organization(Base):
     invoices = relationship("Invoice", back_populates="organization")
     payments = relationship("Payment", back_populates="organization")
     voucher_codes = relationship("VoucherCode", back_populates="organization")
-    whatsapp_subscription = relationship("WhatsAppOrganizationSubscription", back_populates="organization", uselist=False)
+    # NOTE (Phase C1): whatsapp_subscription relationship removed — WhatsApp
+    # subscriptions are owned by notifications-api now.
     expenses = relationship("Expense", back_populates="organization")
     system_logs = relationship("SystemLog", back_populates="organization")
     campaigns = relationship("Campaign", back_populates="organization")

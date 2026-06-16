@@ -10,11 +10,11 @@ to the central notifications-api which owns provider selection (Africa's Talking
 default for SMS, Meta WhatsApp Cloud API for WhatsApp), templating, and delivery
 logging.
 
-IMPORTANT — this moves DELIVERY only. The local SMS-credit accounting
-(``app/models/sms_credit.py`` + ``SMSSendingService`` billing) and the local
-WhatsApp-subscription billing (``app/models/whatsapp.py``) remain the source of
-truth for what an ISP provider is charged. This client is invoked only for the
-actual send, after the local billing/credit checks have run.
+IMPORTANT (Phase C1) — SMS / email / WhatsApp delivery AND all messaging credits
+/ WhatsApp subscriptions are now fully owned by notifications-api. isp-billing no
+longer keeps any local SMS-credit accounting or WhatsApp-subscription billing; it
+only emits isp.* domain events that notifications-api consumes. This thin REST
+client remains available for generic (non-SMS-credit) sends.
 
 Endpoint (see shared-docs/notifications-rest-api-integration.md):
 

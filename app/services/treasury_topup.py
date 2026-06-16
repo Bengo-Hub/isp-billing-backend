@@ -4,9 +4,10 @@ Centralizes the "create an invoice-first treasury payment intent + build the
 shared pay-page checkout URL" flow used by the local BILLING top-up paths that
 were migrated off the removed local payment gateways:
 
-    - SMS-credit top-up (admin/sms_credit.py, tenant/messages.py)
-    - WhatsApp-subscription top-up (platform/whatsapp.py)
     - PPPoE renewal (portal/pppoe.py)
+
+NOTE (Phase C1): the former SMS-credit and WhatsApp-subscription top-up callers
+were removed — those channels + their billing are owned by notifications-api now.
 
 Treasury-api is the single payment path (mirrors the hotspot purchase flow):
 the intent is created under the ISP tenant's UUID with source_service="isp" so

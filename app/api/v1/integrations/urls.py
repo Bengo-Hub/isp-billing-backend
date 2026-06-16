@@ -86,8 +86,6 @@ async def get_all_integration_urls(
     Supported integrations:
     - mpesa: M-PESA payment gateway
     - paystack: Paystack payment gateway
-    - africastalking: Africa's Talking SMS
-    - twilio: Twilio SMS
     - kopokopo: Kopo Kopo payments
     - pesapal: PesaPal payments
     """,

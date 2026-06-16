@@ -1359,6 +1359,22 @@ async def _process_successful_payment(
             from app.events import EVT_PAYMENT_RECEIVED, EVT_SUBSCRIBER_CREATED
 
             tenant_uuid = str(organization.uuid) if organization.uuid else None
+
+            # Customer-facing notification fields consumed by notifications-api.
+            # Hotspot purchases collect only phone/email; derive a display name
+            # from those (no separate name field on the purchase).
+            customer_name = purchase.email or purchase.phone_number or hotspot_username
+
+            # Access window expiry: online purchases are provisioned immediately
+            # (voucher.used_at=now), so the access window starts now. Use the
+            # plan's canonical access window (validity_days + time_limit aware) to
+            # stay consistent with the expiry reconciler.
+            try:
+                _window_hours = plan.access_window_hours()
+            except Exception:
+                _window_hours = (plan.validity_days or 0) * 24
+            expiry_at = (datetime.utcnow() + timedelta(hours=_window_hours)).isoformat()
+
             record_event(
                 db,
                 event_type=EVT_PAYMENT_RECEIVED,
@@ -1386,15 +1402,27 @@ async def _process_successful_payment(
                 tenant_id=tenant_uuid,
                 aggregate_id=str(voucher.id),
                 payload={
-                    "voucher_id": voucher.id,
-                    "voucher_code": voucher_code,
+                    # tenant (ISP org) + identifiers
+                    "tenant_id": tenant_uuid,
                     "organization_id": organization.id,
                     "organization_slug": organization.slug,
-                    "plan_id": plan.id,
-                    "plan_name": plan.name,
-                    "hotspot_username": hotspot_username,
-                    "subscriber_type": "hotspot",
+                    "voucher_id": voucher.id,
+                    "voucher_code": voucher_code,
                     "purchase_id": purchase.id,
+                    # customer + credentials (plaintext hotspot creds the customer needs)
+                    "customer_name": customer_name,
+                    "phone": purchase.phone_number,
+                    "email": purchase.email,
+                    "username": hotspot_username,
+                    "password": hotspot_password,
+                    # package + lifecycle
+                    "plan_id": plan.id,
+                    "package_name": plan.name,
+                    "package_type": "hotspot",
+                    "subscriber_type": "hotspot",
+                    "expiry_at": expiry_at,
+                    "amount": str(purchase.amount),
+                    "currency": purchase.currency,
                 },
             )
         except Exception as evt_exc:  # eventing must never break provisioning
