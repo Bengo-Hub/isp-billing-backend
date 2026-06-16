@@ -447,14 +447,28 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 
     code = status_to_code.get(exc.status_code, ErrorCode.SYS_INTERNAL_ERROR)
 
-    response = ErrorResponse(
-        success=False,
-        error=ErrorDetail(
-            code=code.value,
-            message=str(exc.detail),
+    # Preserve STRUCTURED dict details instead of stringifying them. Endpoints may
+    # raise HTTPException(detail={"code": "subscription_inactive", "upgrade": True,
+    # "message": ..., "contact": {...}}); the frontend discriminates the 403 on
+    # error.code (e.g. subscription_inactive / provider_subscription_inactive) and
+    # reads payload fields (e.g. the captive provider contact card) from
+    # error.details. str(exc.detail) used to flatten all that into one message.
+    detail = exc.detail
+    if isinstance(detail, dict):
+        error = ErrorDetail(
+            code=str(detail.get("code") or code.value),
+            message=str(detail.get("message") or detail.get("error") or "Request failed"),
+            details={k: v for k, v in detail.items() if k not in ("code", "message")} or None,
             trace_id=trace_id,
-        ),
-    )
+        )
+    else:
+        error = ErrorDetail(
+            code=code.value,
+            message=str(detail),
+            trace_id=trace_id,
+        )
+
+    response = ErrorResponse(success=False, error=error)
 
     return JSONResponse(
         status_code=exc.status_code,
