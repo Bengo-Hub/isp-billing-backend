@@ -84,7 +84,13 @@ class ServicePlan(Base):
     
     # Validity period (in days)
     validity_days = Column(Integer, nullable=False)
-    
+
+    # Precise access duration in MINUTES — authoritative when set (> 0). Supports
+    # sub-hour and arbitrary combos (e.g. 30 = 30min, 90 = 1h30m, 150 = 2h30m,
+    # 1440 = 1 day). When null/0, the legacy validity_days (capped by time_limit)
+    # is used instead, so existing plans are unaffected.
+    duration_minutes = Column(Integer, nullable=True)
+
     # Fair Usage Policy (FUP)
     fup_enabled = Column(Boolean, default=False, nullable=False)
     fup_threshold = Column(Integer, nullable=True)  # in GB
@@ -138,15 +144,22 @@ class ServicePlan(Base):
         """Check if plan has unlimited time."""
         return self.time_limit == -1
 
-    def access_window_hours(self) -> int:
+    def access_window_hours(self) -> float:
         """Effective access window, in HOURS, for a hotspot package.
 
-        ``validity_days`` is the calendar window; ``time_limit`` (also HOURS, per
-        the column definition) caps it when set (> 0). Returns the binding duration
-        in hours, or <= 0 when no finite window is defined (e.g. unlimited) so the
-        caller can treat it as "no calendar expiry". This is the single source of
-        truth used by both the voucher-redeem expiry and the expiry reconciler.
+        Precedence:
+        1. ``duration_minutes`` (precise per-package duration) wins when set (> 0)
+           and is returned as FLOAT hours so sub-hour windows (e.g. 30min → 0.5h,
+           1h30m → 1.5h) survive the downstream ``timedelta(hours=...)``.
+        2. Otherwise ``validity_days`` is the calendar window, capped by
+           ``time_limit`` (also HOURS) when set (> 0).
+
+        Returns <= 0 when no finite window is defined (e.g. unlimited) so callers
+        can treat it as "no calendar expiry". Single source of truth used by both
+        the voucher-redeem expiry and the expiry reconciler.
         """
+        if self.duration_minutes and self.duration_minutes > 0:
+            return self.duration_minutes / 60.0
         hours = (self.validity_days or 0) * 24
         if self.time_limit and self.time_limit > 0:
             hours = min(hours, self.time_limit) if hours > 0 else self.time_limit

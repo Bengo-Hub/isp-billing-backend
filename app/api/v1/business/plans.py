@@ -67,6 +67,7 @@ async def create_plan(
             data_limit=plan_data.data_limit,
             time_limit=plan_data.time_limit,
             validity_days=plan_data.validity_days,
+            duration_minutes=plan_data.duration_minutes,
             fup_enabled=plan_data.fup_enabled,
             fup_threshold=plan_data.fup_threshold,
             fup_download_speed=plan_data.fup_download_speed,
