@@ -7,12 +7,42 @@ Performs two-stage verification:
 
 import logging
 import asyncio
+import json
 import socket
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
+
+# Cross-pod shared cache TTLs (seconds). ping_monitor state is per-process; with
+# >1 backend replica a router's scan-report/notify (one pod) and the browser's
+# device-scan // ping/start (possibly another pod) must agree, so the
+# cross-pod-READ state is mirrored into Redis with these TTLs.
+_SCAN_TTL = 7200       # 2h — bootstrap scan cache
+_CHECKIN_TTL = 3600    # 1h — device check-in / session-verified
+
+
+async def _redis_set_json(key: str, value: Dict[str, Any], ttl: int) -> None:
+    """Best-effort Redis SET (JSON + TTL). Never raises — Redis is an optimization;
+    the in-memory copy still serves same-pod reads if Redis is unavailable."""
+    try:
+        from app.core.redis import redis_client
+        await redis_client.set(key, value, expire=ttl)
+    except Exception:
+        pass
+
+
+async def _redis_get_json(key: str) -> Optional[Dict[str, Any]]:
+    """Best-effort Redis GET → parsed JSON, or None."""
+    try:
+        from app.core.redis import redis_client
+        raw = await redis_client.get(key)
+        if raw:
+            return json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        pass
+    return None
 
 
 class PingMonitor:
@@ -94,22 +124,33 @@ class PingMonitor:
         # router the cloud can't reach), don't start the cloud-ping loop (it would
         # abort on the private RFC1918 IP). Re-emit the online events so the UI
         # flips both stages to success.
+        # Already verified for this session (notify arrived first) — locally OR on
+        # another backend replica (read-through Redis).
         existing = self.monitor_results.get(session_id)
+        if not (existing and existing.get("ping_verified") and existing.get("api_verified")):
+            existing = await _redis_get_json(f"isp:prov:verified:sess:{session_id}")
         if existing and existing.get("ping_verified") and existing.get("api_verified"):
             await self.mark_online_from_notify(session_id, existing.get("ip_address"), identity)
             return
 
         # A recent check-in for THIS router identity (e.g. the router called home
         # during a previous monitoring session that the user then refreshed,
-        # creating a new session_id) is still authoritative — resolve this new
-        # session from it so a refresh doesn't get stuck on the private-IP loop.
+        # creating a new session_id — possibly on another replica) is still
+        # authoritative — resolve this new session from it so a refresh/replica
+        # switch doesn't get stuck on the private-IP loop.
         if identity:
-            ic = self.identity_checkins.get(identity)
-            if ic and ic.get("ts"):
-                from datetime import timedelta
-                if datetime.now(timezone.utc) - ic["ts"] < timedelta(minutes=30):
-                    await self.mark_online_from_notify(session_id, ic.get("ip_address"), identity)
-                    return
+            ic = self.identity_checkins.get(identity) or await _redis_get_json(
+                f"isp:prov:checkin:ident:{identity}"
+            )
+            ts = ic.get("ts") if ic else None
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts)
+                except Exception:
+                    ts = None
+            if ts and datetime.now(timezone.utc) - ts < timedelta(minutes=30):
+                await self.mark_online_from_notify(session_id, ic.get("ip_address"), identity)
+                return
 
         # Create monitoring task
         task = asyncio.create_task(
@@ -182,6 +223,41 @@ class PingMonitor:
         self.pending_checkins[ip_address] = info or {"timestamp": datetime.now(timezone.utc).isoformat()}
         logger.info(f"Registered device checkin for {ip_address}: {self.pending_checkins[ip_address]}")
 
+    # ---- Bootstrap scan cache (cross-pod via Redis) -------------------------
+    async def store_scan(
+        self,
+        session_id: Optional[str],
+        identity: Optional[str],
+        payload: Dict[str, Any],
+    ) -> None:
+        """Cache a device scan in-memory AND Redis, keyed by session + identity,
+        so the browser's device-scan (any replica) reads the router's REAL
+        interfaces collected by the bootstrap script."""
+        if session_id:
+            self.scanned_configs[session_id] = payload
+            await _redis_set_json(f"isp:prov:scan:sess:{session_id}", payload, _SCAN_TTL)
+        if identity:
+            self.scanned_configs[f"identity:{identity}"] = payload
+            await _redis_set_json(f"isp:prov:scan:ident:{identity}", payload, _SCAN_TTL)
+
+    async def get_scan_by_identity(self, identity: str) -> Optional[Dict[str, Any]]:
+        local = self.scanned_configs.get(f"identity:{identity}")
+        if local:
+            return local
+        remote = await _redis_get_json(f"isp:prov:scan:ident:{identity}")
+        if remote:
+            self.scanned_configs[f"identity:{identity}"] = remote  # hydrate L1
+        return remote
+
+    async def get_scan_by_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        local = self.scanned_configs.get(session_id)
+        if local:
+            return local
+        remote = await _redis_get_json(f"isp:prov:scan:sess:{session_id}")
+        if remote:
+            self.scanned_configs[session_id] = remote
+        return remote
+
     async def mark_online_from_notify(
         self,
         session_id: str,
@@ -211,6 +287,20 @@ class PingMonitor:
                 "ip_address": ip_address,
                 "ts": datetime.now(timezone.utc),
             }
+        # Mirror to Redis so a /ping/start (or refreshed session) on ANOTHER
+        # replica resolves this check-in too (cross-pod).
+        await _redis_set_json(
+            f"isp:prov:verified:sess:{session_id}",
+            {"ip_address": ip_address, "method": "device-notify",
+             "ping_verified": True, "api_verified": True},
+            _CHECKIN_TTL,
+        )
+        if identity:
+            await _redis_set_json(
+                f"isp:prov:checkin:ident:{identity}",
+                {"ip_address": ip_address, "ts": datetime.now(timezone.utc).isoformat()},
+                _CHECKIN_TTL,
+            )
         try:
             if self.is_monitoring(session_id):
                 await self.stop_monitoring(session_id)

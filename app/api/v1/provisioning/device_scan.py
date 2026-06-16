@@ -132,7 +132,7 @@ async def scan_device(
             # connection that would fail and trigger the UI's hardcoded fallback.
             try:
                 from app.services.ping_monitor import ping_monitor
-                cached = ping_monitor.scanned_configs.get(f"identity:{router_obj.name}")
+                cached = await ping_monitor.get_scan_by_identity(router_obj.name)
                 if cached:
                     logger.info(
                         f"Using bootstrap-cached scan for router {request.router_id} "
