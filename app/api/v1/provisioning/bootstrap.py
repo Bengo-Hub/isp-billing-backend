@@ -901,10 +901,9 @@ async def bootstrap_scan_report(
     }
     try:
         from app.services.ping_monitor import ping_monitor
-        if session_id:
-            ping_monitor.scanned_configs[session_id] = scan_payload
-        if identity:
-            ping_monitor.scanned_configs[f'identity:{identity}'] = scan_payload
+        # Stores in-memory AND Redis (keyed by session + identity) so the browser's
+        # device-scan reads it even when it lands on a different backend replica.
+        await ping_monitor.store_scan(session_id, identity, scan_payload)
     except Exception:
         pass
 
