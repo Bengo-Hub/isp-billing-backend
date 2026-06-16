@@ -297,6 +297,12 @@ def generate_configuration_commands(
         ("Clearing previous PPP secrets", ':do { /ppp/secret/remove [find comment~"codevertex"] } on-error={}'),
         ("Clearing previous walled-garden hosts", ':do { /ip/hotspot/walled-garden/remove [find comment~"codevertex-portal"] } on-error={}'),
         ("Clearing previous walled-garden IPs", ':do { /ip/hotspot/walled-garden/ip/remove [find comment~"codevertex-portal"] } on-error={}'),
+        # Remove the previously-uploaded captive-portal template FILES so a stale
+        # page (e.g. an old tenant slug like /buy/demo-isp) can never survive a
+        # reprovision — even if the fresh /tool/fetch of login.html below fails,
+        # the hotspot then falls back to the built-in page, never the wrong slug.
+        ("Clearing previous captive login.html", ':do { /file/remove [find name="hotspot/login.html"] } on-error={}'),
+        ("Clearing previous captive alogin.html", ':do { /file/remove [find name="hotspot/alogin.html"] } on-error={}'),
         ("Clearing previous DHCP server", ":do { /ip/dhcp-server/remove [find name=codevertex-dhcp] } on-error={}"),
         ("Clearing previous DHCP network", ':do { /ip/dhcp-server/network/remove [find comment~"codevertex-dhcp-network"] } on-error={}'),
         ("Clearing previous IP pool", ":do { /ip/pool/remove [find name=codevertex-pool] } on-error={}"),

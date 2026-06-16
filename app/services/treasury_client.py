@@ -208,7 +208,14 @@ class TreasuryClient:
             params["initiate_url"] = initiate_url
         if button_text:
             params["button_text"] = button_text
-        return f"{self.pay_page_url}/pay?{urlencode(params)}"
+        # The canonical treasury pay page is `{books-ui}/pay`. Be defensive about
+        # how pay_page_url is configured: strip a trailing slash AND a trailing
+        # `/pay` so a value like ".../pay" (a common misconfig) doesn't produce the
+        # broken `/pay/pay` (404). Append exactly one `/pay`.
+        base = self.pay_page_url.rstrip("/")
+        if base.lower().endswith("/pay"):
+            base = base[:-4]
+        return f"{base}/pay?{urlencode(params)}"
 
     async def _post(
         self,
