@@ -1275,6 +1275,7 @@ async def create_router_backup(
     so its status reconciles when the agent reports back. Returns JSON (the
     frontend now renders history rather than downloading a blob).
     """
+    from datetime import datetime
     from app.models.router import RouterBackup
 
     service = RouterService(db, organization_id=_get_org_id(current_user))

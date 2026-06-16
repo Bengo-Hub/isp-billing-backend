@@ -321,11 +321,12 @@ class MasterSeeder:
         ``python seed_all.py --env production`` produces a fully usable
         production database without any demo data.
         """
+        # NOTE: ISP subscription tiers are owned by subscriptions-api (ISP_* plans),
+        # so there is no local _seed_subscription_tiers — do not import/call it.
         from app.core.seed_service import (
             _seed_rbac,
             _seed_platform_admin,
             _seed_platform_settings,
-            _seed_subscription_tiers,
         )
 
         async with AsyncSessionLocal() as db:
@@ -333,13 +334,12 @@ class MasterSeeder:
                 roles = await _seed_rbac(db)
                 admin = await _seed_platform_admin(db, roles)
                 await _seed_platform_settings(db, admin)
-                await _seed_subscription_tiers(db)
 
                 # Ensure platform org (Codevertex Africa Limited) exists
                 await self._seed_platform_org(db)
 
                 await db.commit()
-                self.logger.info("[OK] Production essentials seeded (superuser, platform org, settings, tiers)")
+                self.logger.info("[OK] Production essentials seeded (superuser, platform org, settings)")
             except Exception as e:
                 await db.rollback()
                 self.logger.error(f"[FAIL] Failed to seed production essentials: {e}")
