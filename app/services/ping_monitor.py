@@ -76,8 +76,18 @@ class PingMonitor:
             # Remove one-time pending checkin (consumed)
             del self.pending_checkins[ip_address]
             logger.info(f"Session {session_id}: Found prior device checkin for {ip_address}; marking as ready")
+            await self.mark_online_from_notify(session_id, ip_address)
             return
 
+        # If the router already called home for THIS session (bootstrap notify
+        # arrived before the UI opened monitoring — the normal case for a NAT'd
+        # router the cloud can't reach), don't start the cloud-ping loop (it would
+        # abort on the private RFC1918 IP). Re-emit the online events so the UI
+        # flips both stages to success.
+        existing = self.monitor_results.get(session_id)
+        if existing and existing.get("ping_verified") and existing.get("api_verified"):
+            await self.mark_online_from_notify(session_id, existing.get("ip_address"))
+            return
 
         # Create monitoring task
         task = asyncio.create_task(
@@ -149,6 +159,71 @@ class PingMonitor:
         """
         self.pending_checkins[ip_address] = info or {"timestamp": datetime.now(timezone.utc).isoformat()}
         logger.info(f"Registered device checkin for {ip_address}: {self.pending_checkins[ip_address]}")
+
+    async def mark_online_from_notify(
+        self,
+        session_id: str,
+        ip_address: Optional[str] = None,
+        identity: Optional[str] = None,
+    ) -> None:
+        """Mark a session's device ONLINE because the router called home.
+
+        The bootstrap notify (or polling-agent check-in) is the AUTHORITATIVE
+        "device online" signal for a NAT'd router the cloud-hosted backend can
+        never ICMP/TCP from the outside. Records the verified result, stops any
+        cloud-ping loop, and pushes the stage_complete (1 & 2) + device_online SSE
+        events the provisioning UI consumes so BOTH stages flip to success.
+        """
+        from app.api.v1.provisioning.stream import manager
+
+        self.monitor_results[session_id] = {
+            "ping_verified": True,
+            "api_verified": True,
+            "ip_address": ip_address,
+            "method": "device-notify",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            if self.is_monitoring(session_id):
+                await self.stop_monitoring(session_id)
+        except Exception:
+            pass
+
+        ts = datetime.now(timezone.utc).isoformat()
+        for stage, name, msg in (
+            (1, "Network Reachability", "Device reported in via secure check-in (NAT-safe)"),
+            (2, "API Port Check", "Device API confirmed via secure check-in"),
+        ):
+            try:
+                await manager.send_message(session_id, {
+                    "type": "stage_complete",
+                    "session_id": session_id,
+                    "data": {
+                        "stage": stage,
+                        "stage_name": name,
+                        "message": msg,
+                        "method": "device-notify",
+                        "timestamp": ts,
+                    },
+                })
+            except Exception:
+                pass
+        try:
+            await manager.send_message(session_id, {
+                "type": "device_online",
+                "session_id": session_id,
+                "data": {
+                    "message": "Device connected (reported via secure check-in) — ready for configuration",
+                    "ping_verified": True,
+                    "api_verified": True,
+                    "method": "device-notify",
+                    "identity": identity,
+                    "timestamp": ts,
+                },
+            })
+        except Exception:
+            pass
+        logger.info(f"Session {session_id}: marked online via device-notify (NAT-safe)")
 
     async def _monitor_loop(
         self,

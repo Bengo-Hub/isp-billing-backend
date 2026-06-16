@@ -1016,36 +1016,34 @@ async def provisioning_notify(
             await db.commit()
             logger.info(f'Provisioning notify: session {sid} marked completed')
 
-        # Update ping monitor
-        monitor_key = sid or session_id or (client_ip or 'unknown')
-        try:
-            ping_monitor.monitor_results[monitor_key] = {
-                'ping_verified': True,
-                'api_verified': True,
-                'ip_address': client_ip,
-                'method': 'device-notify',
-                'timestamp': datetime.utcnow().isoformat(),
-            }
-            if sid and ping_monitor.is_monitoring(sid):
-                await ping_monitor.stop_monitoring(sid)
-        except Exception:
-            logger.debug('Provisioning notify: ping_monitor update failed')
-
-        # Broadcast to UI
-        if sid:
-            await manager.send_message(sid, {
-                'type': 'provisioning_complete',
-                'session_id': sid,
-                'data': {
-                    'message': 'Device reported bootstrap completion',
-                    'ip_address': client_ip,
-                    'identity': identity,
-                    'status': status,
-                }
-            })
-
-        if sid:
-            return {'status': 'ok', 'session_id': sid}
+        # Mark the device ONLINE for the UI via the authoritative router->backend
+        # check-in (NAT-safe). This flips Stage 1 (network) + Stage 2 (API) to
+        # success and pushes device_online — whether the UI is already listening
+        # OR opens monitoring later (start_monitoring re-emits from the stored
+        # verified result instead of running the cloud-ping loop that aborts on a
+        # private RFC1918 IP). Keyed by the session in the notify URL so it
+        # correlates with the UI even when the DB session isn't matched.
+        effective_sid = sid or session_id
+        if effective_sid:
+            try:
+                await ping_monitor.mark_online_from_notify(effective_sid, client_ip, identity)
+            except Exception:
+                logger.debug('Provisioning notify: ping_monitor mark_online failed')
+            # Legacy event some UIs also listen for.
+            try:
+                await manager.send_message(effective_sid, {
+                    'type': 'provisioning_complete',
+                    'session_id': effective_sid,
+                    'data': {
+                        'message': 'Device reported bootstrap completion',
+                        'ip_address': client_ip,
+                        'identity': identity,
+                        'status': status,
+                    }
+                })
+            except Exception:
+                pass
+            return {'status': 'ok', 'session_id': effective_sid}
 
         # No session found — record pending check-in for future correlation
         ping_monitor.register_device_checkin(
