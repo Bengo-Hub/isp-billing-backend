@@ -10,8 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import (
     get_current_user,
     get_current_user_unified,
-    get_pagination_params,
-    PaginationParams,
 )
 from app.core.database import get_db
 from app.core.security import create_token_pair, verify_token
@@ -19,28 +17,18 @@ from app.models.user import User
 from app.schemas.user import (
     TokenRefresh,
     User as UserSchema,
-    UserCreate,
-    UserLogin,
-    UserPasswordChange,
-    UserPasswordReset,
-    UserPasswordResetConfirm,
-    UserVerification,
 )
-from app.schemas.auth import Token
 from app.modules.auth import AuthService, UserService
 
+# NOTE: Admin authentication is migrated to the central Codevertex SSO. This
+# router keeps only: /login + /refresh (local break-glass for the seeded
+# superuser if SSO is ever unreachable), /logout (stateless), and /me + /sso-me
+# (unified local-or-SSO identity). All other legacy local-auth endpoints
+# (register, email/phone verification, password reset/change, session
+# management, 2FA) were removed — the SSO IdP (auth-api) owns those. The captive
+# hotspot/PPPoE end-user portal auth is separate and unaffected.
+
 router = APIRouter()
-
-
-@router.post("/register", response_model=UserSchema, status_code=status.HTTP_201_CREATED)
-async def register(
-    user_data: UserCreate,
-    db: AsyncSession = Depends(get_db),
-) -> UserSchema:
-    """Register a new user."""
-    auth_service = AuthService(db)
-    user = await auth_service.register_user(user_data)
-    return UserSchema.model_validate(user)
 
 
 @router.post("/login",
@@ -89,35 +77,7 @@ async def login(
             detail="Inactive user"
         )
 
-    # Check if 2FA is enabled — return challenge token instead of full access
-    from sqlalchemy import select as sa_select
-    from app.models.user_settings import UserSettings
-    from app.core.security import create_2fa_challenge_token
-
-    settings_result = await db.execute(
-        sa_select(UserSettings).where(UserSettings.user_id == user.id)
-    )
-    user_settings = settings_result.scalar_one_or_none()
-
-    if (
-        user_settings
-        and user_settings.two_factor_enabled
-        and user_settings.two_factor_confirmed_at
-    ):
-        challenge_token = create_2fa_challenge_token(
-            user_id=user.id,
-            username=user.username,
-            role=user.role.value,
-            organization_id=user.organization_id,
-        )
-        return {
-            "data": {
-                "requires_2fa": True,
-                "temp_token": challenge_token,
-                "message": "Two-factor authentication required.",
-            }
-        }
-    
+    # 2FA is handled centrally by the SSO IdP, not by this break-glass path.
     # Create tokens
     token_data = create_token_pair(
         user_id=user.id,
@@ -276,11 +236,12 @@ async def refresh_token(
 @router.post("/logout")
 async def logout(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ) -> Dict[str, str]:
-    """Logout user and invalidate tokens."""
-    auth_service = AuthService(db)
-    await auth_service.logout_user(current_user.id)
+    """Logout (stateless).
+
+    JWTs are stateless and SSO session logout is owned by auth-api; this endpoint
+    simply acknowledges so clients can clear their locally-stored tokens.
+    """
     return {"message": "Successfully logged out"}
 
 
@@ -413,134 +374,6 @@ async def get_sso_current_user_info(
     }
 
 
-@router.post("/verify")
-async def verify_user(
-    verification_data: UserVerification,
-    db: AsyncSession = Depends(get_db),
-) -> Dict[str, str]:
-    """Verify user email or phone."""
-    auth_service = AuthService(db)
-    success = await auth_service.verify_user(
-        verification_data.token,
-        verification_data.verification_type,
-    )
-    
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired verification token"
-        )
-    
-    return {"message": "User verified successfully"}
-
-
-@router.post("/resend-verification")
-async def resend_verification(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> Dict[str, str]:
-    """Resend verification email or SMS."""
-    auth_service = AuthService(db)
-    await auth_service.resend_verification(current_user.id)
-    return {"message": "Verification sent successfully"}
-
-
-@router.post("/forgot-password")
-async def forgot_password(
-    password_reset_data: UserPasswordReset,
-    db: AsyncSession = Depends(get_db),
-) -> Dict[str, str]:
-    """Request password reset."""
-    auth_service = AuthService(db)
-    await auth_service.request_password_reset(password_reset_data.email)
-    return {"message": "Password reset instructions sent to your email"}
-
-
-@router.post("/reset-password")
-async def reset_password(
-    password_reset_data: UserPasswordResetConfirm,
-    db: AsyncSession = Depends(get_db),
-) -> Dict[str, str]:
-    """Reset password with token."""
-    auth_service = AuthService(db)
-    success = await auth_service.reset_password(
-        password_reset_data.token,
-        password_reset_data.new_password,
-    )
-    
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired reset token"
-        )
-    
-    return {"message": "Password reset successfully"}
-
-
-@router.post("/change-password")
-async def change_password(
-    password_data: UserPasswordChange,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> Dict[str, str]:
-    """Change user password."""
-    auth_service = AuthService(db)
-    success = await auth_service.change_password(
-        current_user.id,
-        password_data.current_password,
-        password_data.new_password,
-    )
-    
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Current password is incorrect"
-        )
-    
-    return {"message": "Password changed successfully"}
-
-
-@router.get("/sessions")
-async def get_user_sessions(
-    current_user: User = Depends(get_current_user),
-    pagination: PaginationParams = Depends(get_pagination_params),
-    db: AsyncSession = Depends(get_db),
-) -> Dict[str, Any]:
-    """Get user active sessions."""
-    auth_service = AuthService(db)
-    sessions = await auth_service.get_user_sessions(
-        current_user.id,
-        page=pagination.page,
-        size=pagination.size,
-    )
-    return sessions
-
-
-@router.delete("/sessions/{session_id}")
-async def revoke_session(
-    session_id: int,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> Dict[str, str]:
-    """Revoke a specific session."""
-    auth_service = AuthService(db)
-    success = await auth_service.revoke_session(session_id, current_user.id)
-    
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found"
-        )
-    
-    return {"message": "Session revoked successfully"}
-
-
-@router.delete("/sessions")
-async def revoke_all_sessions(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> Dict[str, str]:
-    """Revoke all user sessions except current one."""
-    auth_service = AuthService(db)
-    await auth_service.revoke_all_sessions(current_user.id)
-    return {"message": "All sessions revoked successfully"}
+# Legacy local-auth endpoints (email/phone verification, password reset/change,
+# and session management) were removed — these are owned by the central SSO
+# (auth-api) and the user-profile UI in accounts.codevertexitsolutions.com.
