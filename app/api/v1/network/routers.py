@@ -407,6 +407,7 @@ async def get_router_action_script(
     u: Optional[str] = Query(None, description="username (set_limits)"),
     lu: Optional[str] = Query(None, description="limit-uptime e.g. 1h (set_limits)"),
     lb: Optional[str] = Query(None, description="limit-bytes-total in bytes (set_limits)"),
+    backup_id: Optional[int] = Query(None, description="RouterBackup row id (backup upload correlation)"),
     db: AsyncSession = Depends(get_db),
 ) -> str:
     """Return a RouterOS .rsc for an agent-delivered router action.
@@ -453,13 +454,28 @@ async def get_router_action_script(
         )
 
     if action == "backup":
-        # NAT-safe backup: run /system/backup/save locally on the router. The
-        # file stays on the router (downloadable via winbox/ftp); the backend
-        # records the request + timestamp in router_backups.
+        # NAT-safe backup: save locally, then UPLOAD the .backup file to the
+        # backend so it is downloadable from the platform. The per-router agent
+        # token in the URL authenticates the upload (the /tool fetch upload can't
+        # set custom headers); the backend reconciles it to the RouterBackup row
+        # by backup_id.
+        _base = (settings.backend_url or "").rstrip("/")
+        if settings.force_https:
+            _base = _base.replace("http://", "https://")
+        _agent_tok = getattr(router_obj, "agent_token_plain", None) or ""
+        _upload = f"{_base}/api/v1/router-agent/backup-upload/{router_obj.id}?token={_agent_tok}"
+        if backup_id:
+            _upload += f"&backup_id={backup_id}"
+        _mode = "https" if _upload.startswith("https://") else "http"
         return (
             ":local bname (\"codevertex-\" . [:pick [/system/clock/get date] 0 11])\n"
-            ":do { /system/backup/save name=$bname } on-error={ :log warning \"CVACTION: backup failed\" }\n"
-            ":log info \"CVACTION: backup saved\"\n"
+            ":local fname ($bname . \".backup\")\n"
+            ":do { /system/backup/save name=$bname } on-error={ :log warning \"CVACTION: backup save failed\" }\n"
+            ":delay 3s\n"
+            f":do {{ /tool fetch mode={_mode} url=(\"{_upload}&name=\" . $bname) "
+            "src-path=$fname upload=yes http-method=post check-certificate=no } "
+            "on-error={ :log warning \"CVACTION: backup upload failed\" }\n"
+            ":log info \"CVACTION: backup saved+uploaded\"\n"
         )
 
     if action == "set_limits":
@@ -1255,11 +1271,54 @@ async def list_router_backups(
             "backup_type": b.backup_type,
             "size_bytes": b.size_bytes,
             "message": b.message,
+            # size_bytes is only set once the agent has uploaded the .backup file,
+            # so it doubles as the "file is available to download" flag (and avoids
+            # loading the deferred blob just to list).
+            "downloadable": b.size_bytes is not None,
             "created_at": b.created_at.isoformat() if b.created_at else None,
             "completed_at": b.completed_at.isoformat() if b.completed_at else None,
         }
         for b in res.scalars().all()
     ]
+
+
+@router.get("/{router_id}/backups/{backup_id}/download")
+async def download_router_backup(
+    router_id: int,
+    backup_id: int,
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download a stored router backup (.backup binary)."""
+    from fastapi import Response
+    from app.models.router import RouterBackup
+
+    service = RouterService(db, organization_id=_get_org_id(current_user))
+    router_obj = await service.get_by_id(router_id)
+    if not router_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    res = await db.execute(
+        select(RouterBackup)
+        .where(RouterBackup.id == backup_id)
+        .where(RouterBackup.router_id == router_id)
+    )
+    backup = res.scalar_one_or_none()
+    if not backup:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backup not found")
+
+    data = backup.file_data  # deferred — access triggers the load
+    if not data:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Backup file not uploaded yet (still pending on the router).",
+        )
+
+    return Response(
+        content=bytes(data),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{backup.name}.backup"'},
+    )
 
 
 @router.post("/{router_id}/backup", response_model=Dict[str, Any])
@@ -1289,17 +1348,23 @@ async def create_router_backup(
             detail="Backups require the polling agent (router is behind NAT and not directly reachable)",
         )
 
-    cmd_id = await _queue_agent_action(db, router_obj, "backup", current_user.id)
-
+    # Create the history row FIRST so we can correlate the agent's file upload
+    # back to this exact backup via its id (embedded in the action-script URL).
     backup = RouterBackup(
         router_id=router_id,
         name=f"codevertex-{datetime.utcnow().strftime('%Y-%m-%d-%H%M')}",
         status="pending",
         backup_type="binary",
-        command_id=cmd_id,
         requested_by=current_user.id,
     )
     db.add(backup)
+    await db.flush()  # assign backup.id
+
+    cmd_id = await _queue_agent_action(
+        db, router_obj, "backup", current_user.id,
+        extra_query={"backup_id": backup.id},
+    )
+    backup.command_id = cmd_id
     await db.commit()
     await db.refresh(backup)
 

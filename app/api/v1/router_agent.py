@@ -6,8 +6,9 @@ polling agent script. Authentication is via X-Router-Token header
 """
 
 from datetime import datetime
+from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -124,6 +125,80 @@ async def agent_report(
     )
 
     return AgentReportResponse(ok=True, processed=len(request.results))
+
+
+@router.post("/backup-upload/{router_id}")
+async def agent_backup_upload(
+    router_id: int,
+    request: Request,
+    token: str = Query(..., description="Per-router agent token"),
+    backup_id: Optional[int] = Query(None, description="RouterBackup row id"),
+    name: Optional[str] = Query(None, description="Backup file name on the router"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Receive a router .backup file uploaded NAT-safely by the polling agent.
+
+    The agent runs ``/system/backup/save`` then ``/tool fetch upload`` to POST the
+    file here. Auth is the per-router agent token in the query (the fetch upload
+    can't set the X-Router-Token header). The request body is the raw .backup
+    binary; it is stored on the matching RouterBackup row and flips it to
+    completed so the platform can serve it for download.
+    """
+    from app.models.router import RouterBackup
+
+    agent_service = RouterAgentService(db)
+    if not await agent_service.verify_agent_token(router_id, token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid router agent token",
+        )
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Empty backup body",
+        )
+
+    backup = None
+    if backup_id:
+        backup = (
+            await db.execute(
+                select(RouterBackup).where(
+                    and_(
+                        RouterBackup.id == backup_id,
+                        RouterBackup.router_id == router_id,
+                    )
+                )
+            )
+        ).scalar_one_or_none()
+    if backup is None:
+        # Fallback: newest backup row for this router (one-at-a-time in practice).
+        backup = (
+            await db.execute(
+                select(RouterBackup)
+                .where(RouterBackup.router_id == router_id)
+                .order_by(RouterBackup.created_at.desc())
+            )
+        ).scalars().first()
+    if backup is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No backup row to attach the file to",
+        )
+
+    backup.file_data = body
+    backup.size_bytes = len(body)
+    backup.status = "completed"
+    backup.completed_at = datetime.utcnow()
+    if name:
+        backup.name = name
+    await db.commit()
+    logger.info(
+        f"Stored backup file for router {router_id} "
+        f"(backup {backup.id}, {len(body)} bytes)"
+    )
+    return {"ok": True, "backup_id": backup.id, "size": len(body)}
 
 
 @router.get("/status/{router_id}", response_model=RouterAgentStatus)
