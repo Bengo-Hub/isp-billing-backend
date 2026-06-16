@@ -48,6 +48,10 @@ celery_app.conf.update(
             "task": "app.tasks.router_tasks.cleanup_expired_commands",
             "schedule": 60.0 * 15,  # Every 15 minutes
         },
+        "cleanup-old-router-backups": {
+            "task": "app.tasks.router_tasks.cleanup_old_router_backups",
+            "schedule": 60.0 * 60 * 24,  # Daily — churn backups older than 2 days
+        },
         "send-payment-reminders": {
             "task": "app.tasks.notification_tasks.send_payment_reminders",
             "schedule": 60.0 * 60 * 12,  # Twice daily

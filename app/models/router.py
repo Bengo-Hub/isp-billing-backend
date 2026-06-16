@@ -12,11 +12,12 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import deferred, relationship
 
 from app.core.database import Base
 
@@ -222,6 +223,12 @@ class RouterBackup(Base):
     size_bytes = Column(BigInteger, nullable=True)
     message = Column(Text, nullable=True)
     requested_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # The actual .backup blob, uploaded NAT-safely by the agent after
+    # /system/backup/save (deferred so list queries never load the binary).
+    # Backups are small (tens of KB) and churned after 2 days, so a DB blob is
+    # simpler than PVC/object-storage and is auto-pruned with the row.
+    file_data = deferred(Column(LargeBinary, nullable=True))
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

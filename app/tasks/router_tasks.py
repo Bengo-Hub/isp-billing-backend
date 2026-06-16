@@ -250,6 +250,42 @@ def cleanup_old_router_logs(self, days_old: int = 30):
 
 
 @celery_app.task(bind=True)
+def cleanup_old_router_backups(self, days_old: int = 2):
+    """Churn router backups older than ``days_old`` days (default 2).
+
+    Deletes the RouterBackup rows — and with them the stored .backup blobs — so
+    backups don't accumulate. Runs daily via beat.
+    """
+    logger.info(f"Cleaning up router backups older than {days_old} days")
+
+    try:
+        async def _cleanup_backups():
+            async with AsyncSessionLocal() as db:
+                from app.models.router import RouterBackup
+
+                cutoff = datetime.utcnow() - timedelta(days=days_old)
+                result = await db.execute(
+                    select(RouterBackup).where(RouterBackup.created_at < cutoff)
+                )
+                old = result.scalars().all()
+                count = 0
+                for b in old:
+                    await db.delete(b)
+                    count += 1
+                await db.commit()
+                return count
+
+        import asyncio
+        cleaned = asyncio.run(_cleanup_backups())
+
+        logger.info(f"Router backup cleanup completed. Removed {cleaned} backups")
+        return {"status": "success", "cleaned_count": cleaned}
+    except Exception as exc:
+        logger.error(f"Router backup cleanup failed: {exc}")
+        raise self.retry(exc=exc, countdown=60, max_retries=3)
+
+
+@celery_app.task(bind=True)
 def cleanup_expired_commands(self):
     """Clean up expired router agent commands and reset stale sent commands."""
     logger.info("Starting expired command cleanup")
