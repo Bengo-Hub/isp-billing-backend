@@ -1212,6 +1212,7 @@ async def start_ping_monitoring(
     interval_seconds: float = Query(2.0, description="Check interval in seconds", ge=0.5, le=10.0),
     max_attempts: int = Query(300, description="Maximum check attempts", ge=1, le=1000),
     timeout_ms: int = Query(1000, description="Connection timeout in milliseconds", ge=100, le=5000),
+    identity: Optional[str] = Query(None, description="Router identity (for NAT-safe cross-session check-in correlation)"),
     current_user: User = Depends(require_technician_or_admin()),
 ):
     """
@@ -1246,7 +1247,8 @@ async def start_ping_monitoring(
             api_port=api_port,
             interval_seconds=interval_seconds,
             max_attempts=max_attempts,
-            timeout_ms=timeout_ms
+            timeout_ms=timeout_ms,
+            identity=identity,
         )
 
         logger.info(
