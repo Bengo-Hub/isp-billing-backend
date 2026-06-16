@@ -765,14 +765,16 @@ class ReportsService:
             day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
             day_end = day_start + timedelta(days=1)
 
+            # Tenant hotspot/PPPoE customer sign-ups = new Subscription records
+            # (NOT system User accounts — those include admins/staff/SSO users and
+            # are not tenant-scoped subscribers, which inflated this chart).
             reg_filters = [
-                User.created_at >= day_start,
-                User.created_at < day_end,
-                User.role == UserRole.CUSTOMER,
+                Subscription.created_at >= day_start,
+                Subscription.created_at < day_end,
             ]
             if org_id:
-                reg_filters.append(User.organization_id == org_id)
-            reg_q = select(func.count()).select_from(User).where(and_(*reg_filters))
+                reg_filters.append(Subscription.organization_id == org_id)
+            reg_q = select(func.count()).select_from(Subscription).where(and_(*reg_filters))
             reg_count = (await self.db.execute(reg_q)).scalar() or 0
             registrations_chart.append({
                 "day": day_names[day.weekday()],

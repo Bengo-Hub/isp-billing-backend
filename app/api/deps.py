@@ -395,6 +395,25 @@ def get_pagination_params(
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
+def _claims_is_exempt(claims: dict) -> bool:
+    """Who is NEVER subscription-gated (mirrors the shared-ui-lib ``isExempt``).
+
+    Platform owner / superuser, demo tenants, and service-charge billing. Keeping
+    this identical to the frontend exemption ensures the backend gate and the
+    subscription banner agree on who is bypassed (e.g. the codevertex-demo ISP and
+    the platform owner never see gating or the expiry banner).
+    """
+    if claims.get("is_platform_owner") or claims.get("is_demo"):
+        return True
+    if str(claims.get("billing_mode", "")).strip().lower() == "service_charge":
+        return True
+    roles = {str(r).strip().lower() for r in (claims.get("roles") or [])}
+    if roles & {"platform_owner", "superuser"}:
+        return True
+    slug = str(claims.get("tenant_slug", "")).strip().lower()
+    return slug in {"codevertex", "codevertex-demo"}
+
+
 async def enforce_subscription_active(request: Request) -> None:
     """Gate mutating SSO requests on an ACTIVE subscription. Opt-in."""
     if request.method.upper() in _SAFE_METHODS:
@@ -414,11 +433,8 @@ async def enforce_subscription_active(request: Request) -> None:
     if claims is None:
         return
 
-    # Platform owners / superusers are never gated.
-    if claims.get("is_platform_owner"):
-        return
-    roles = {str(r).strip().lower() for r in (claims.get("roles") or [])}
-    if roles & {"platform_owner", "superuser"}:
+    # Platform owner / superuser / demo / service-charge are never gated.
+    if _claims_is_exempt(claims):
         return
 
     sub_status = str(claims.get("sub_status", "")).strip().upper()
@@ -459,11 +475,8 @@ def _limit_is_unlimited(value: Any) -> bool:
 
 
 def _claims_bypass_limits(claims: dict) -> bool:
-    """Platform owners / superusers are never limit-gated."""
-    if claims.get("is_platform_owner"):
-        return True
-    roles = {str(r).strip().lower() for r in (claims.get("roles") or [])}
-    return bool(roles & {"platform_owner", "superuser"})
+    """Platform owner / superuser / demo / service-charge are never limit-gated."""
+    return _claims_is_exempt(claims)
 
 
 def enforce_plan_limit(limit_key: str, count_fn):

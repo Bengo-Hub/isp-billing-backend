@@ -133,6 +133,11 @@ class PortalConfigResponse(BaseModel):
     show_packages: bool
     allow_guest_purchases: bool
     redirect_url: str = "https://www.google.com"
+    # Provider (ISP tenant) subscription gate: when False, the customer-facing buy
+    # flow shows a neutral "contact your provider" card instead of packages. The
+    # contact card is always included so the UI can render it on a purchase 403.
+    provider_active: bool = True
+    provider_contact: Optional[dict] = None
 
 
 class HotspotLoginRequest(BaseModel):
@@ -182,6 +187,11 @@ async def get_portal_config(
     show_packages = settings.show_packages_on_portal if settings else True
     allow_guest = settings.allow_guest_purchases if settings else True
 
+    # Provider subscription gate (fail-open): tells the customer UI whether to
+    # show packages or a neutral "contact your provider" card.
+    from app.services.provider_gate import resolve_provider_access
+    provider_active, provider_contact = await resolve_provider_access(organization)
+
     return PortalConfigResponse(
         organization_name=organization.name,
         logo_url=organization.logo_url,
@@ -191,6 +201,8 @@ async def get_portal_config(
         show_packages=show_packages,
         allow_guest_purchases=allow_guest,
         redirect_url=redirect_url,
+        provider_active=provider_active,
+        provider_contact=provider_contact,
     )
 
 
@@ -757,6 +769,24 @@ async def purchase_package(
 
     Public endpoint.
     """
+    # Block end-customer purchases when the PROVIDER's own subscription has fully
+    # lapsed (past grace). Neutral, customer-facing message + provider contact —
+    # never billing/suspension wording aimed at the customer.
+    from app.services.provider_gate import resolve_provider_access
+    provider_active, provider_contact = await resolve_provider_access(organization)
+    if not provider_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "provider_subscription_inactive",
+                "message": (
+                    "This hotspot is temporarily unavailable. Please contact the "
+                    "provider to restore service."
+                ),
+                "contact": provider_contact,
+            },
+        )
+
     # Get the plan
     result = await db.execute(
         select(ServicePlan)
