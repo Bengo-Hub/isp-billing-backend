@@ -1269,6 +1269,10 @@ async def get_payment_status(
                 response["hotspot_password"] = voucher.hotspot_password
                 # Gateway login URL so the captive page can authenticate the
                 # client on manual navigation (no captive-redirect param).
+                # ALWAYS build login_url when we have credentials: if the router
+                # row lookup fails we fall back to the standard hotspot gateway
+                # (172.31.0.1) so the frontend never bare-redirects an
+                # unauthenticated device (which caused ERR_CONNECTION_CLOSED).
                 router_result = await db.execute(
                     select(Router).where(
                         Router.organization_id == organization.id,
@@ -1276,13 +1280,12 @@ async def get_payment_status(
                     ).limit(1)
                 )
                 router_obj = router_result.scalar_one_or_none()
-                if router_obj:
-                    gw = _resolve_hotspot_gateway(router_obj)
-                    response["login_url"] = (
-                        f"http://{gw}/login"
-                        f"?username={voucher.hotspot_username}"
-                        f"&password={voucher.hotspot_password}"
-                    )
+                gw = _resolve_hotspot_gateway(router_obj) if router_obj else "172.31.0.1"
+                response["login_url"] = (
+                    f"http://{gw}/login"
+                    f"?username={voucher.hotspot_username}"
+                    f"&password={voucher.hotspot_password}"
+                )
 
     return response
 
