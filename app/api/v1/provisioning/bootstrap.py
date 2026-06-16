@@ -171,6 +171,48 @@ async def get_bootstrap_command(
       returns `bootstrap_already_done=true` so the UI can skip straight to API provisioning.
     """
     try:
+        # ── Ensure a router record exists BEFORE the device runs the script ──
+        # The bootstrap script installs the NAT-safe polling agent only when a
+        # Router row named `identity` already exists (it needs the row id to mint
+        # the agent token — see generate_bootstrap_script). On a first-time
+        # provision the user runs this bootstrap command before the wizard's
+        # device-scan creates the row, so the agent was never installed and a
+        # NAT'd (RFC1918) router then failed provisioning at the direct-connect
+        # step. Get-or-create the row here so the very first bootstrap run installs
+        # the agent. The later device-scan upsert (by name OR ip) reuses this row.
+        try:
+            from app.models.router import Router as RouterModel
+            from app.modules.routers.service import RouterService
+            from app.services.router_provisioning import store_router_credentials
+
+            _org_id = getattr(current_user, "organization_id", None)
+            _q = select(RouterModel).where(RouterModel.name == identity)
+            if _org_id:
+                _q = _q.where(RouterModel.organization_id == _org_id)
+            _existing = (await db.execute(_q)).scalars().first()
+            if not _existing:
+                _svc = RouterService(db, organization_id=_org_id)
+                _created = await _svc.create_router(
+                    name=identity,
+                    ip_address=ip_address or "192.168.88.1",
+                    username=settings.mikrotik_api_username,
+                    password=settings.mikrotik_api_password,
+                    port=api_port,
+                )
+                await store_router_credentials(
+                    db=db,
+                    router_id=_created.id,
+                    username=settings.mikrotik_api_username,
+                    password=settings.mikrotik_api_password,
+                    bootstrap_completed=False,
+                )
+                logger.info(
+                    f"Pre-created router record {_created.id} ({identity}) so the "
+                    f"bootstrap script can install the NAT-safe polling agent"
+                )
+        except Exception as e:
+            logger.warning(f"Could not pre-create router record for {identity}: {e}")
+
         # ── Reprovisioning auto-detection ──
         # If the caller provides a router_id, check whether this router already
         # completed bootstrap.  When it has stored API credentials, the frontend

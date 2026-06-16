@@ -30,13 +30,21 @@ from seed_rbac import seed_rbac
 from seed_users import seed_users
 from seed_plans import seed_plans, seed_package_templates, seed_package_categories
 # from seed_routers import seed_routers  # Disabled - routers created during provisioning
-from seed_licences import seed_licences
+# Licence subsystem removed — no-op stub so the production seed run never imports
+# the deleted app.models.licence (which crashed the whole seeder on startup).
+async def seed_licences(*args, **kwargs):
+    return []
 from seed_subscriptions import seed_subscriptions
 
 logger = get_logger(__name__)
 
-# Models that are only seeded in dev (demo data)
-DEMO_ONLY_MODELS = {"users", "licences", "subscriptions"}
+# Models that are only seeded in dev (demo data). Plans/packages are NOT seeded
+# in production — each ISP tenant creates its own hotspot/PPPoE packages from the
+# admin dashboard, so we never fabricate demo packages, templates, or categories.
+DEMO_ONLY_MODELS = {
+    "users", "licences", "subscriptions",
+    "plans", "package_templates", "package_categories",
+}
 
 
 class MasterSeeder:

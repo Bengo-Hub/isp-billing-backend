@@ -341,6 +341,53 @@ class ProvisioningService:
                 # Log and continue to normal provisioning if ping_monitor inspection fails
                 self.logger.debug(f"Error while checking ping_monitor pending_checkins: {e}")
 
+            # ── NAT safety net ──
+            # If we reach here the router has NO polling agent and no consumable
+            # check-in, yet its address is private (RFC1918): the cloud cannot open
+            # a direct RouterOS API connection, so the direct-API workflow below
+            # would only time out (~10s/step) and roll back with a cryptic
+            # "Service mikrotik timed out" error. Fail fast with an actionable
+            # message instead — the remedy is to (re-)run the bootstrap command,
+            # which installs the NAT-safe polling agent now that the router record
+            # exists (see get_bootstrap_command pre-create).
+            try:
+                import ipaddress
+
+                guard_router = await self.router_service.get_by_id(session.router_id)
+                try:
+                    ip_is_private = ipaddress.ip_address(guard_router.ip_address).is_private
+                except Exception:
+                    ip_is_private = False
+                agent_ready = bool(
+                    getattr(guard_router, "agent_installed", False)
+                    and getattr(guard_router, "agent_token", None)
+                )
+                if ip_is_private and not agent_ready:
+                    from .live_streaming import streaming_manager
+
+                    msg = (
+                        f"Router {guard_router.ip_address} is on a private network (NAT) and "
+                        f"the management agent is not installed yet, so the platform cannot "
+                        f"reach it directly. Re-run the bootstrap command on the router to "
+                        f"install the agent, then start provisioning again."
+                    )
+                    session.status = ProvisioningStatus.FAILED
+                    session.success = False
+                    session.error_message = msg
+                    session.completed_at = datetime.utcnow()
+                    await self.db.commit()
+                    await streaming_manager.log_provisioning_step(
+                        session.session_id, "connection", msg, "error"
+                    )
+                    await streaming_manager.end_session(session.session_id, False)
+                    self.logger.warning(
+                        f"Provisioning {session.session_id} blocked: NAT'd router "
+                        f"without agent ({guard_router.ip_address})"
+                    )
+                    return False
+            except Exception as e:
+                self.logger.debug(f"NAT safety-net check skipped (continuing): {e}")
+
             # Start provisioning process in background
             asyncio.create_task(self._execute_provisioning_workflow(session))
 
