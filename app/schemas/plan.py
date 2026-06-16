@@ -87,6 +87,9 @@ class ServicePlanBase(BaseModel):
     data_limit: int = Field(-1, ge=-1)  # -1 for unlimited
     time_limit: int = Field(-1, ge=-1)  # -1 for unlimited
     validity_days: int = Field(..., ge=1)
+    # Precise access duration in minutes (authoritative when set). Supports
+    # sub-hour + arbitrary combos (30=30min, 90=1h30m). Null → use validity_days.
+    duration_minutes: Optional[int] = Field(None, ge=1)
     fup_enabled: bool = False
     fup_threshold: Optional[int] = Field(None, ge=0)
     fup_download_speed: Optional[int] = Field(None, ge=0)
@@ -156,6 +159,7 @@ class ServicePlanUpdate(BaseModel):
     data_limit: Optional[int] = Field(None, ge=-1)
     time_limit: Optional[int] = Field(None, ge=-1)
     validity_days: Optional[int] = Field(None, ge=1)
+    duration_minutes: Optional[int] = Field(None, ge=1)
     fup_enabled: Optional[bool] = None
     fup_threshold: Optional[int] = Field(None, ge=0)
     fup_download_speed: Optional[int] = Field(None, ge=0)
