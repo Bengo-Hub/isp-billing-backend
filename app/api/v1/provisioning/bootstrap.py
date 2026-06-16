@@ -880,30 +880,54 @@ async def bootstrap_scan_report(
                 system_info=system_info,
             )
             logger.info(f"Scan report: stored config for router {router_obj.id} ({identity}): {len(interfaces)} interfaces")
-
-            # Broadcast scan_complete via WebSocket if session_id provided
-            if session_id:
-                try:
-                    from app.api.v1.provisioning.stream import manager
-                    await manager.send_message(session_id, {
-                        'type': 'scan_complete',
-                        'session_id': session_id,
-                        'data': {
-                            'interfaces': interfaces,
-                            'wan_interface': wan_interface,
-                            'version': system_info.get('version', ''),
-                            'board': system_info.get('board_name', ''),
-                            'message': 'Device scan data received from bootstrap',
-                        }
-                    })
-                except Exception:
-                    pass  # WebSocket broadcast is best-effort
-
         except Exception as e:
             logger.error(f"Scan report: failed to store config: {e}")
             # Don't fail - the data was received, just couldn't persist
     else:
-        logger.warning(f"Scan report: no router found for identity={identity}, ip={client_ip}")
+        logger.info(
+            f"Scan report: no router record yet for identity={identity} "
+            f"(first-time provisioning) — caching {len(interfaces)} interfaces by session/identity"
+        )
+
+    # Cache the scan by session_id + identity REGARDLESS of a router record, so
+    # the wizard reads the device's REAL interfaces during first-time provisioning
+    # (before any Router DB row exists) instead of a hardcoded fallback list.
+    scan_payload = {
+        'interfaces': interfaces,
+        'wan_interface': wan_interface,
+        'services': services,
+        'network_config': network_config,
+        'system_info': system_info,
+    }
+    try:
+        from app.services.ping_monitor import ping_monitor
+        if session_id:
+            ping_monitor.scanned_configs[session_id] = scan_payload
+        if identity:
+            ping_monitor.scanned_configs[f'identity:{identity}'] = scan_payload
+    except Exception:
+        pass
+
+    # ALWAYS broadcast scan_complete (router record or not) so the live wizard
+    # replaces the fallback ports with the device's actual interfaces.
+    if session_id:
+        try:
+            from app.api.v1.provisioning.stream import manager
+            await manager.send_message(session_id, {
+                'type': 'scan_complete',
+                'session_id': session_id,
+                'data': {
+                    'interfaces': interfaces,
+                    'wan_interface': wan_interface,
+                    'version': system_info.get('version', ''),
+                    'board': system_info.get('board_name', ''),
+                    'services': services,
+                    'network_config': network_config,
+                    'message': 'Device scan data received from bootstrap',
+                }
+            })
+        except Exception:
+            pass  # WebSocket broadcast is best-effort
 
     return {
         'success': True,
