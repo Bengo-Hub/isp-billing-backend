@@ -155,6 +155,17 @@ async def agent_backup_upload(
 
     body = await request.body()
     if not body:
+        # Diagnostic ping from the router's on-error path (the file upload
+        # failed) — log the context so the failure reason is visible
+        # server-side instead of only in the router's local log.
+        qp = request.query_params
+        if qp.get("status") == "failed":
+            logger.warning(
+                f"Backup upload FAILED on router {router_id} "
+                f"(backup_id={backup_id}, name={name}): "
+                f"file_present={qp.get('file_present')} size={qp.get('size')}"
+            )
+            return {"ok": False, "diagnostic": "upload_failed"}
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Empty backup body",

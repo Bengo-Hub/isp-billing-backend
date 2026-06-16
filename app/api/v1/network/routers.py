@@ -408,6 +408,7 @@ async def get_router_action_script(
     lu: Optional[str] = Query(None, description="limit-uptime e.g. 1h (set_limits)"),
     lb: Optional[str] = Query(None, description="limit-bytes-total in bytes (set_limits)"),
     backup_id: Optional[int] = Query(None, description="RouterBackup row id (backup upload correlation)"),
+    name: Optional[str] = Query(None, description="Exact backup file name (backup/delete_backup)"),
     db: AsyncSession = Depends(get_db),
 ) -> str:
     """Return a RouterOS .rsc for an agent-delivered router action.
@@ -458,7 +459,9 @@ async def get_router_action_script(
         # backend so it is downloadable from the platform. The per-router agent
         # token in the URL authenticates the upload (the /tool fetch upload can't
         # set custom headers); the backend reconciles it to the RouterBackup row
-        # by backup_id.
+        # by backup_id. The backend passes the exact `name` so the router file
+        # matches the DB row and is unique per backup (a date-only name would
+        # overwrite same-day backups and break delete-by-name).
         _base = (settings.backend_url or "").rstrip("/")
         if settings.force_https:
             _base = _base.replace("http://", "https://")
@@ -466,16 +469,41 @@ async def get_router_action_script(
         _upload = f"{_base}/api/v1/router-agent/backup-upload/{router_obj.id}?token={_agent_tok}"
         if backup_id:
             _upload += f"&backup_id={backup_id}"
-        _mode = "https" if _upload.startswith("https://") else "http"
+        # Use the backend-supplied unique name; fall back to a date+time stamp.
+        if name:
+            bname_expr = f"\"{name}\""
+        else:
+            bname_expr = (
+                "(\"codevertex-\" . [:pick [/system/clock/get date] 0 11] . \"-\" "
+                ". [:pick [/system/clock/get time] 0 5])"
+            )
         return (
-            ":local bname (\"codevertex-\" . [:pick [/system/clock/get date] 0 11])\n"
+            f":local bname {bname_expr}\n"
             ":local fname ($bname . \".backup\")\n"
-            ":do { /system/backup/save name=$bname } on-error={ :log warning \"CVACTION: backup save failed\" }\n"
-            ":delay 3s\n"
-            f":do {{ /tool fetch mode={_mode} url=(\"{_upload}&name=\" . $bname) "
-            "src-path=$fname upload=yes http-method=post check-certificate=no } "
-            "on-error={ :log warning \"CVACTION: backup upload failed\" }\n"
-            ":log info \"CVACTION: backup saved+uploaded\"\n"
+            ":do { /system/backup/save name=$bname dont-encrypt=yes } on-error={ :log warning \"CVACTION: backup save failed\" }\n"
+            # /system/backup/save is async + the file can take a few seconds to
+            # flush; wait until it actually exists (up to ~30s) before uploading,
+            # otherwise the fetch errors on a missing src-path.
+            ":local n 0\n"
+            ":while ([:len [/file find name=$fname]] = 0 && $n < 15) do={ :delay 2s; :set n ($n + 1) }\n"
+            ":local sz 0\n"
+            ":if ([:len [/file find name=$fname]] > 0) do={ :set sz [/file get [find name=$fname] size] }\n"
+            f":do {{ /tool fetch url=(\"{_upload}&name=\" . $bname) src-path=$fname upload=yes http-method=post check-certificate=no }} "
+            # On failure, ping the backend (no body) with a diagnostic so the
+            # reason (file present? size?) is visible server-side.
+            f"on-error={{ :log warning \"CVACTION: backup upload failed\"; /tool fetch url=(\"{_upload}&status=failed&file_present=\" . [:len [/file find name=$fname]] . \"&size=\" . $sz) http-method=post check-certificate=no }}\n"
+            ":log info \"CVACTION: backup done\"\n"
+        )
+
+    if action == "delete_backup":
+        # Remove the backup file from the router by exact name (passed by the
+        # backend, matching the .backup saved during the `backup` action).
+        if not name:
+            return ":log warning \"CVACTION: delete_backup missing name\"\n"
+        return (
+            f":do {{ /file remove [find name=\"{name}.backup\"] }} "
+            "on-error={ :log warning \"CVACTION: delete_backup failed\" }\n"
+            f":log info \"CVACTION: deleted backup {name}\"\n"
         )
 
     if action == "set_limits":
@@ -1321,6 +1349,58 @@ async def download_router_backup(
     )
 
 
+@router.delete("/{router_id}/backups/{backup_id}", response_model=Dict[str, Any])
+async def delete_router_backup(
+    router_id: int,
+    backup_id: int,
+    current_user: User = Depends(require_technician_or_admin()),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Delete a backup: queue an agent action to remove the .backup file from the
+    router (NAT-safe), then delete the DB row so it disappears from the table."""
+    from app.models.router import RouterBackup
+
+    service = RouterService(db, organization_id=_get_org_id(current_user))
+    router_obj = await service.get_by_id(router_id)
+    if not router_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Router not found")
+
+    res = await db.execute(
+        select(RouterBackup)
+        .where(RouterBackup.id == backup_id)
+        .where(RouterBackup.router_id == router_id)
+    )
+    backup = res.scalar_one_or_none()
+    if not backup:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backup not found")
+
+    # Best-effort: queue the router-side file removal (runs on the agent's next
+    # poll). The agent only exists for NAT-safe routers; if it isn't installed
+    # the file is left on the device but the DB row is still removed.
+    queued = False
+    if getattr(router_obj, "agent_installed", False) and getattr(router_obj, "agent_token", None):
+        try:
+            await _queue_agent_action(
+                db, router_obj, "delete_backup", current_user.id,
+                extra_query={"name": backup.name},
+            )
+            queued = True
+        except Exception as e:
+            # Don't block the DB deletion on a queue failure.
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to queue delete_backup for router {router_id}: {e}")
+
+    await db.delete(backup)
+    await db.commit()
+
+    return {
+        "success": True,
+        "deleted_id": backup_id,
+        "router_cleanup_queued": queued,
+        "message": "Backup deleted" + (" (router file removal queued)" if queued else ""),
+    }
+
+
 @router.post("/{router_id}/backup", response_model=Dict[str, Any])
 async def create_router_backup(
     router_id: int,
@@ -1362,7 +1442,7 @@ async def create_router_backup(
 
     cmd_id = await _queue_agent_action(
         db, router_obj, "backup", current_user.id,
-        extra_query={"backup_id": backup.id},
+        extra_query={"backup_id": backup.id, "name": backup.name},
     )
     backup.command_id = cmd_id
     await db.commit()
