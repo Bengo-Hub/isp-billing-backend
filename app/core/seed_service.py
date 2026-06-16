@@ -214,10 +214,11 @@ async def run_startup_seeds() -> None:
 
             # NOTE: ISP subscription tiers are owned by subscriptions-api (ISP_* plans)
             # with treasury auto-invoicing — no local tier seeding.
-
-            # 4. Demo data (non-production only)
-            if not settings.is_production:
-                await _seed_demo_accounts(db, roles)
+            #
+            # NOTE: no demo/customer user seeding. Seeding creates ONLY roles +
+            # permissions + the platform admin (superuser). The demo ISP tenant
+            # (codevertex-demo) and its admin come from the central SSO, not a local
+            # seeder, so we never fabricate hotspot/PPPoE customers or demo users.
 
             await db.commit()
             logger.info("Startup seeding completed successfully")
@@ -400,98 +401,3 @@ async def _seed_platform_settings(db: AsyncSession, admin: User) -> None:
     db.add(ps)
     logger.info("Platform settings seeded")
 
-
-async def _seed_demo_accounts(db: AsyncSession, roles: dict) -> None:
-    """Seed demo accounts in non-production environments."""
-    # Demo organization
-    result = await db.execute(
-        select(Organization).where(Organization.slug == "demo-isp")
-    )
-    demo_org = result.scalar_one_or_none()
-
-    if not demo_org:
-        logger.info("Creating demo organization (dev/staging only)...")
-        demo_org = Organization(
-            name="Demo ISP Company",
-            slug="demo-isp",
-            organization_type=OrganizationType.HOTSPOT,
-            status=OrganizationStatus.TRIAL,
-            email="demo@codevertexitsolutions.com",
-            phone="+254 700 000 000",
-            address="Demo Street, Nairobi",
-            city="Nairobi",
-            country="Kenya",
-            trial_ends_at=datetime.utcnow() + timedelta(days=14),
-            max_routers=5,
-            max_customers=100,
-            max_users=5,
-            features={
-                "hotspot_portal": True,
-                "voucher_system": True,
-                "sms_notifications": True,
-                "basic_analytics": True,
-                "mpesa_integration": True,
-            },
-        )
-        db.add(demo_org)
-        await db.flush()
-        logger.info(f"Demo organization created (id={demo_org.id})")
-
-    # Demo admin
-    result = await db.execute(
-        select(User)
-        .where(User.username == "demo")
-        .options(selectinload(User.role_obj))
-    )
-    demo_admin = result.scalar_one_or_none()
-
-    if not demo_admin:
-        logger.info("Creating demo admin account (dev/staging only)...")
-        demo_admin = User(
-            username="demo",
-            email="demo@codevertexitsolutions.com",
-            first_name="Demo",
-            last_name="Admin",
-            company_name="Demo ISP Company",
-            hashed_password=get_password_hash("demo123"),
-            role=UserRole.ISP_ADMIN,
-            status=UserStatus.ACTIVE,
-            is_verified=True,
-            is_active=True,
-            organization_id=demo_org.id,
-        )
-        demo_admin.role_obj = roles["admin"]
-        db.add(demo_admin)
-        await db.flush()
-        logger.info("Demo admin account created")
-    else:
-        if not demo_admin.role_obj or demo_admin.role_obj.name != "admin":
-            demo_admin.role_obj = roles["admin"]
-        # Ensure demo admin is linked to the demo org
-        if not demo_admin.organization_id:
-            demo_admin.organization_id = demo_org.id
-            logger.info("Demo admin linked to demo organization")
-
-    # Demo licence
-    result = await db.execute(
-        select(SystemLicence).where(SystemLicence.licence_key == "DEMO-TRIAL-2024")
-    )
-    demo_licence = result.scalar_one_or_none()
-
-    if not demo_licence:
-        logger.info("Creating demo licence...")
-        demo_licence = SystemLicence(
-            licence_key="DEMO-TRIAL-2024",
-            organization_name="Demo ISP Company",
-            contact_email="demo@codevertexitsolutions.com",
-            contact_phone="+254 700 000 000",
-            licence_type="trial",
-            trial_days=14,
-            max_users=100,
-            max_routers=20,
-            trial_started_at=datetime.utcnow(),
-            trial_expires_at=datetime.utcnow() + timedelta(days=14),
-            is_active=True,
-        )
-        db.add(demo_licence)
-        logger.info("Demo licence created")
