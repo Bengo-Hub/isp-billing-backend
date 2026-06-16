@@ -439,12 +439,14 @@ class RouterService:
             
             self.logger.info(f"Created router {router.id}: {router.name} ({router.ip_address})")
 
-            # Test connection and update status asynchronously
-            try:
-                await self.sync_router_status(router.id)
-            except Exception as e:
-                self.logger.warning(f"Failed to sync status for new router {router.id}: {e}")
-                # Don't fail the creation if status sync fails
+            # Do NOT synchronously sync_router_status() here. A freshly-created
+            # router is typically NAT'd (a private LAN IP the cloud cannot reach),
+            # so a direct MikroTik connection hangs ~30s+ and made the create
+            # request exceed the frontend's 30s HTTP timeout ("Failed to save
+            # router") even though the router WAS created — forcing a manual retry.
+            # Status is synced later via the polling agent / device check-in and
+            # the scheduled sync task, never via a blocking cloud->router connect
+            # at create time.
 
             return router
             
