@@ -33,6 +33,11 @@ class PingMonitor:
         # sessions, so a refreshed/new monitoring session resolves from a prior
         # router->backend notify — the NAT-safe signal).
         self.identity_checkins: Dict[str, Dict[str, Any]] = {}
+        # Cached device scans (real interfaces/services/network) keyed by
+        # session_id AND "identity:<name>", so the wizard shows the router's
+        # ACTUAL ports during first-time provisioning (before any Router DB
+        # record exists) instead of a hardcoded fallback.
+        self.scanned_configs: Dict[str, Dict[str, Any]] = {}
 
     async def start_monitoring(
         self,
