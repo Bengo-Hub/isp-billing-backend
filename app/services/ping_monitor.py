@@ -29,6 +29,10 @@ class PingMonitor:
         self.monitor_results: Dict[str, Dict[str, Any]] = {}
         # Pending device check-ins keyed by ip_address
         self.pending_checkins: Dict[str, Dict[str, Any]] = {}
+        # Recent device check-ins keyed by ROUTER IDENTITY (survives across
+        # sessions, so a refreshed/new monitoring session resolves from a prior
+        # router->backend notify — the NAT-safe signal).
+        self.identity_checkins: Dict[str, Dict[str, Any]] = {}
 
     async def start_monitoring(
         self,
@@ -37,7 +41,8 @@ class PingMonitor:
         api_port: int = 8728,
         interval_seconds: float = 2.0,
         max_attempts: int = 30,
-        timeout_ms: int = 1000
+        timeout_ms: int = 1000,
+        identity: Optional[str] = None,
     ):
         """
         Start two-stage connectivity monitoring for a provisioning session.
@@ -86,8 +91,20 @@ class PingMonitor:
         # flips both stages to success.
         existing = self.monitor_results.get(session_id)
         if existing and existing.get("ping_verified") and existing.get("api_verified"):
-            await self.mark_online_from_notify(session_id, existing.get("ip_address"))
+            await self.mark_online_from_notify(session_id, existing.get("ip_address"), identity)
             return
+
+        # A recent check-in for THIS router identity (e.g. the router called home
+        # during a previous monitoring session that the user then refreshed,
+        # creating a new session_id) is still authoritative — resolve this new
+        # session from it so a refresh doesn't get stuck on the private-IP loop.
+        if identity:
+            ic = self.identity_checkins.get(identity)
+            if ic and ic.get("ts"):
+                from datetime import timedelta
+                if datetime.now(timezone.utc) - ic["ts"] < timedelta(minutes=30):
+                    await self.mark_online_from_notify(session_id, ic.get("ip_address"), identity)
+                    return
 
         # Create monitoring task
         task = asyncio.create_task(
@@ -183,6 +200,12 @@ class PingMonitor:
             "method": "device-notify",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        # Persist by router identity so a later/refreshed session resolves from it.
+        if identity:
+            self.identity_checkins[identity] = {
+                "ip_address": ip_address,
+                "ts": datetime.now(timezone.utc),
+            }
         try:
             if self.is_monitoring(session_id):
                 await self.stop_monitoring(session_id)
