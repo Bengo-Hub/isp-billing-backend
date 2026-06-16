@@ -137,20 +137,5 @@ def create_token_pair(
     }
 
 
-def create_2fa_challenge_token(
-    user_id: int,
-    username: str,
-    role: str,
-    organization_id: Optional[int] = None,
-) -> str:
-    """Create a short-lived token for 2FA challenge step."""
-    expire = datetime.now(timezone.utc) + timedelta(minutes=5)
-    to_encode = {
-        "sub": str(user_id),
-        "username": username,
-        "role": role,
-        "organization_id": organization_id,
-        "exp": expire,
-        "type": "2fa_challenge",
-    }
-    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+# create_2fa_challenge_token was removed with the local 2FA flow — 2FA is now
+# handled centrally by the SSO IdP (auth-api).
