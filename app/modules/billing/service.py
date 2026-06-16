@@ -714,9 +714,6 @@ class BillingService:
             if transaction.invoice_id:
                 await self._apply_payment_to_invoice(transaction.invoice_id, amount)
 
-                # Check for WhatsApp subscription invoices and activate
-                await self._activate_whatsapp_subscription_if_applicable(transaction.invoice_id)
-
             # Activate subscription if linked
             if transaction.subscription_id:
                 await self._activate_subscription_on_payment(transaction.subscription_id)
@@ -768,121 +765,8 @@ class BillingService:
         except Exception as e:
             self.logger.error(f"Error activating subscription {subscription_id}: {e}")
 
-    async def _activate_whatsapp_subscription_if_applicable(self, invoice_id: int) -> None:
-        """
-        Check if a paid invoice is for a WhatsApp subscription and activate it.
-
-        Uses the invoice notes field (format: 'whatsapp_subscription:{provider}')
-        or invoice item type to identify WhatsApp subscription invoices.
-        """
-        try:
-            invoice = await self.db.get(Invoice, invoice_id)
-            if not invoice:
-                return
-
-            # Check invoice notes for WhatsApp subscription marker
-            is_whatsapp = False
-            provider = "APIWAP"
-
-            if invoice.notes and invoice.notes.startswith("whatsapp_subscription:"):
-                is_whatsapp = True
-                provider = invoice.notes.split(":", 1)[1] if ":" in invoice.notes else "APIWAP"
-
-            if not is_whatsapp:
-                # Also check invoice items for whatsapp_subscription type
-                from app.models.billing import InvoiceItem
-                item_result = await self.db.execute(
-                    select(InvoiceItem).where(
-                        InvoiceItem.invoice_id == invoice_id,
-                        InvoiceItem.item_type == "whatsapp_subscription",
-                    ).limit(1)
-                )
-                if item_result.scalar_one_or_none():
-                    is_whatsapp = True
-
-            if not is_whatsapp or not invoice.organization_id:
-                return
-
-            # Activate or extend WhatsApp subscription for the organization
-            from app.models.whatsapp import (
-                WhatsAppOrganizationSubscription,
-                WhatsAppSubscriptionPackage,
-                WhatsAppSubscriptionStatus,
-                WhatsAppSubscriptionPayment,
-                WhatsAppTransactionStatus,
-            )
-            from datetime import timedelta
-
-            # Find existing subscription
-            sub_result = await self.db.execute(
-                select(WhatsAppOrganizationSubscription).where(
-                    WhatsAppOrganizationSubscription.organization_id == invoice.organization_id
-                )
-            )
-            subscription = sub_result.scalar_one_or_none()
-
-            # Get package for duration info
-            pkg_result = await self.db.execute(
-                select(WhatsAppSubscriptionPackage).where(
-                    WhatsAppSubscriptionPackage.is_active == True,
-                ).limit(1)
-            )
-            package = pkg_result.scalar_one_or_none()
-            extension_days = 30  # Default monthly
-
-            now = datetime.utcnow()
-
-            if subscription:
-                # Extend existing subscription
-                if subscription.status == WhatsAppSubscriptionStatus.ACTIVE and subscription.end_date > now:
-                    subscription.end_date = subscription.end_date + timedelta(days=extension_days)
-                else:
-                    subscription.start_date = now
-                    subscription.end_date = now + timedelta(days=extension_days)
-                    subscription.status = WhatsAppSubscriptionStatus.ACTIVE
-                    subscription.activated_at = now
-
-                subscription.next_billing_date = subscription.end_date
-                subscription.is_trial = False
-            else:
-                # Create new subscription
-                if not package:
-                    self.logger.error(f"No WhatsApp subscription package found for org {invoice.organization_id}")
-                    return
-
-                subscription = WhatsAppOrganizationSubscription(
-                    organization_id=invoice.organization_id,
-                    package_id=package.id,
-                    status=WhatsAppSubscriptionStatus.ACTIVE,
-                    provider_type=package.provider_type,
-                    start_date=now,
-                    end_date=now + timedelta(days=extension_days),
-                    next_billing_date=now + timedelta(days=extension_days),
-                    is_trial=False,
-                    activated_at=now,
-                )
-                self.db.add(subscription)
-                await self.db.flush()
-
-            # Record WhatsApp subscription payment
-            payment_record = WhatsAppSubscriptionPayment(
-                subscription_id=subscription.id,
-                organization_id=invoice.organization_id,
-                payment_reference=invoice.invoice_number,
-                amount=invoice.total_amount,
-                currency=invoice.currency,
-                status=WhatsAppTransactionStatus.COMPLETED,
-                paid_at=now,
-            )
-            self.db.add(payment_record)
-
-            self.logger.info(
-                f"WhatsApp subscription activated for org {invoice.organization_id} "
-                f"until {subscription.end_date}"
-            )
-
-        except Exception as e:
-            self.logger.error(f"Error activating WhatsApp subscription for invoice {invoice_id}: {e}")
+    # NOTE (Phase C1): _activate_whatsapp_subscription_if_applicable removed —
+    # WhatsApp subscriptions/billing are owned by notifications-api now.
 
     async def _generate_paystack_reference(self, prefix: str = "PAY") -> str:
         """Generate unique Paystack transaction reference."""

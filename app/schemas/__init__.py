@@ -36,7 +36,7 @@ from .ticket import (
 from .notification import (
     Notification, NotificationCreate, NotificationUpdate, NotificationInDB, NotificationList,
     NotificationFilter, NotificationTemplate, NotificationTemplateCreate, NotificationTemplateUpdate,
-    EmailNotificationRequest, SMSNotificationRequest, NotificationStats, BulkNotificationRequest
+    EmailNotificationRequest, NotificationStats, BulkNotificationRequest
 )
 
 __all__ = [
@@ -163,7 +163,6 @@ __all__ = [
     "NotificationTemplateCreate",
     "NotificationTemplateUpdate",
     "EmailNotificationRequest",
-    "SMSNotificationRequest",
     "NotificationStats",
     "BulkNotificationRequest",
 ]

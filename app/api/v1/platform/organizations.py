@@ -43,7 +43,6 @@ class OrganizationCreate(BaseModel):
     timezone: str = "Africa/Nairobi"
     notification_email: Optional[str] = None
     notification_phone: Optional[str] = None
-    sms_sender_id: Optional[str] = None
     trial_days: int = 14
     max_routers: int = 5
     max_customers: int = 100
@@ -301,7 +300,6 @@ async def create_organization(
         timezone=data.timezone,
         notification_email=data.notification_email,
         notification_phone=data.notification_phone,
-        sms_sender_id=data.sms_sender_id,
         trial_ends_at=trial_ends_at,
         max_routers=data.max_routers,
         max_customers=data.max_customers,

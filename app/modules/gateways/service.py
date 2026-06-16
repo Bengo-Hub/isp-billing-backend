@@ -55,42 +55,11 @@ class GatewayManagementService:
         self.status_check_interval = 300  # 5 minutes
         self.error_threshold = 5  # consecutive failures
         
-        # Gateway configurations
+        # Gateway configurations.
+        # NOTE (Phase C1): SMS + EMAIL gateways removed — SMS / email / WhatsApp
+        # delivery is centralized on notifications-api now. Only the PAYMENT
+        # (M-PESA) gateway tester remains (and M-PESA itself routes via treasury-api).
         self.gateway_configs = {
-            GatewayType.SMS: {
-                "africastalking": {
-                    "name": "Africa's Talking",
-                    "test_endpoint": "https://api.africastalking.com/version1/messaging",
-                    "required_fields": ["username", "api_key"],
-                    "test_method": self._test_africastalking_gateway
-                },
-                "twilio": {
-                    "name": "Twilio",
-                    "test_endpoint": "https://api.twilio.com/2010-04-01/Accounts",
-                    "required_fields": ["account_sid", "auth_token", "phone_number"],
-                    "test_method": self._test_twilio_gateway
-                }
-            },
-            GatewayType.EMAIL: {
-                "smtp": {
-                    "name": "SMTP",
-                    "test_endpoint": None,
-                    "required_fields": ["host", "port", "username", "password"],
-                    "test_method": self._test_smtp_gateway
-                },
-                "sendgrid": {
-                    "name": "SendGrid",
-                    "test_endpoint": "https://api.sendgrid.com/v3/mail/send",
-                    "required_fields": ["api_key"],
-                    "test_method": self._test_sendgrid_gateway
-                },
-                "ses": {
-                    "name": "Amazon SES",
-                    "test_endpoint": None,
-                    "required_fields": ["access_key_id", "secret_access_key", "region"],
-                    "test_method": self._test_ses_gateway
-                }
-            },
             GatewayType.PAYMENT: {
                 "mpesa": {
                     "name": "MPESA Daraja",
@@ -177,149 +146,9 @@ class GatewayManagementService:
                 "tested_at": datetime.utcnow().isoformat()
             }
 
-    async def _test_africastalking_gateway(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Test Africa's Talking SMS gateway."""
-        try:
-            import africastalking
-            
-            # Initialize Africa's Talking
-            africastalking.initialize(
-                username=config["username"],
-                api_key=config["api_key"]
-            )
-            
-            # Test by getting account balance
-            sms = africastalking.SMS
-            balance_response = sms.fetch_messages()  # This will test API connectivity
-            
-            return {
-                "status": GatewayStatus.ONLINE,
-                "success": True,
-                "message": "Africa's Talking gateway is operational",
-                "provider_response": "API connection successful"
-            }
-            
-        except Exception as e:
-            return {
-                "status": GatewayStatus.ERROR,
-                "success": False,
-                "error": f"Africa's Talking test failed: {str(e)}"
-            }
-
-    async def _test_twilio_gateway(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Test Twilio SMS gateway."""
-        try:
-            from twilio.rest import Client
-            
-            client = Client(config["account_sid"], config["auth_token"])
-            
-            # Test by fetching account info
-            account = client.api.accounts(config["account_sid"]).fetch()
-            
-            return {
-                "status": GatewayStatus.ONLINE,
-                "success": True,
-                "message": "Twilio gateway is operational",
-                "provider_response": f"Account status: {account.status}"
-            }
-            
-        except Exception as e:
-            return {
-                "status": GatewayStatus.ERROR,
-                "success": False,
-                "error": f"Twilio test failed: {str(e)}"
-            }
-
-    async def _test_smtp_gateway(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Test SMTP email gateway."""
-        try:
-            import smtplib
-            import ssl
-            
-            # Create SSL context
-            context = ssl.create_default_context()
-            
-            # Test SMTP connection
-            with smtplib.SMTP(config["host"], config["port"]) as server:
-                server.starttls(context=context)
-                server.login(config["username"], config["password"])
-                
-                return {
-                    "status": GatewayStatus.ONLINE,
-                    "success": True,
-                    "message": "SMTP gateway is operational",
-                    "provider_response": "SMTP authentication successful"
-                }
-                
-        except Exception as e:
-            return {
-                "status": GatewayStatus.ERROR,
-                "success": False,
-                "error": f"SMTP test failed: {str(e)}"
-            }
-
-    async def _test_sendgrid_gateway(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Test SendGrid email gateway."""
-        try:
-            import sendgrid
-            from sendgrid.helpers.mail import Mail
-            
-            sg = sendgrid.SendGridAPIClient(api_key=config["api_key"])
-            
-            # Test by validating API key (attempt to get stats)
-            response = sg.client.stats.get()
-            
-            if response.status_code == 200:
-                return {
-                    "status": GatewayStatus.ONLINE,
-                    "success": True,
-                    "message": "SendGrid gateway is operational",
-                    "provider_response": "API key validation successful"
-                }
-            else:
-                return {
-                    "status": GatewayStatus.ERROR,
-                    "success": False,
-                    "error": f"SendGrid API returned status {response.status_code}"
-                }
-                
-        except Exception as e:
-            return {
-                "status": GatewayStatus.ERROR,
-                "success": False,
-                "error": f"SendGrid test failed: {str(e)}"
-            }
-
-    async def _test_ses_gateway(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Test Amazon SES email gateway."""
-        try:
-            import boto3
-            from botocore.exceptions import ClientError
-            
-            # Create SES client
-            ses_client = boto3.client(
-                'ses',
-                aws_access_key_id=config["access_key_id"],
-                aws_secret_access_key=config["secret_access_key"],
-                region_name=config["region"]
-            )
-            
-            # Test by getting sending quota
-            response = ses_client.get_send_quota()
-            
-            return {
-                "status": GatewayStatus.ONLINE,
-                "success": True,
-                "message": "Amazon SES gateway is operational",
-                "provider_response": f"Send quota: {response['Max24HourSend']}"
-            }
-            
-        except Exception as e:
-            return {
-                "status": GatewayStatus.ERROR,
-                "success": False,
-                "error": f"Amazon SES test failed: {str(e)}"
-            }
+    # NOTE (Phase C1): SMS (Africa's Talking / Twilio) and EMAIL (SMTP / SendGrid /
+    # SES) gateway testers were removed — those channels are owned by
+    # notifications-api now.
 
     async def _test_mpesa_gateway(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Test MPESA payment gateway.
@@ -343,36 +172,10 @@ class GatewayManagementService:
         config = await self.config_service.get_config(config_key, organization_id=None)
 
         if not config:
-            # Fall back to environment variables
-            if gateway_type == GatewayType.SMS and provider == "africastalking":
-                return {
-                    "username": settings.africastalking_username,
-                    "api_key": settings.africastalking_api_key
-                }
-            elif gateway_type == GatewayType.SMS and provider == "twilio":
-                return {
-                    "account_sid": settings.twilio_account_sid,
-                    "auth_token": settings.twilio_auth_token,
-                    "phone_number": settings.twilio_phone_number
-                }
-            elif gateway_type == GatewayType.EMAIL and provider == "smtp":
-                return {
-                    "host": settings.smtp_host,
-                    "port": settings.smtp_port,
-                    "username": settings.smtp_username,
-                    "password": settings.smtp_password
-                }
-            elif gateway_type == GatewayType.EMAIL and provider == "sendgrid":
-                return {
-                    "api_key": settings.sendgrid_api_key
-                }
-            elif gateway_type == GatewayType.EMAIL and provider == "ses":
-                return {
-                    "access_key_id": settings.aws_access_key_id,
-                    "secret_access_key": settings.aws_secret_access_key,
-                    "region": settings.aws_region
-                }
-            elif gateway_type == GatewayType.PAYMENT and provider == "mpesa":
+            # Fall back to environment variables.
+            # NOTE (Phase C1): SMS/EMAIL env fallbacks removed (settings dropped) —
+            # those channels are owned by notifications-api now.
+            if gateway_type == GatewayType.PAYMENT and provider == "mpesa":
                 return {
                     "consumer_key": settings.mpesa_consumer_key,
                     "consumer_secret": settings.mpesa_consumer_secret,
@@ -736,11 +539,8 @@ class GatewayManagementService:
     def _get_gateway_capabilities(self, gateway_type: str, provider: str) -> List[str]:
         """Get capabilities for a specific gateway."""
         capabilities = {
-            (GatewayType.SMS, "africastalking"): ["sms", "bulk_sms", "delivery_reports", "premium_sms"],
-            (GatewayType.SMS, "twilio"): ["sms", "mms", "whatsapp", "voice", "delivery_reports"],
-            (GatewayType.EMAIL, "smtp"): ["email", "attachments", "html_email"],
-            (GatewayType.EMAIL, "sendgrid"): ["email", "templates", "analytics", "marketing", "attachments"],
-            (GatewayType.EMAIL, "ses"): ["email", "bulk_email", "bounce_handling", "complaint_handling"],
+            # NOTE (Phase C1): SMS/EMAIL capabilities removed (channels owned by
+            # notifications-api).
             (GatewayType.PAYMENT, "mpesa"): ["stk_push", "c2b", "b2c", "reversal", "status_query"]
         }
         

@@ -849,6 +849,77 @@ async def _process_pppoe_subscription_renewal(
             f"PPPoE user {user.username} not synced to router."
         )
 
+    # Phase C2 (ADDITIVE): emit isp.* domain events for the PPPoE renewal in the
+    # SAME transaction (caller commits). notifications-api consumes these to send
+    # the customer-facing payment-confirmation / credentials message. Fully
+    # guarded — eventing must never break provisioning; inert until NATS is set.
+    try:
+        from app.events.outbox import record_event
+        from app.events import EVT_PAYMENT_RECEIVED, EVT_SUBSCRIBER_CREATED
+
+        tenant_uuid = str(organization.uuid) if organization.uuid else None
+        customer_name = (
+            " ".join(filter(None, [getattr(user, "first_name", None), getattr(user, "last_name", None)])).strip()
+            or user.email
+            or user.username
+        )
+        customer_phone = getattr(user, "phone", None)
+        expiry_at = subscription.end_date.isoformat() if subscription.end_date else None
+
+        record_event(
+            db,
+            event_type=EVT_PAYMENT_RECEIVED,
+            tenant_id=tenant_uuid,
+            aggregate_id=str(payment.id),
+            payload={
+                "payment_id": payment.id,
+                "organization_id": organization.id,
+                "organization_slug": organization.slug,
+                "user_id": user.id,
+                "plan_id": plan.id,
+                "plan_name": plan.name,
+                "amount": str(payment.amount),
+                "currency": payment.currency,
+                "payment_method": getattr(payment, "payment_method", None) and str(payment.payment_method),
+                "payment_reference": payment.reference_number,
+                "phone_number": customer_phone,
+                "email": user.email,
+            },
+        )
+        record_event(
+            db,
+            event_type=EVT_SUBSCRIBER_CREATED,
+            tenant_id=tenant_uuid,
+            aggregate_id=str(subscription.id),
+            payload={
+                # tenant (ISP org) + identifiers
+                "tenant_id": tenant_uuid,
+                "organization_id": organization.id,
+                "organization_slug": organization.slug,
+                "subscription_id": subscription.id,
+                "user_id": user.id,
+                "payment_id": payment.id,
+                # customer + credentials (PPPoE account secret the customer uses)
+                "customer_name": customer_name,
+                "phone": customer_phone,
+                "email": user.email,
+                "username": user.username,
+                "password": user.hashed_password,
+                # package + lifecycle
+                "plan_id": plan.id,
+                "package_name": plan.name,
+                "package_type": "pppoe",
+                "subscriber_type": "pppoe",
+                "expiry_at": expiry_at,
+                "amount": str(payment.amount),
+                "currency": payment.currency,
+            },
+        )
+    except Exception as evt_exc:  # eventing must never break provisioning
+        logger.warning(
+            "failed to record outbox events for pppoe payment %s: %s", payment.id, evt_exc
+        )
+
 
 @router.post("/{org_slug}/webhooks/payment")
 async def pppoe_payment_webhook(

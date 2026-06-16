@@ -225,25 +225,9 @@ class Settings(BaseSettings):
     mpesa_shortcode: str
     mpesa_callback_url: str
 
-    # SMS
-    sms_provider: str = "africas_talking"
-    africastalking_api_key: Optional[str] = None
-    africastalking_username: Optional[str] = None
-    twilio_account_sid: Optional[str] = None
-    twilio_auth_token: Optional[str] = None
-    twilio_phone_number: Optional[str] = None
-
-    # Email
-    email_provider: str = "smtp"
-    smtp_host: Optional[str] = None
-    smtp_port: int = 587
-    smtp_username: Optional[str] = None
-    smtp_password: Optional[str] = None
-    smtp_use_tls: bool = True
-    sendgrid_api_key: Optional[str] = None
-    aws_access_key_id: Optional[str] = None
-    aws_secret_access_key: Optional[str] = None
-    aws_region: str = "us-east-1"
+    # NOTE (Phase C1): SMS / Email provider settings (AfricasTalking, Twilio,
+    # SMTP, SendGrid, AWS SES) were removed — SMS / email / WhatsApp DELIVERY is
+    # centralized on notifications-api now (see notifications_api_url above).
 
     # MikroTik
     mikrotik_default_username: str = "admin"
