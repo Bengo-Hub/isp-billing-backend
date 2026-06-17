@@ -111,7 +111,11 @@ class Router(Base):
     agent_token = Column(String(255), nullable=True)  # Hashed per-router auth token
     agent_token_plain = Column(Text, nullable=True)  # Encrypted plain token (included in bootstrap script)
     agent_installed = Column(Boolean, default=False, nullable=False)
-    agent_poll_interval = Column(Integer, default=30, nullable=False)  # seconds
+    # 10s (not 30) so the agent picks up create_user fast after a hotspot
+    # purchase/voucher-redeem — a 30s wait at checkout is too long. The on-router
+    # scheduler interval is baked at agent-install, so an existing router must be
+    # re-bootstrapped (or its agent re-installed) to adopt a changed value.
+    agent_poll_interval = Column(Integer, default=10, nullable=False)  # seconds
     last_poll_at = Column(DateTime, nullable=True)  # Last successful poll from agent
     agent_version = Column(String(20), nullable=True)  # Agent script version on router
 
