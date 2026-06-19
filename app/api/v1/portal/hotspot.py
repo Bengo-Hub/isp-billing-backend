@@ -85,6 +85,14 @@ class PurchaseResponse(BaseModel):
     instructions: Optional[str] = None
     checkout_url: Optional[str] = None
     status: str
+    # Fields for the embedded TreasuryPaymentModal (in-app iframe checkout) — the
+    # captive buy page opens the modal instead of redirecting to checkout_url.
+    intent_id: Optional[str] = None
+    initiate_url: Optional[str] = None
+    tenant_id: Optional[str] = None
+    amount: Optional[float] = None
+    currency: Optional[str] = None
+    reference_type: Optional[str] = None
 
 
 class VoucherRedeemRequest(BaseModel):
@@ -737,6 +745,13 @@ async def _purchase_via_treasury(
         message="Choose a payment method to complete your purchase.",
         checkout_url=checkout_url,
         status="pending",
+        # Embedded-modal fields (captive buy page opens TreasuryPaymentModal).
+        intent_id=str(intent_id),
+        initiate_url=intent.get("initiate_url"),
+        tenant_id=str(organization.uuid),
+        amount=float(plan.price),
+        currency=plan.currency,
+        reference_type="hotspot_purchase",
     )
 
 
