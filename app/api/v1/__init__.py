@@ -70,6 +70,7 @@ from .onboarding import router as onboarding_router
 from .payments import router as payments_router
 from .router_agent import router as router_agent_router
 from .vpn import router as vpn_router
+from .s2s import router as s2s_router
 
 api_router = APIRouter()
 
@@ -164,4 +165,14 @@ api_router.include_router(
     vpn_router,
     prefix="/vpn",
     tags=["VPN"],
+)
+
+# =============================================================================
+# 15. Service-to-Service (S2S) — trusted internal callers, X-API-Key auth
+#     (e.g. subscriptions-api billing engine). No user JWT.
+# =============================================================================
+api_router.include_router(
+    s2s_router,
+    prefix="/s2s",
+    tags=["S2S"],
 )
