@@ -719,20 +719,51 @@ class SubscriptionExpiryManager:
             plan = plan_result.scalar_one_or_none()
             plan_name = plan.name if plan else "Unknown"
 
-            if hours_remaining >= 24:
-                time_str = f"{hours_remaining // 24} day(s)"
-            else:
-                time_str = f"{hours_remaining} hour(s)"
-
-            message = (
-                f"Your {plan_name} internet package will expire in {time_str}. "
-                f"Renew now to avoid disconnection."
-            )
-
             logger.info(
                 f"Expiring soon notification for subscription {subscription.id}: "
                 f"{hours_remaining}h remaining"
             )
+
+            # Publish isp.subscription.expiring — notifications-api renders the
+            # ispbilling/* template and delivers it (SMS gated on the tenant's
+            # credits, etc.). isp-billing no longer sends notifications directly.
+            try:
+                from app.events.outbox import record_event
+                from app.events import EVT_SUBSCRIPTION_EXPIRING
+                from app.models.organization import Organization
+
+                org = None
+                if getattr(subscription, "organization_id", None):
+                    org_res = await self.db.execute(
+                        select(Organization).where(Organization.id == subscription.organization_id)
+                    )
+                    org = org_res.scalar_one_or_none()
+
+                customer_name = (
+                    " ".join(filter(None, [getattr(user, "first_name", None), getattr(user, "last_name", None)])).strip()
+                    or getattr(user, "email", None)
+                    or getattr(user, "username", None)
+                )
+                record_event(
+                    self.db,
+                    event_type=EVT_SUBSCRIPTION_EXPIRING,
+                    tenant_id=str(org.uuid) if org and getattr(org, "uuid", None) else None,
+                    aggregate_id=str(subscription.id),
+                    payload={
+                        "tenant_id": str(org.uuid) if org and getattr(org, "uuid", None) else None,
+                        "subscription_id": subscription.id,
+                        "customer_name": customer_name,
+                        "phone": getattr(user, "phone", None),
+                        "email": getattr(user, "email", None),
+                        "package_name": plan_name,
+                        "expiry_at": subscription.end_date.isoformat() if subscription.end_date else None,
+                        "days_remaining": max(1, hours_remaining // 24) if hours_remaining >= 24 else 0,
+                        "hours_remaining": hours_remaining,
+                    },
+                )
+                await self.db.commit()
+            except Exception as e:
+                logger.warning(f"Failed to record subscription.expiring event: {e}")
 
             return True
 
