@@ -68,6 +68,14 @@ class Settings(BaseSettings):
     treasury_pay_page_url: str = "https://books.codevertexitsolutions.com"
     # Request timeout (seconds) for S2S treasury calls.
     treasury_request_timeout: float = 20.0
+    # PUBLIC, browser-reachable host the captive (unauthenticated) device polls for
+    # payment-status confirmation (the treasury/books public API). This host MUST be
+    # whitelisted in the MikroTik captive walled-garden, otherwise a pre-auth device
+    # cannot poll payment status and the purchase only "confirms" at the client-side
+    # countdown. Hostname only (no scheme/path) — it is added both by-host and
+    # IP-pinned (SNI HTTPS won't pass unauth by host alone). e.g.
+    # booksapi.codevertexitsolutions.com
+    treasury_status_host: str = "booksapi.codevertexitsolutions.com"
 
     # ── Central subscriptions-api (Phase 3, ADDITIVE) ──
     # Internal (S2S) base URL for subscriptions-api — used to read an ISP

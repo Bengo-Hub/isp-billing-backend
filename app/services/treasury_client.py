@@ -28,7 +28,7 @@ payout/settlement subsystem (Paystack transfer recipients / M-PESA B2C).
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -153,6 +153,37 @@ class TreasuryClient:
         if phone_number:
             body["phone_number"] = phone_number
         return await self._post(url, body)
+
+    async def list_active_gateways(self, *, tenant: str) -> List[Dict[str, Any]]:
+        """List the tenant's ACTIVE selected payment gateways (S2S).
+
+        Calls ``GET /api/v1/s2s/{tenant}/gateways/selected`` (INTERNAL_SERVICE_KEY
+        auth). Treasury owns gateway enable-state, so this is the Layer-1 source
+        of truth for which gateways are platform+tenant enabled. Each item is a
+        gateway dict carrying at least ``gateway_type`` / ``is_active`` /
+        ``is_primary`` (NO credentials — treasury never exposes secrets).
+
+        Returns ``[]`` (never raises) when treasury is unconfigured / the call
+        fails, so callers degrade gracefully rather than 500-ing the public
+        captive page.
+        """
+        if not self.is_configured:
+            return []
+
+        url = f"{self.base_url}/api/v1/s2s/{tenant}/gateways/selected"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.get(url, headers=self._headers())
+            data = self._decode(resp)
+        except (httpx.HTTPError, TreasuryError) as exc:
+            logger.warning("treasury list_active_gateways failed for %s: %s", tenant, exc)
+            return []
+
+        # Treasury wraps the list as {"selected": [...]}; be defensive about shape.
+        items = data.get("selected") or data.get("gateways") or []
+        if not isinstance(items, list):
+            return []
+        return [g for g in items if isinstance(g, dict)]
 
     async def get_status(self, *, tenant: str, intent_id: str) -> Dict[str, Any]:
         """Fetch the current payment intent (its ``status`` field is canonical).

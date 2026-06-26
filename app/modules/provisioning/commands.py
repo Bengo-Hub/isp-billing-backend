@@ -730,15 +730,70 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
             if not _re.match(r'^[0-9.]+$', api_host) and api_host not in cloud_hosts:
                 cloud_hosts.append(api_host)
 
-    # Add common payment gateways to walled garden (for online payments)
+    # Add common payment gateways to walled garden (for online payments).
+    # `*.paystackcdn.com` serves Paystack's checkout static assets (merchant logo,
+    # inline JS/CSS) — without it the pre-auth device renders a broken pay widget.
     payment_hosts = [
         "*.paystack.com",
         "*.paystack.co",
+        "*.paystackcdn.com",  # Paystack CDN assets (logo/inline checkout) — issue 3
         "*.flutterwave.com",
         "*.mpesa.in",
         "*.safaricom.co.ke",
     ]
     walled_garden_hosts.extend(payment_hosts)
+
+    # CRITICAL (issues 3 & 4): a pre-auth captive device has NO internet — it can
+    # only reach walled-garden hosts. Two hosts were missing, which broke the buy
+    # flow for already-provisioned routers:
+    #   * the treasury/books PUBLIC status host — the device polls it for payment
+    #     confirmation; without it the purchase only "confirms" at the client-side
+    #     countdown (issue 4). Host is configurable (config override → settings
+    #     default `booksapi.codevertexitsolutions.com`).
+    #   * `api.qrserver.com` — renders the M-Pesa/merchant QR + logo on the pay
+    #     page; without it the QR/logo never loads (issue 3).
+    # Both are NON-wildcard HTTPS hosts, so (like the billing/api host) they must
+    # ALSO be IP-pinned in cloud_hosts below — MikroTik's by-host (SNI) walled-
+    # garden does not reliably pass unauthenticated HTTPS.
+    _default_treasury_host = "booksapi.codevertexitsolutions.com"
+    _default_treasury_ui_host = "books.codevertexitsolutions.com"
+    try:
+        from app.core.config import settings as _settings
+        _default_treasury_host = _settings.treasury_status_host or _default_treasury_host
+        # The embedded checkout IFRAME is served from the treasury-UI host (the
+        # pay page), which is DISTINCT from the API host above. The captive device
+        # must reach BOTH: the UI host to load the iframe, the API host to poll
+        # confirmation. Derive the UI host from treasury_pay_page_url.
+        _ui = _re.search(r'https?://([^:/]+)', getattr(_settings, "treasury_pay_page_url", "") or "")
+        if _ui:
+            _default_treasury_ui_host = _ui.group(1)
+    except Exception:  # pragma: no cover - config import must never break provisioning
+        pass
+
+    treasury_status_host = (
+        config.get("treasury_status_host") or _default_treasury_host or ""
+    ).strip()
+    treasury_ui_host = (
+        config.get("treasury_ui_host") or _default_treasury_ui_host or ""
+    ).strip()
+
+    captive_cloud_hosts = []
+    if treasury_status_host:
+        captive_cloud_hosts.append(treasury_status_host)  # treasury API (status poll) — issue 4
+    if treasury_ui_host and treasury_ui_host != treasury_status_host:
+        captive_cloud_hosts.append(treasury_ui_host)  # treasury-UI embedded checkout iframe — issues 3+4
+    captive_cloud_hosts.append("api.qrserver.com")  # QR image API (logo/QR) — issue 3
+
+    for _captive_host in captive_cloud_hosts:
+        if _captive_host and _captive_host not in walled_garden_hosts:
+            walled_garden_hosts.append(_captive_host)
+        # Non-IP host → also pin by resolved IP (unauth HTTPS passthrough).
+        if (
+            _captive_host
+            and not _re.match(r'^[0-9.]+$', _captive_host)
+            and _captive_host not in cloud_hosts
+        ):
+            cloud_hosts.append(_captive_host)
 
     # =========================================================================
     # CAPTIVE PORTAL DETECTION - DNS STATIC ENTRIES
