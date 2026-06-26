@@ -855,7 +855,7 @@ async def _process_pppoe_subscription_renewal(
     # guarded — eventing must never break provisioning; inert until NATS is set.
     try:
         from app.events.outbox import record_event
-        from app.events import EVT_PAYMENT_RECEIVED, EVT_SUBSCRIBER_CREATED
+        from app.events import EVT_PAYMENT_RECEIVED, EVT_SUBSCRIPTION_RENEWED
 
         tenant_uuid = str(organization.uuid) if organization.uuid else None
         customer_name = (
@@ -888,7 +888,10 @@ async def _process_pppoe_subscription_renewal(
         )
         record_event(
             db,
-            event_type=EVT_SUBSCRIBER_CREATED,
+            # Renewal (not a new subscriber) — notifications-api renders the
+            # ispbilling/subscription_renewal template (a "renewed" confirmation,
+            # not a fresh-credentials message; the PPPoE secret is unchanged).
+            event_type=EVT_SUBSCRIPTION_RENEWED,
             tenant_id=tenant_uuid,
             aggregate_id=str(subscription.id),
             payload={
@@ -899,12 +902,10 @@ async def _process_pppoe_subscription_renewal(
                 "subscription_id": subscription.id,
                 "user_id": user.id,
                 "payment_id": payment.id,
-                # customer + credentials (PPPoE account secret the customer uses)
+                # customer
                 "customer_name": customer_name,
                 "phone": customer_phone,
                 "email": user.email,
-                "username": user.username,
-                "password": user.hashed_password,
                 # package + lifecycle
                 "plan_id": plan.id,
                 "package_name": plan.name,

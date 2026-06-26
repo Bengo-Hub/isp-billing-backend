@@ -30,6 +30,9 @@ AGGREGATE_TYPE = "isp"
 EVT_PAYMENT_RECEIVED = "payment.received"
 EVT_SUBSCRIBER_CREATED = "subscriber.created"
 EVT_INVOICE_CREATED = "invoice.created"
+# Lifecycle events consumed by notifications-api (ispbilling/* templates).
+EVT_SUBSCRIPTION_RENEWED = "subscription.renewed"
+EVT_SUBSCRIPTION_EXPIRING = "subscription.expiring"
 
 # Consumed subjects (durable consumer interest).
 SUB_TREASURY_PAYMENT_SUCCEEDED = "treasury.payment.succeeded"
@@ -45,6 +48,8 @@ __all__ = [
     "EVT_PAYMENT_RECEIVED",
     "EVT_SUBSCRIBER_CREATED",
     "EVT_INVOICE_CREATED",
+    "EVT_SUBSCRIPTION_RENEWED",
+    "EVT_SUBSCRIPTION_EXPIRING",
     "SUB_TREASURY_PAYMENT_SUCCEEDED",
     "SUB_AUTH_TENANT",
     "SUB_AUTH_USER",
