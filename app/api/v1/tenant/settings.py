@@ -91,30 +91,6 @@ class OrganizationResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class BrandingSettingsResponse(BaseModel):
-    """Schema for branding settings response."""
-
-    logo_url: Optional[str] = None
-    favicon_url: Optional[str] = None
-    primary_color: str
-    secondary_color: Optional[str] = None
-    custom_css: Optional[str] = None
-    portal_title: Optional[str] = None
-    portal_welcome_message: Optional[str] = None
-
-
-class BrandingSettingsUpdate(BaseModel):
-    """Schema for updating branding settings (JSON body)."""
-
-    logo_url: Optional[str] = None
-    favicon_url: Optional[str] = None
-    primary_color: Optional[str] = None
-    secondary_color: Optional[str] = None
-    custom_css: Optional[str] = None
-    portal_title: Optional[str] = None
-    portal_welcome_message: Optional[str] = None
-
-
 class BusinessSettingsResponse(BaseModel):
     """Schema for business settings response."""
 
@@ -220,74 +196,13 @@ async def update_organization_details(
     )
 
 
-@router.get("/branding", response_model=BrandingSettingsResponse)
-async def get_branding_settings(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_isp_admin),
-    organization: Organization = Depends(get_current_organization),
-):
-    """
-    Get branding settings.
-
-    ISP Admin only.
-    """
-    # All branding fields live on the Organization model (logo_url / favicon_url /
-    # primary_color / secondary_color / portal_title / portal_description). The
-    # OrganizationSettings table has NO branding columns, so reading them off it
-    # raised AttributeError and 500'd. custom_css has no backing column today, so
-    # it is not persisted (always None).
-    return BrandingSettingsResponse(
-        logo_url=organization.logo_url,
-        favicon_url=organization.favicon_url,
-        primary_color=organization.primary_color,
-        secondary_color=organization.secondary_color,
-        custom_css=None,
-        portal_title=organization.portal_title or organization.name,
-        portal_welcome_message=organization.portal_description,
-    )
-
-
-@router.patch("/branding", response_model=BrandingSettingsResponse)
-async def update_branding_settings(
-    data: BrandingSettingsUpdate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_isp_admin),
-    organization: Organization = Depends(get_current_organization),
-):
-    """
-    Update branding settings.
-
-    ISP Admin only.
-    """
-    # All branding fields live on the Organization model (the captive portal
-    # config reads them). OrganizationSettings has NO branding columns — writing
-    # them there raised AttributeError and 500'd. custom_css has no backing column
-    # today, so it is accepted but not persisted (reported in the fix notes).
-    if data.logo_url is not None:
-        organization.logo_url = data.logo_url
-    if data.primary_color is not None:
-        organization.primary_color = data.primary_color
-    if data.favicon_url is not None:
-        organization.favicon_url = data.favicon_url
-    if data.secondary_color is not None:
-        organization.secondary_color = data.secondary_color
-    if data.portal_title is not None:
-        organization.portal_title = data.portal_title
-    if data.portal_welcome_message is not None:
-        organization.portal_description = data.portal_welcome_message
-
-    await db.commit()
-    await db.refresh(organization)
-
-    return BrandingSettingsResponse(
-        logo_url=organization.logo_url,
-        favicon_url=organization.favicon_url,
-        primary_color=organization.primary_color,
-        secondary_color=organization.secondary_color,
-        custom_css=None,
-        portal_title=organization.portal_title or organization.name,
-        portal_welcome_message=organization.portal_description,
-    )
+# NOTE: the GET+PATCH /branding endpoints were REMOVED here. Tenant branding
+# (logo, colors, portal title/description) is owned by auth-api (the SoT) and
+# edited in the accounts console — NOT stored or edited in isp-billing. The
+# captive portal sources branding server-side from auth-api's public
+# tenant-by-slug endpoint (see app/services/auth_branding_client.py, projected
+# through GET /portal/hotspot/{org_slug}/config). The local Organization branding
+# columns are no longer written by any self-service editor.
 
 
 @router.get("/business", response_model=BusinessSettingsResponse)
