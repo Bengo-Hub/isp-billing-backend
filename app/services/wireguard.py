@@ -222,6 +222,16 @@ class WireGuardService:
         server_pub = self.server_public_key
         host = self.endpoint_host
         port = self.endpoint_port
+        # Pin the peer endpoint to the RESOLVED server IP so the router does NOT depend on
+        # its own DNS to reach the WG gateway. A NAT'd router whose endpoint-address DNS
+        # name fails to resolve at peer-add time has NO endpoint and therefore never sends
+        # a handshake (the observed "0 handshakes / no WG packets reach the node"). We
+        # resolve server-side (the node IP is stable) and fall back to the DNS name.
+        import socket
+        try:
+            endpoint_addr = socket.gethostbyname(host)
+        except Exception:
+            endpoint_addr = host
         allowed = f"{net.network_address}/{prefix}"  # e.g. 10.8.0.0/16
         iface = WG_INTERFACE_NAME
 
@@ -246,7 +256,7 @@ class WireGuardService:
             f"  :if ([:len [/interface/wireguard/peers/find public-key=\"{server_pub}\"]] = 0) do={{",
             f"    /interface/wireguard/peers/add interface={iface} \\",
             f"      public-key=\"{server_pub}\" \\",
-            f"      endpoint-address={host} endpoint-port={port} \\",
+            f"      endpoint-address={endpoint_addr} endpoint-port={port} \\",
             f"      allowed-address={allowed} persistent-keepalive=25s \\",
             f"      comment=\"{WG_PEER_COMMENT}\"",
             "    :put \"[OK] VPN server peer added\"",
