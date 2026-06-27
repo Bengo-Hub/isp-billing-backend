@@ -312,7 +312,10 @@ class OrganizationSettings(Base):
     allow_self_registration = Column(Boolean, default=False, nullable=False)
 
     # Remote Winbox/VPN settings
-    vpn_domain = Column(String(200), default="vpn.codevertex.com", nullable=False)  # VPN domain for remote Winbox
+    # Platform-wide WG gateway host (one gateway serves all routers' tunnel + winbox DNAT).
+    # MUST match settings.vpn_domain / WG_ENDPOINT host — the old "vpn.codevertex.com"
+    # default was a typo (missing "itsolutions") and produced "Host not found" in WinBox.
+    vpn_domain = Column(String(200), default="vpn.codevertexitsolutions.com", nullable=False)  # VPN domain for remote Winbox
     winbox_port_start = Column(Integer, default=51000, nullable=False)  # Starting port for VPN Winbox allocation
     winbox_port_end = Column(Integer, default=59999, nullable=False)  # Ending port for VPN Winbox allocation
 
