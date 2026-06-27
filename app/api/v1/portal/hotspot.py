@@ -203,12 +203,25 @@ async def get_portal_config(
     from app.services.provider_gate import resolve_provider_access
     provider_active, provider_contact = await resolve_provider_access(organization)
 
+    # Branding is owned by auth-api (the SoT). isp-billing stores NO local
+    # branding: we fetch it SERVER-SIDE from auth-api's public tenant-by-slug
+    # endpoint (cached) and project it through THIS already-walled-gardened
+    # portal-config response — so the pre-auth captive device never has to reach
+    # auth-api directly. Best-effort: on any failure we fall back to the org name
+    # (+ default primary color) so the captive page always renders.
+    from app.services.auth_branding_client import get_tenant_branding
+    branding = await get_tenant_branding(organization.slug) or {}
+    logo_url = branding.get("logo_url")
+    primary_color = branding.get("primary_color") or "#9100B0"
+    portal_title = branding.get("portal_title") or organization.name
+    portal_description = branding.get("portal_description")
+
     return PortalConfigResponse(
         organization_name=organization.name,
-        logo_url=organization.logo_url,
-        primary_color=organization.primary_color,
-        portal_title=organization.portal_title or organization.name,
-        portal_description=organization.portal_description,
+        logo_url=logo_url,
+        primary_color=primary_color,
+        portal_title=portal_title,
+        portal_description=portal_description,
         show_packages=show_packages,
         allow_guest_purchases=allow_guest,
         redirect_url=redirect_url,

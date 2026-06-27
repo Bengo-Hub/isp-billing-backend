@@ -52,6 +52,26 @@ class Settings(BaseSettings):
     sso_audience: str = "isp-billing-ui"
     # Shared secret for trusted service-to-service (S2S) callers via X-API-Key.
     internal_service_key: Optional[str] = None
+    # Base URL of the central auth-api (the SSO host). auth-api is the SoT for
+    # tenant IDENTITY + BRANDING (logo_url / brand_colors). isp-billing stores NO
+    # local branding: the captive portal config fetches branding SERVER-SIDE from
+    # auth-api's PUBLIC tenant-by-slug endpoint (GET /api/v1/tenants/by-slug/{slug})
+    # and projects it through its own already-walled-gardened portal-config
+    # response, so the pre-auth captive device never has to reach auth-api directly.
+    # When empty, defaults to sso_issuer. Override via AUTH_API_URL.
+    auth_api_url: Optional[str] = None
+    # Request timeout (seconds) for the server-side auth-api branding fetch.
+    auth_request_timeout: float = 6.0
+    # In-process TTL (seconds) for the cached auth-api branding lookup (per slug).
+    auth_branding_cache_ttl: int = 300
+
+    @property
+    def auth_api_base(self) -> str:
+        """Resolved auth-api base URL for the public branding fetch.
+
+        Prefers an explicit ``auth_api_url``; otherwise falls back to the SSO
+        issuer host (auth-api serves SSO + the public tenant endpoints)."""
+        return (self.auth_api_url or self.sso_issuer or "").rstrip("/")
 
     # ── Treasury payments (centralized — treasury-api is the ONLY path) ──
     # ALL payments (customer hotspot/PPPoE purchases, SMS-credit + WhatsApp
