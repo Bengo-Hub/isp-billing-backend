@@ -125,6 +125,59 @@ def process_expired_hotspot_users(
 
 
 @celery_app.task(bind=True)
+def process_churn_mark(self):
+    """Tier 2 churn: mark long-inactive hotspot customers CHURNED + free router slots.
+
+    Hotspot Subscriptions EXPIRED longer than the tenant's
+    ``prune_inactive_users_days`` (default 14) with no reconnect/renewal are flipped
+    to INACTIVE and their router account is removed (NAT-safe via the agent queue).
+    The row is KEPT for retention reporting; a repeat purchase reactivates it.
+    """
+    logger.info("Starting churn-mark pass")
+    try:
+        async def _run():
+            from app.modules.subscriptions.churn_manager import ChurnManager
+
+            async with AsyncSessionLocal() as db:
+                return await ChurnManager(db).process_churn_mark()
+
+        results = asyncio.run(_run())
+        logger.info(f"Churn-mark completed: {results}")
+        return results
+    except Exception as exc:
+        logger.error(f"Churn-mark pass failed: {exc}")
+        raise self.retry(exc=exc, countdown=300, max_retries=2)
+
+
+@celery_app.task(bind=True)
+def process_hard_purge(self, hard_purge_days: int = 90):
+    """Tier 3 churn: hard-purge customers inactive beyond the long window.
+
+    Deletes the operational footprint + PII (CustomerPurchase, CustomerSession,
+    Subscription) and removes the router account for churned hotspot customers older
+    than ``hard_purge_days`` (default 90). The PII-free customer ``User`` + ``Payment``
+    (revenue) are retained for accounting integrity. No-op until customers actually
+    reach the 90-day window, so it is safe to ship immediately.
+    """
+    logger.info("Starting hard-purge pass")
+    try:
+        async def _run():
+            from app.modules.subscriptions.churn_manager import ChurnManager
+
+            async with AsyncSessionLocal() as db:
+                return await ChurnManager(db).process_hard_purge(
+                    hard_purge_days=hard_purge_days
+                )
+
+        results = asyncio.run(_run())
+        logger.info(f"Hard-purge completed: {results}")
+        return results
+    except Exception as exc:
+        logger.error(f"Hard-purge pass failed: {exc}")
+        raise self.retry(exc=exc, countdown=300, max_retries=2)
+
+
+@celery_app.task(bind=True)
 def send_expiring_soon_notifications(
     self,
     hours_before: list = None,

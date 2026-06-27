@@ -589,16 +589,31 @@ class ReportsService:
             else:
                 month_end = month_start.replace(month=month_start.month + 1)
 
-            new_filters = [Subscription.created_at >= month_start, Subscription.created_at < month_end]
+            new_filters = [
+                Subscription.created_at >= month_start,
+                Subscription.created_at < month_end,
+            ]
+            # Churned = ended in-month and no longer active. INACTIVE is the
+            # churn-mark tier (kept for retention reporting); EXPIRED/CANCELLED also
+            # count as not-returning.
             churned_filters = [
                 Subscription.end_date >= month_start,
                 Subscription.end_date < month_end,
-                Subscription.status.in_([SubscriptionStatus.EXPIRED, SubscriptionStatus.CANCELLED]),
+                Subscription.status.in_([
+                    SubscriptionStatus.EXPIRED,
+                    SubscriptionStatus.CANCELLED,
+                    SubscriptionStatus.INACTIVE,
+                ]),
             ]
+            # Returning = an EXISTING customer (created before this month) who bought
+            # again in-month. Prepaid hotspot renews a subscription IN PLACE (the
+            # dashboard bridge bumps start_date), so a fresh start_date with an older
+            # created_at means the customer came back. (is_auto_renewal never fires
+            # for prepaid hotspot, so it cannot be used here.)
             returning_filters = [
-                Subscription.created_at >= month_start,
-                Subscription.created_at < month_end,
-                Subscription.is_auto_renewal == True,
+                Subscription.start_date >= month_start,
+                Subscription.start_date < month_end,
+                Subscription.created_at < month_start,
             ]
             if org_id:
                 new_filters.append(Subscription.organization_id == org_id)
