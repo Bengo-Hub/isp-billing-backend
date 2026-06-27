@@ -65,6 +65,18 @@ class PackageResponse(BaseModel):
     is_unlimited_time: bool
     is_popular: bool
     features: List[str]
+    plan_type: str  # HOTSPOT / PPPOE / INTERNET / BOTH
+    concurrent_sessions: int  # number of simultaneous devices allowed
+    # Authoritative access window in MINUTES when set (> 0). Carries sub-day /
+    # sub-hour precision (e.g. 5 = 5 min). Null when the plan relies on the
+    # legacy validity_days (capped by time_limit) fallback instead.
+    duration_minutes: Optional[int] = None
+    # Effective access window in HOURS the customer ACTUALLY gets, computed by the
+    # single source of truth ``ServicePlan.access_window_hours()`` (honours
+    # duration_minutes → validity_days capped by time_limit). <= 0 means no finite
+    # calendar window (e.g. unlimited time). The captive card renders THIS so the
+    # displayed validity always matches what is provisioned.
+    access_window_hours: float = 0.0
 
 
 class PurchaseRequest(BaseModel):
@@ -276,6 +288,15 @@ async def get_packages(
         if plan.concurrent_sessions > 1:
             features.append(f"{plan.concurrent_sessions} devices")
 
+        # Effective access window the customer actually gets — single source of
+        # truth shared with voucher-redeem expiry + the expiry reconciler. The
+        # captive card renders THIS so the displayed validity always matches what
+        # is provisioned (e.g. a 5-min package reads "5 min", never "1 Day").
+        try:
+            window_hours = plan.access_window_hours()
+        except Exception:
+            window_hours = (plan.validity_days or 0) * 24
+
         packages.append(PackageResponse(
             id=plan.id,
             name=plan.name,
@@ -291,6 +312,10 @@ async def get_packages(
             is_unlimited_time=plan.is_unlimited_time,
             is_popular=plan.is_popular,
             features=features,
+            plan_type=plan.plan_type.value if hasattr(plan.plan_type, "value") else str(plan.plan_type),
+            concurrent_sessions=plan.concurrent_sessions or 1,
+            duration_minutes=plan.duration_minutes,
+            access_window_hours=float(window_hours or 0.0),
         ))
 
     return packages
