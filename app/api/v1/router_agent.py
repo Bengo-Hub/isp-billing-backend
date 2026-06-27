@@ -552,6 +552,11 @@ def _generate_routeros_agent_script(
             :do {{
               :do {{ /ppp/active/remove [find name=$uname] }} on-error={{}}
               :do {{ /ip/hotspot/active/remove [find user=$uname] }} on-error={{}}
+              # Force the device back to the captive portal immediately: clear the
+              # MAC-cookie + host binding so the next request re-authenticates
+              # instead of staying logged in until the user toggles Wi-Fi.
+              :do {{ /ip/hotspot/cookie/remove [find user=$uname] }} on-error={{}}
+              :do {{ /ip/hotspot/host/remove [find user=$uname] }} on-error={{}}
             }} on-error={{ :set cs "failed"; :set cm "disconnect error" }}
 {report}
           }}
@@ -569,6 +574,10 @@ def _generate_routeros_agent_script(
               :if ($utype = "hotspot") do={{
                 /ip/hotspot/user/set [find name=$uname] disabled=yes
                 :do {{ /ip/hotspot/active/remove [find user=$uname] }} on-error={{}}
+                # Force the captive portal on next request (no Wi-Fi toggle needed):
+                # clear the MAC-cookie + host binding for the disabled user.
+                :do {{ /ip/hotspot/cookie/remove [find user=$uname] }} on-error={{}}
+                :do {{ /ip/hotspot/host/remove [find user=$uname] }} on-error={{}}
               }} else={{
                 /ppp/secret/set [find name=$uname] disabled=yes
                 :do {{ /ppp/active/remove [find name=$uname] }} on-error={{}}
