@@ -1294,7 +1294,19 @@ async def get_payment_status(
                     tenant=str(organization.uuid),
                     intent_id=purchase.treasury_payment_intent_id,
                 )
-                treasury_status = str(intent.get("status", "")).lower()
+                # IMPORTANT: treasury-api's GET-intent (S2S) serializes the Go
+                # `PaymentIntent` struct WITHOUT json tags, so the field comes
+                # back as "Status" (capitalized) — NOT "status". The create-intent
+                # *response* uses tagged DTOs (lowercase), which is why intent
+                # CAPTURE works but this poll silently never saw success: it read
+                # `intent.get("status")` (always None) so the purchase stayed
+                # "processing" forever and only the client-side countdown ever
+                # "confirmed" it (issue 4). Read BOTH casings defensively.
+                treasury_status = str(
+                    intent.get("status")
+                    or intent.get("Status")
+                    or ""
+                ).lower()
                 if treasury_status in ("succeeded", "success", "completed", "paid"):
                     logger.info(
                         "treasury intent %s succeeded for reference %s, provisioning",
@@ -1316,6 +1328,10 @@ async def get_payment_status(
     response = {
         "status": purchase.payment_status,
         "is_completed": is_completed,
+        # is_success distinguishes a COMPLETED-success from a COMPLETED-failed
+        # (both have is_completed=True). Without it the buy page rendered the
+        # "Payment Successful!" screen + auto-connect even on a FAILED payment.
+        "is_success": is_success,
         "message": "Payment successful" if is_success else (
             "Payment failed" if purchase.payment_status == "failed" else "Payment pending"
         ),
