@@ -231,22 +231,19 @@ async def get_branding_settings(
 
     ISP Admin only.
     """
-    # Get or create settings
-    result = await db.execute(
-        select(OrganizationSettings).where(
-            OrganizationSettings.organization_id == organization.id
-        )
-    )
-    settings = result.scalar_one_or_none()
-
+    # All branding fields live on the Organization model (logo_url / favicon_url /
+    # primary_color / secondary_color / portal_title / portal_description). The
+    # OrganizationSettings table has NO branding columns, so reading them off it
+    # raised AttributeError and 500'd. custom_css has no backing column today, so
+    # it is not persisted (always None).
     return BrandingSettingsResponse(
         logo_url=organization.logo_url,
-        favicon_url=settings.favicon_url if settings else None,
+        favicon_url=organization.favicon_url,
         primary_color=organization.primary_color,
-        secondary_color=settings.secondary_color if settings else None,
-        custom_css=settings.custom_css if settings else None,
-        portal_title=settings.portal_title if settings else organization.name,
-        portal_welcome_message=settings.portal_welcome_message if settings else None,
+        secondary_color=organization.secondary_color,
+        custom_css=None,
+        portal_title=organization.portal_title or organization.name,
+        portal_welcome_message=organization.portal_description,
     )
 
 
@@ -262,48 +259,34 @@ async def update_branding_settings(
 
     ISP Admin only.
     """
-    # Update organization fields (primary_color/logo_url live on Organization,
-    # which is what the captive portal config reads).
+    # All branding fields live on the Organization model (the captive portal
+    # config reads them). OrganizationSettings has NO branding columns — writing
+    # them there raised AttributeError and 500'd. custom_css has no backing column
+    # today, so it is accepted but not persisted (reported in the fix notes).
     if data.logo_url is not None:
         organization.logo_url = data.logo_url
     if data.primary_color is not None:
         organization.primary_color = data.primary_color
-
-    # Get or create settings
-    result = await db.execute(
-        select(OrganizationSettings).where(
-            OrganizationSettings.organization_id == organization.id
-        )
-    )
-    settings = result.scalar_one_or_none()
-
-    if not settings:
-        settings = OrganizationSettings(organization_id=organization.id)
-        db.add(settings)
-
     if data.favicon_url is not None:
-        settings.favicon_url = data.favicon_url
+        organization.favicon_url = data.favicon_url
     if data.secondary_color is not None:
-        settings.secondary_color = data.secondary_color
-    if data.custom_css is not None:
-        settings.custom_css = data.custom_css
+        organization.secondary_color = data.secondary_color
     if data.portal_title is not None:
-        settings.portal_title = data.portal_title
+        organization.portal_title = data.portal_title
     if data.portal_welcome_message is not None:
-        settings.portal_welcome_message = data.portal_welcome_message
+        organization.portal_description = data.portal_welcome_message
 
     await db.commit()
     await db.refresh(organization)
-    await db.refresh(settings)
 
     return BrandingSettingsResponse(
         logo_url=organization.logo_url,
-        favicon_url=settings.favicon_url,
+        favicon_url=organization.favicon_url,
         primary_color=organization.primary_color,
-        secondary_color=settings.secondary_color,
-        custom_css=settings.custom_css,
-        portal_title=settings.portal_title,
-        portal_welcome_message=settings.portal_welcome_message,
+        secondary_color=organization.secondary_color,
+        custom_css=None,
+        portal_title=organization.portal_title or organization.name,
+        portal_welcome_message=organization.portal_description,
     )
 
 

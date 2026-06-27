@@ -71,7 +71,7 @@ class AvailableGatewayResponse(BaseModel):
 # Helpers
 # =========================================================================
 
-def _build_tenant_configs() -> Dict[str, Dict[str, Any]]:
+def _build_tenant_configs(*, platform_rail: bool = False) -> Dict[str, Dict[str, Any]]:
     """Build the Layer-2 tenant-config bag keyed by normalised gateway type.
 
     Customer payments route through the PLATFORM M-Pesa rail, whose essential
@@ -80,10 +80,14 @@ def _build_tenant_configs() -> Dict[str, Dict[str, Any]]:
     (short code / consumer key / consumer secret / passkey) is unset — which is
     exactly the "M-Pesa shows active but isn't configured" bug.
 
-    Paystack runs on platform-managed keys held by treasury; we don't have them
-    in isp-billing, so we DON'T fabricate a config bag for it — its required-key
-    set is satisfied by treasury's own enable gating (Layer 1) and the absence
-    of a declared-but-empty bag here.
+    Paystack / card run on platform-managed keys held BY TREASURY (isp-billing
+    never sees them). For those rails treasury is the credential authority, so the
+    local essential-config gate cannot validate them. When ``platform_rail`` is
+    True (i.e. we are listing the PLATFORM tenant's treasury-enabled gateways), we
+    supply a sentinel "treasury-managed" config bag for paystack/card so the
+    Layer-2 gate trusts treasury's Layer-1 enable state instead of hiding them for
+    a key isp-billing structurally cannot hold. The cash/COD exclusion and the
+    M-Pesa local-config gate still apply.
     """
     mpesa_cfg: Dict[str, Any] = {
         "shortcode": settings.mpesa_shortcode,
@@ -91,11 +95,18 @@ def _build_tenant_configs() -> Dict[str, Dict[str, Any]]:
         "consumer_secret": settings.mpesa_consumer_secret,
         "passkey": settings.mpesa_passkey,
     }
-    return {
+    configs: Dict[str, Dict[str, Any]] = {
         "mpesa": mpesa_cfg,
         "mpesa_paybill": mpesa_cfg,
         "mpesa_till": mpesa_cfg,
     }
+    if platform_rail:
+        # Treasury holds these keys; satisfy the local gate so treasury's enable
+        # state (Layer 1) is authoritative for the platform rail.
+        treasury_managed = {"secret_key": "managed-by-treasury"}
+        configs["paystack"] = treasury_managed
+        configs["card"] = treasury_managed
+    return configs
 
 
 def _display_name(gateway_type: str, name: Optional[str]) -> str:
@@ -143,14 +154,31 @@ async def get_available_payment_gateways(
     if not organization or not getattr(organization, "uuid", None):
         return []
 
-    # Layer 1 — treasury is the source of truth for enabled (platform+tenant)
-    # gateways. Empty list on any treasury problem (never raises).
+    # Layer 1 — HYBRID sourcing. Treasury is the source of truth for enabled
+    # gateways. First try the ISP tenant's OWN selected gateways (tenant override);
+    # if it has none, fall back to the PLATFORM operating tenant's gateways, because
+    # captive customers pay the platform rail ("Codevertex Africa Limited"). Empty
+    # list on any treasury problem (never raises).
     client = TreasuryClient()
     raw_gateways = await client.list_active_gateways(tenant=str(organization.uuid))
 
+    using_platform_rail = False
+    if not raw_gateways:
+        platform_tenant = (settings.platform_treasury_tenant or "").strip()
+        if platform_tenant:
+            logger.info(
+                "payment-gateways/available: ISP tenant %s has no treasury gateways; "
+                "falling back to platform tenant %s",
+                organization.uuid,
+                platform_tenant,
+            )
+            raw_gateways = await client.list_active_gateways(tenant=platform_tenant)
+            using_platform_rail = bool(raw_gateways)
+
     # Apply Issue-1 (cash/COD exclusion) + Layer-2 (essential-config gate). This
-    # is the SAME helper every gateway-listing path should use.
-    tenant_configs = _build_tenant_configs()
+    # is the SAME helper every gateway-listing path should use. For the platform
+    # rail, treasury holds the paystack/card credentials, so trust its enable state.
+    tenant_configs = _build_tenant_configs(platform_rail=using_platform_rail)
     filtered = filter_captive_payment_gateways(
         raw_gateways, tenant_configs=tenant_configs
     )
