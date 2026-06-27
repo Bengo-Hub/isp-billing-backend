@@ -37,8 +37,6 @@ class OrganizationCreate(BaseModel):
     address: Optional[str] = None
     city: Optional[str] = None
     country: str = "Kenya"
-    primary_color: str = "#ec4899"
-    secondary_color: Optional[str] = "#8b5cf6"
     default_currency: str = "KES"
     timezone: str = "Africa/Nairobi"
     notification_email: Optional[str] = None
@@ -58,12 +56,9 @@ class OrganizationUpdate(BaseModel):
     address: Optional[str] = None
     city: Optional[str] = None
     country: Optional[str] = None
-    logo_url: Optional[str] = None
-    primary_color: Optional[str] = None
-    secondary_color: Optional[str] = None
+    # Branding (logo/colors/portal title) is owned by auth-api (SSO) and edited in the
+    # accounts console — NOT here. Only the custom portal_domain remains editable.
     portal_domain: Optional[str] = None
-    portal_title: Optional[str] = None
-    portal_description: Optional[str] = None
     max_routers: Optional[int] = None
     max_customers: Optional[int] = None
     max_users: Optional[int] = None
@@ -294,8 +289,8 @@ async def create_organization(
         address=data.address,
         city=data.city,
         country=data.country,
-        primary_color=data.primary_color,
-        secondary_color=data.secondary_color,
+        # Branding (primary/secondary color, logo) owned by auth-api; use model defaults
+        # here — branding is edited in the accounts console, not in isp-billing.
         default_currency=data.default_currency,
         timezone=data.timezone,
         notification_email=data.notification_email,
