@@ -744,15 +744,19 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
     walled_garden_hosts.extend(payment_hosts)
 
     # CRITICAL (issues 3 & 4): a pre-auth captive device has NO internet — it can
-    # only reach walled-garden hosts. Two hosts were missing, which broke the buy
-    # flow for already-provisioned routers:
+    # only reach walled-garden hosts. Several hosts were missing, which broke the
+    # buy flow for already-provisioned routers:
     #   * the treasury/books PUBLIC status host — the device polls it for payment
     #     confirmation; without it the purchase only "confirms" at the client-side
     #     countdown (issue 4). Host is configurable (config override → settings
     #     default `booksapi.codevertexitsolutions.com`).
+    #   * the treasury-UI host — serves the embedded checkout iframe.
     #   * `api.qrserver.com` — renders the M-Pesa/merchant QR + logo on the pay
     #     page; without it the QR/logo never loads (issue 3).
-    # Both are NON-wildcard HTTPS hosts, so (like the billing/api host) they must
+    #   * Paystack hosted-checkout asset hosts (merchant logo on S3, country-flag
+    #     Twemoji on cdnjs, pusher.min.js on S3) — added in captive_cloud_hosts
+    #     just below (see that block for the exact hosts + why each is needed).
+    # All are NON-wildcard HTTPS hosts, so (like the billing/api host) they must
     # ALSO be IP-pinned in cloud_hosts below — MikroTik's by-host (SNI) walled-
     # garden does not reliably pass unauthenticated HTTPS.
     _default_treasury_host = "booksapi.codevertexitsolutions.com"
@@ -783,6 +787,31 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
     if treasury_ui_host and treasury_ui_host != treasury_status_host:
         captive_cloud_hosts.append(treasury_ui_host)  # treasury-UI embedded checkout iframe — issues 3+4
     captive_cloud_hosts.append("api.qrserver.com")  # QR image API (logo/QR) — issue 3
+
+    # Paystack HOSTED-CHECKOUT assets that load from NON-paystack hosts.
+    # Captured live (Playwright) on the Paystack M-Pesa "enter mobile money
+    # number" page; these are NOT matched by *.paystack.com / *.paystack.co /
+    # *.paystackcdn.com, so on a pre-auth captive device they render BROKEN —
+    # exactly the missing merchant-logo + country-flag in the reported screenshot:
+    #   * public-files-paystack-prod.s3.eu-west-1.amazonaws.com — the MERCHANT
+    #     LOGO (img alt "<Merchant> Logo", path /integration-logos/<id>.png).
+    #   * cdnjs.cloudflare.com — the COUNTRY FLAG (Twemoji SVG, e.g. the Kenya
+    #     flag 1f1f0-1f1ea.svg) shown in the phone-number field.
+    #   * s3-eu-west-1.amazonaws.com — Paystack's pusher.min.js
+    #     (/pstk-public-files/js/pusher.min.js); Paystack uses Pusher (WebSocket)
+    #     to confirm the STK payment PROMPTLY. Without it the page can only fall
+    #     back to slow polling / the STK countdown (issue 4 on the Paystack side).
+    # All three are non-wildcard HTTPS hosts, so (like api.qrserver.com) they are
+    # appended here to be added by-host AND IP-pinned in cloud_hosts below.
+    # NOTE: cdnjs.cloudflare.com / the S3 hosts are SHARED CDNs (not paystack-
+    # specific); allowing them pre-auth only exposes those exact hostnames, an
+    # accepted trade-off to render the pay page. (`fonts.googleapis.com` for the
+    # page font is intentionally left out — text still renders via fallback fonts.)
+    captive_cloud_hosts.extend([
+        "public-files-paystack-prod.s3.eu-west-1.amazonaws.com",  # Paystack merchant logo — issue 3
+        "cdnjs.cloudflare.com",  # Paystack country-flag Twemoji SVG — issue 3
+        "s3-eu-west-1.amazonaws.com",  # Paystack pusher.min.js (prompt STK confirm) — issue 4
+    ])
 
     for _captive_host in captive_cloud_hosts:
         if _captive_host and _captive_host not in walled_garden_hosts:
