@@ -108,7 +108,10 @@ class VoucherRedeemResponse(BaseModel):
     success: bool
     message: str
     plan_name: Optional[str] = None
-    validity_hours: Optional[int] = None
+    # FLOAT hours: access_window_hours() returns fractional hours for sub-hour
+    # packages (e.g. a 30-minute voucher → 0.5). An int field rejected those with
+    # a Pydantic ValidationError and 500'd the redeem.
+    validity_hours: Optional[float] = None
     expires_at: Optional[datetime] = None
     # Hotspot login credentials so the captive portal can show / auto-fill them.
     hotspot_username: Optional[str] = None
@@ -951,17 +954,29 @@ async def redeem_voucher(
     # Returns the gateway login URL so the client can authenticate itself.
     login_url = None
     if voucher.hotspot_username and voucher.hotspot_password:
-        login_url = await _sync_hotspot_user_to_router(
-            db,
-            organization,
-            voucher.hotspot_username,
-            voucher.hotspot_password,
-            plan,
-            mac_address=data.mac_address,
-            source="voucher_redeem",
-            source_id=str(voucher.id),
-            comment=f"Redeemed voucher {voucher.code} - {plan.name}",
-        )
+        # Router sync is STRICTLY best-effort: a router-sync failure must never
+        # fail the redeem (the voucher is already consumed + the session created).
+        # _sync_hotspot_user_to_router catches its own errors, but we wrap the call
+        # too so any unexpected error still returns login_url=None gracefully.
+        try:
+            login_url = await _sync_hotspot_user_to_router(
+                db,
+                organization,
+                voucher.hotspot_username,
+                voucher.hotspot_password,
+                plan,
+                mac_address=data.mac_address,
+                source="voucher_redeem",
+                source_id=str(voucher.id),
+                comment=f"Redeemed voucher {voucher.code} - {plan.name}",
+            )
+        except Exception as exc:  # noqa: BLE001 - redeem must succeed regardless
+            logger.error(
+                "voucher redeem: router sync failed for voucher %s (non-fatal): %s",
+                voucher.code,
+                exc,
+            )
+            login_url = None
 
     await db.commit()
 

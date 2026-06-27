@@ -76,6 +76,13 @@ class Settings(BaseSettings):
     # IP-pinned (SNI HTTPS won't pass unauth by host alone). e.g.
     # booksapi.codevertexitsolutions.com
     treasury_status_host: str = "booksapi.codevertexitsolutions.com"
+    # Treasury "platform operating tenant" identifier — the tenant under which
+    # the PLATFORM-owned payment rail ("Codevertex Africa Limited") is enabled in
+    # treasury. Captive customers pay this platform rail, so when an ISP tenant has
+    # NO gateways selected in treasury we fall back to this tenant's gateways
+    # (HYBRID sourcing). In treasury this tenant is addressed by the slug
+    # ``codevertex`` (NOT an Organization.uuid). Override via PLATFORM_TREASURY_TENANT.
+    platform_treasury_tenant: str = "codevertex"
 
     # ── Central subscriptions-api (Phase 3, ADDITIVE) ──
     # Internal (S2S) base URL for subscriptions-api — used to read an ISP
