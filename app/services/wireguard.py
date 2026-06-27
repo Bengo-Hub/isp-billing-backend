@@ -134,8 +134,17 @@ class WireGuardService:
         """Persist a router's reported WG public key and mark the tunnel enabled.
 
         Stores ONLY the public key (no private material). Ensures the router has
-        an allocated tunnel IP. Sets ``router.ip_address`` to the tunnel IP so
-        existing direct-API / winbox-url paths transparently use the tunnel.
+        an allocated tunnel IP.
+
+        IMPORTANT: enrollment does NOT repoint management (``ip_address``) onto the
+        tunnel. The router reporting its pubkey only means the router-side config
+        ran — it does NOT mean the WireGuard handshake completed (RouterOS < v7 has
+        no WG, the upstream may block UDP 51820, etc.). Cutting ``ip_address`` over
+        to the tunnel IP on mere enrollment is what broke remote management: direct
+        API / WinBox then targeted a tunnel that never came up. Management therefore
+        stays on its existing address here; promotion to the tunnel IP must be gated
+        on a CONFIRMED handshake (see ``promote_router_to_tunnel`` / the future
+        reconcile handshake-report). The tunnel IP lives in ``vpn_address``.
         """
         public_key = (public_key or "").strip()
         if not public_key:
@@ -146,11 +155,8 @@ class WireGuardService:
 
         router.vpn_public_key = public_key
         router.vpn_enabled = True
-
-        # Route management traffic over the tunnel. The agent stays as a NAT
-        # fallback, but once the tunnel is up the cloud can reach the router
-        # directly at its tunnel IP (API 8728 + winbox 8291).
-        router.ip_address = router.vpn_address
+        # NOTE: do NOT set router.ip_address = router.vpn_address here (premature
+        # cutover onto an unconfirmed tunnel — see docstring).
 
         await self.db.flush()
         logger.info(
