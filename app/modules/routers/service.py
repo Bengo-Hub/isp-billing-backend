@@ -239,8 +239,13 @@ class RouterService:
                 )
             )
             org_settings = result.scalar_one_or_none()
-            if org_settings and getattr(org_settings, "vpn_domain", None):
-                vpn_domain = org_settings.vpn_domain.strip()
+            override = (getattr(org_settings, "vpn_domain", None) or "").strip() if org_settings else ""
+            # The WG gateway is platform-wide (one host for every router's tunnel + winbox
+            # DNAT), so the per-org value should equal the platform default. Ignore the
+            # legacy-bad "vpn.codevertex.com" default (a typo missing "itsolutions" that
+            # caused WinBox "Host not found"); only honour a genuinely-customised override.
+            if override and override != "vpn.codevertex.com":
+                vpn_domain = override
         return vpn_domain
 
     async def get_winbox_url(self, router_id: int) -> Optional[str]:
