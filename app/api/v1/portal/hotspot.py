@@ -1066,6 +1066,35 @@ async def redeem_voucher(
 
     await db.commit()
 
+    # Issue 4 (FOUNDATION): mirror this voucher REDEEM into the dashboard's data
+    # model (User + Subscription) so the redeemed customer surfaces on
+    # Users/Customers/Expiry/analytics exactly like PPPoE. No Payment is recorded —
+    # the revenue was recognized when the voucher was SOLD (recording one here would
+    # double-count). Idempotent + fully guarded; runs AFTER the critical
+    # voucher/session commit above so a non-fatal bridge failure can never undo the
+    # redeem.
+    if voucher.hotspot_username and voucher.hotspot_password:
+        try:
+            from app.services.hotspot_dashboard_bridge import (
+                bridge_hotspot_purchase_to_dashboard,
+            )
+
+            await bridge_hotspot_purchase_to_dashboard(
+                db,
+                organization,
+                plan,
+                hotspot_username=voucher.hotspot_username,
+                hotspot_password_hash=voucher.hotspot_password,
+                expires_at=expires_at,
+                is_voucher_redeem=True,
+            )
+        except Exception as bridge_exc:  # never break the redeem
+            logger.error(
+                "hotspot dashboard bridge failed for voucher %s (non-fatal): %s",
+                voucher.code,
+                bridge_exc,
+            )
+
     return VoucherRedeemResponse(
         success=True,
         message="Voucher redeemed successfully. You can now connect to the internet.",
@@ -1567,6 +1596,9 @@ async def _process_successful_payment(
 
         # Create the hotspot user on the router (NAT-safe + best-effort; shared
         # helper queues via the agent for NATed routers, falls back to direct).
+        # FAST CONNECT (Issue 1): this QUEUES create_user at payment-confirm time
+        # (here), not at the connect screen, so the hotspot user exists on the
+        # router before the device attempts to log in.
         await _sync_hotspot_user_to_router(
             db,
             organization,
@@ -1577,6 +1609,45 @@ async def _process_successful_payment(
             source_id=str(purchase.id),
             comment=f"Purchased {plan.name} - Voucher {voucher_code}",
         )
+
+        # Persist the queued create_user/set_limits commands NOW (queue_command only
+        # flushes — it never commits). Doing this BEFORE the dashboard bridge means a
+        # non-fatal bridge failure (which rolls back its own session) can never undo
+        # the customer's router provisioning.
+        await db.commit()
+
+        # Issue 4 (FOUNDATION): mirror this hotspot PURCHASE into the dashboard's
+        # data model (User + Subscription + Payment), so it surfaces on
+        # Users/Customers/Expiry/analytics exactly like PPPoE. Idempotent + fully
+        # guarded; runs for BOTH the NATS consumer and the poll fallback because
+        # both call this shared routine. This is a DIRECT purchase (money moved via
+        # treasury) so a Payment IS recorded.
+        try:
+            from app.services.hotspot_dashboard_bridge import (
+                bridge_hotspot_purchase_to_dashboard,
+            )
+
+            _window_hours = plan.access_window_hours()
+            await bridge_hotspot_purchase_to_dashboard(
+                db,
+                organization,
+                plan,
+                hotspot_username=hotspot_username,
+                hotspot_password_hash=hotspot_password,
+                expires_at=datetime.utcnow() + timedelta(hours=_window_hours),
+                phone=purchase.phone_number,
+                email=purchase.email,
+                amount=purchase.amount,
+                currency=purchase.currency,
+                payment_reference=purchase.payment_reference,
+                payment_method=purchase.payment_method or "treasury",
+                is_voucher_redeem=False,
+            )
+        except Exception as bridge_exc:  # never break provisioning
+            logger.error(
+                "hotspot dashboard bridge failed for purchase %s (non-fatal): %s",
+                purchase.id, bridge_exc,
+            )
 
     except Exception as e:
         logger.error(f"Error processing successful payment for purchase {purchase.id}: {e}")
