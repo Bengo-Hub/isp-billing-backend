@@ -541,6 +541,14 @@ class RouterAgentService:
                     f"{params.get('type', 'pppoe')}|{cmd_id}"
                 )
 
+            elif action == "remove_user":
+                # Hard-purge (churn tier 3): fully DELETE the user account from the
+                # router (not just disable). Same param shape as disable_user.
+                lines.append(
+                    f"remove_user|{params.get('username', '')}|"
+                    f"{params.get('type', 'pppoe')}|{cmd_id}"
+                )
+
             elif action == "create_user":
                 lines.append(
                     f"create_user|{params.get('username', '')}|"

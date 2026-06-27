@@ -605,6 +605,29 @@ def _generate_routeros_agent_script(
 {report}
           }}
 
+          # --- REMOVE USER (hard-purge: fully DELETE the account, not just disable) ---
+          :if ($action = "remove_user") do={{
+            :local sep2 [:find $rest "|"]
+            :local sep3 [:find $rest "|" ($sep2 + 1)]
+            :local uname [:pick $rest 0 $sep2]
+            :local utype [:pick $rest ($sep2 + 1) $sep3]
+            :local cid [:pick $rest ($sep3 + 1) [:len $rest]]
+            :local cs "success"
+            :local cm ""
+            :do {{
+              :if ($utype = "hotspot") do={{
+                :do {{ /ip/hotspot/active/remove [find user=$uname] }} on-error={{}}
+                :do {{ /ip/hotspot/cookie/remove [find user=$uname] }} on-error={{}}
+                :do {{ /ip/hotspot/host/remove [find user=$uname] }} on-error={{}}
+                :do {{ /ip/hotspot/user/remove [find name=$uname] }} on-error={{}}
+              }} else={{
+                :do {{ /ppp/active/remove [find name=$uname] }} on-error={{}}
+                :do {{ /ppp/secret/remove [find name=$uname] }} on-error={{}}
+              }}
+            }} on-error={{ :set cs "failed"; :set cm "remove error" }}
+{report}
+          }}
+
           # --- CREATE USER ---
           :if ($action = "create_user") do={{
             :local sep2 [:find $rest "|"]

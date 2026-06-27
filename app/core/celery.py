@@ -101,6 +101,17 @@ celery_app.conf.update(
             "task": "app.tasks.subscription_tasks.generate_expiry_report",
             "schedule": 60.0 * 60 * 24,  # Daily
         },
+        # Tiered churn (Issue 3): churn-mark removes the router slot + marks CHURNED
+        # after the tenant's prune_inactive_users_days (kept for retention); hard-purge
+        # deletes operational/PII rows after the long window. Daily is ample.
+        "process-churn-mark": {
+            "task": "app.tasks.subscription_tasks.process_churn_mark",
+            "schedule": 60.0 * 60 * 24,  # Daily
+        },
+        "process-hard-purge": {
+            "task": "app.tasks.subscription_tasks.process_hard_purge",
+            "schedule": 60.0 * 60 * 24,  # Daily
+        },
         # NOTE: platform-licence beat tasks removed — the local licence subsystem is
         # retired; ISP subscription/renewal lifecycle is owned by subscriptions-api
         # (with treasury auto-invoicing).
