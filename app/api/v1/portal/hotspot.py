@@ -485,6 +485,51 @@ async def hotspot_login(
     )
 
 
+def _build_rate_limit(plan) -> str:
+    """MikroTik ``rate-limit`` string for a plan's bandwidth, with optional burst.
+
+    Base form: ``"<down>M/<up>M"`` (Mbps). When the plan enables burst and has
+    burst rates configured, the full MikroTik burst form is emitted:
+
+        rxRate/txRate rxBurstRate/txBurstRate rxBurstThreshold/txBurstThreshold rxBurstTime/txBurstTime
+
+    Here rx = client download, tx = client upload (RouterOS orders rx/tx).
+    burst_threshold on the plan is a PERCENTAGE of the base rate; MikroTik wants an
+    absolute rate for the threshold, so it is computed as base * pct/100 (>=1M).
+    Returns "" for an unlimited (0/0) plan — valid RouterOS for "no shaping".
+    """
+    download = plan.download_speed or 0
+    upload = plan.upload_speed or 0
+    if not download and not upload:
+        return ""
+    base = f"{download}M/{upload}M"
+
+    if not getattr(plan, "enable_burst", False):
+        return base
+    b_down = getattr(plan, "burst_download", None) or 0
+    b_up = getattr(plan, "burst_upload", None) or 0
+    if not b_down and not b_up:
+        # Burst flagged but no rates configured -> nothing meaningful to emit.
+        return base
+
+    pct = getattr(plan, "burst_threshold", None) or 0
+    if pct and pct > 0:
+        thr_down = max(1, int(round(download * pct / 100.0)))
+        thr_up = max(1, int(round(upload * pct / 100.0)))
+    else:
+        # No explicit threshold -> use the base rate as the threshold.
+        thr_down = max(1, download)
+        thr_up = max(1, upload)
+    btime = getattr(plan, "burst_time", None) or 0
+
+    return (
+        f"{download}M/{upload}M "
+        f"{b_down}M/{b_up}M "
+        f"{thr_down}M/{thr_up}M "
+        f"{btime}/{btime}"
+    )
+
+
 def _resolve_hotspot_gateway(router_obj: Router) -> str:
     """Hotspot LAN gateway the *client's* browser must POST its login to.
 
@@ -556,9 +601,7 @@ async def _sync_hotspot_user_to_router(
         try:
             from app.services.router_agent import RouterAgentService
 
-            download = plan.download_speed or 0
-            upload = plan.upload_speed or 0
-            rate_limit = f"{download}M/{upload}M" if (download or upload) else ""
+            rate_limit = _build_rate_limit(plan)
             agent_service = RouterAgentService(db)
             await agent_service.queue_command(
                 router_id=router_obj.id,
@@ -579,9 +622,12 @@ async def _sync_hotspot_user_to_router(
             )
             # Router-side hard limits (defense-in-depth): queue a set_limits action
             # right after create_user so the router self-enforces time/data caps even
-            # if the cloud reconciler is down. Canonical units: time_limit=HOURS,
-            # data_limit=GB. Skipped when the plan is unlimited.
-            limit_uptime = f"{plan.time_limit}h" if (plan.time_limit and plan.time_limit > 0) else ""
+            # if the cloud reconciler is down. limit-uptime is the package's
+            # EFFECTIVE access window (per-login-uptime model) derived from the single
+            # source of truth ``plan.limit_uptime_str()`` — honours duration_minutes
+            # so sub-hour packages (e.g. 5 min -> "300s") DO get a cap. data_limit=GB.
+            # Skipped only when the plan is unlimited/duration-less.
+            limit_uptime = plan.limit_uptime_str()
             limit_bytes = ""
             if plan.data_limit and plan.data_limit > 0 and not plan.is_unlimited_data:
                 limit_bytes = str(plan.data_limit * 1024 * 1024 * 1024)  # GB -> bytes
@@ -613,8 +659,10 @@ async def _sync_hotspot_user_to_router(
             port=router_obj.port,
         )
 
-        # Canonical units: time_limit=HOURS, data_limit=GB.
-        limit_uptime = f"{plan.time_limit}h" if (plan.time_limit and plan.time_limit > 0) else None
+        # limit-uptime = the package's EFFECTIVE access window (per-login-uptime
+        # model) from the single source of truth; honours duration_minutes so
+        # sub-hour packages get a real cap. data_limit=GB.
+        limit_uptime = plan.limit_uptime_str() or None
         data_limit_bytes = None
         if plan.data_limit > 0 and not plan.is_unlimited_data:
             data_limit_bytes = plan.data_limit * 1024 * 1024 * 1024  # GB → bytes

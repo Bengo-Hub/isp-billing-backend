@@ -622,24 +622,24 @@ class SubscriptionRouterSyncService:
             return False
 
     def _calculate_rate_limit(self, plan: ServicePlan) -> str:
-        """Calculate RouterOS rate limit string from plan speeds."""
-        # RouterOS format: download/upload
-        # Speeds in plan are in Mbps, RouterOS accepts M suffix
+        """Calculate RouterOS rate limit string from plan speeds (with burst).
 
-        download = plan.download_speed if plan.download_speed else 0
-        upload = plan.upload_speed if plan.upload_speed else 0
+        Delegates to the shared builder so burst (rate/burst/threshold/time) is
+        emitted consistently with the customer-portal provisioning path.
+        """
+        from app.api.v1.portal.hotspot import _build_rate_limit
 
-        if download == 0 and upload == 0:
-            return ""  # Unlimited — empty rate-limit is valid RouterOS for "no shaping"
-
-        return f"{download}M/{upload}M"
+        return _build_rate_limit(plan)
 
     def _calculate_time_limit(self, plan: ServicePlan) -> Optional[str]:
-        """Calculate time limit from plan."""
-        if plan.time_limit and plan.time_limit > 0:
-            # Time limit is in hours
-            return f"{plan.time_limit}h"
-        return None
+        """Calculate limit-uptime from the plan's EFFECTIVE access window.
+
+        Uses the single source of truth ``plan.limit_uptime_str()`` (honours
+        duration_minutes so sub-hour packages get a real cap), in SECONDS.
+        Previously this used only ``time_limit`` HOURS, so a 5-min package — which
+        stores duration_minutes=5, time_limit=0 — produced no cap (the bug).
+        """
+        return plan.limit_uptime_str() or None
 
     def _calculate_data_limit(self, plan: ServicePlan) -> Optional[str]:
         """Calculate data limit from plan."""

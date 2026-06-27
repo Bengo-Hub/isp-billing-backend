@@ -619,8 +619,20 @@ def _generate_routeros_agent_script(
                 }} else={{
                   :if ([:len $urate] > 0) do={{ /ip/hotspot/user/profile/set [find name=$uprof] rate-limit=$urate }}
                 }}
-                :do {{ /ip/hotspot/user/remove [find name=$uname] }} on-error={{}}
-                /ip/hotspot/user/add name=$uname password=$upass profile=$uprof
+                # IDEMPOTENT provision - preserve accumulated uptime (per-login-uptime
+                # model). A returning customer re-logs in via this same create_user
+                # queue on every Wi-Fi toggle; a blind remove+add would RESET the
+                # cumulative uptime counter (revenue leak) or wrongly clear an
+                # exhausted user. So: only ADD when absent; when present, update
+                # password/profile IN PLACE (set never resets uptime) and only when
+                # they actually changed - leaving an unchanged user fully intact.
+                :if ([:len [/ip/hotspot/user/find name=$uname]] = 0) do={{
+                  /ip/hotspot/user/add name=$uname password=$upass profile=$uprof
+                }} else={{
+                  :local cu [/ip/hotspot/user/get [find name=$uname]]
+                  :if (($cu->"password") != $upass) do={{ /ip/hotspot/user/set [find name=$uname] password=$upass }}
+                  :if (($cu->"profile") != $uprof) do={{ /ip/hotspot/user/set [find name=$uname] profile=$uprof }}
+                }}
               }} else={{
                 # Ensure the PPP profile exists with the correct bandwidth limit
                 :if ([:len [/ppp/profile/find name=$uprof]] = 0) do={{
@@ -628,8 +640,15 @@ def _generate_routeros_agent_script(
                 }} else={{
                   :if ([:len $urate] > 0) do={{ /ppp/profile/set [find name=$uprof] rate-limit=$urate }}
                 }}
-                :do {{ /ppp/secret/remove [find name=$uname] }} on-error={{}}
-                /ppp/secret/add name=$uname password=$upass profile=$uprof service=pppoe
+                # IDEMPOTENT (see hotspot note): preserve uptime; add-if-absent,
+                # else update credentials/profile in place only when changed.
+                :if ([:len [/ppp/secret/find name=$uname]] = 0) do={{
+                  /ppp/secret/add name=$uname password=$upass profile=$uprof service=pppoe
+                }} else={{
+                  :local cu [/ppp/secret/get [find name=$uname]]
+                  :if (($cu->"password") != $upass) do={{ /ppp/secret/set [find name=$uname] password=$upass }}
+                  :if (($cu->"profile") != $uprof) do={{ /ppp/secret/set [find name=$uname] profile=$uprof }}
+                }}
               }}
             }} on-error={{ :set cs "failed"; :set cm "create error" }}
 {report}

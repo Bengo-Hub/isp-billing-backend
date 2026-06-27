@@ -175,8 +175,11 @@ async def customer_login(
 
                 plan = active_subscription.plan
 
-                # Use plan's time_limit (in seconds) if set, otherwise unlimited
-                time_limit_seconds = plan.time_limit if plan.time_limit > 0 else None
+                # limit-uptime = the plan's EFFECTIVE access window (per-login-uptime
+                # model) from the single source of truth ``plan.limit_uptime_str()``
+                # — honours duration_minutes so sub-hour packages get a real cap.
+                # (Previously this wrongly treated time_limit HOURS as seconds.)
+                limit_uptime = plan.limit_uptime_str() or None
 
                 # Calculate data limit in bytes (plan.data_limit is in MB)
                 data_limit_bytes = None
@@ -193,7 +196,7 @@ async def customer_login(
                     service="pppoe",
                     **{
                         "limit-bytes-total": data_limit_bytes if data_limit_bytes else None,
-                        "limit-uptime": f"{time_limit_seconds}s" if time_limit_seconds else None,
+                        "limit-uptime": limit_uptime,
                         "comment": f"PPPoE user - {plan.name} subscription",
                     }
                 )
@@ -814,7 +817,10 @@ async def _process_pppoe_subscription_renewal(
                 port=router_obj.port,
             )
 
-            time_limit_seconds = plan.time_limit if plan.time_limit > 0 else None
+            # limit-uptime = the plan's EFFECTIVE access window (per-login-uptime
+            # model) from the single source of truth (honours duration_minutes).
+            # (Previously this wrongly treated time_limit HOURS as seconds.)
+            limit_uptime = plan.limit_uptime_str() or None
             data_limit_bytes = None
             if plan.data_limit > 0 and not plan.is_unlimited_data:
                 data_limit_bytes = plan.data_limit * 1024 * 1024
@@ -827,7 +833,7 @@ async def _process_pppoe_subscription_renewal(
                 service="pppoe",
                 **{
                     "limit-bytes-total": data_limit_bytes if data_limit_bytes else None,
-                    "limit-uptime": f"{time_limit_seconds}s" if time_limit_seconds else None,
+                    "limit-uptime": limit_uptime,
                     "comment": f"PPPoE subscription - {plan.name} - Valid until {subscription.end_date.date()}",
                 }
             )

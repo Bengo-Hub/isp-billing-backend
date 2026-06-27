@@ -165,6 +165,33 @@ class ServicePlan(Base):
             hours = min(hours, self.time_limit) if hours > 0 else self.time_limit
         return hours
 
+    def limit_uptime_seconds(self) -> int:
+        """Router-side ``limit-uptime`` for this package, in SECONDS.
+
+        Derived from the single source of truth ``access_window_hours()`` so it
+        honours ``duration_minutes`` (precise, sub-hour) → ``validity_days``
+        capped by ``time_limit``. Per-login-uptime model: MikroTik counts this
+        only while the user is connected and ACCUMULATES across reconnects, then
+        disconnects + denies re-login once reached.
+
+        Returns 0 for an unlimited / duration-less plan so callers SKIP setting
+        a limit (0 = no cap). A finite sub-hour window (e.g. 5 min) rounds to a
+        positive second count (300), never to "" — which was the bug that let
+        sub-hour packages run forever.
+        """
+        hours = self.access_window_hours()
+        if not hours or hours <= 0:
+            return 0
+        return int(round(hours * 3600))
+
+    def limit_uptime_str(self) -> str:
+        """``limit-uptime`` as a MikroTik time string in seconds, e.g. ``"300s"``.
+
+        Empty string when the plan is unlimited/duration-less (caller skips).
+        """
+        secs = self.limit_uptime_seconds()
+        return f"{secs}s" if secs > 0 else ""
+
     def access_expiry_from(self, activated_at, fallback_churn_days: int | None = None):
         """Absolute access expiry for a package activated at ``activated_at``.
 
