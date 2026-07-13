@@ -6,6 +6,7 @@ from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 
@@ -26,12 +27,19 @@ database_url = settings.database_url
 if not database_url.startswith("postgresql+asyncpg://"):
     database_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
 
+# Connection pooling is delegated to PgBouncer (transaction mode) which fronts
+# PostgreSQL for every service. Using SQLAlchemy's own QueuePool on top of that
+# double-pools: SQLAlchemy holds connections open persistently, and read paths
+# that don't explicitly commit/rollback leave them "idle in transaction" at the
+# server (observed: 8 leaked BEGIN connections held up to ~19min). NullPool makes
+# each session acquire and fully release a real connection, so nothing lingers
+# idle-in-transaction — PgBouncer keeps the warm server-side pool. pool_size /
+# max_overflow / pool_pre_ping do not apply to NullPool and are intentionally
+# dropped (config values retained for reference only).
 engine = create_async_engine(
     database_url,
     echo=settings.debug,
-    pool_size=settings.database_pool_size,
-    max_overflow=settings.database_max_overflow,
-    pool_pre_ping=True,
+    poolclass=NullPool,
 )
 
 # Create async session factory
