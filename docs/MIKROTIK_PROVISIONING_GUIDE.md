@@ -30,7 +30,7 @@
 
 ## 1. The core constraint: routers are behind NAT
 
-In production the cloud backend (`ispbillingapi.codevertexitsolutions.com`) **cannot
+In production the cloud backend (`ispbillingapi.codevertexafrica.com`) **cannot
 open a connection to a router's API** (`192.168.x.x:8728`) because the router sits
 behind NAT on a customer LAN. Every integration is therefore **router-initiated
 (outbound)**: the router fetches scripts and polls the backend; the backend never

@@ -318,7 +318,7 @@ SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USER=your-email@gmail.com
 SMTP_PASSWORD=your-app-specific-password
-SMTP_FROM=noreply@codevertexitsolutions.com
+SMTP_FROM=noreply@codevertexafrica.com
 
 # M-Pesa Configuration (Optional - for payments)
 MPESA_ENVIRONMENT=sandbox
@@ -663,7 +663,7 @@ Expected response:
   "user": {
     "id": 1,
     "username": "demo",
-    "email": "demo@codevertexitsolutions.com",
+    "email": "demo@codevertexafrica.com",
     "role": "admin"
   }
 }
@@ -971,7 +971,7 @@ After successful setup:
 
 For issues, questions, or contributions:
 
-- **Email**: support@codevertexitsolutions.com
+- **Email**: support@codevertexafrica.com
 - **Documentation**: See `/docs` folder
 - **GitHub Issues**: Create an issue in the repository
 

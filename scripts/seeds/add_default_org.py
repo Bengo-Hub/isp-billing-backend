@@ -38,7 +38,7 @@ async def add_default_organizations():
                 slug="codevertex",
                 organization_type=OrganizationType.HOTSPOT,
                 status=OrganizationStatus.ACTIVE,
-                email="info@codevertexitsolutions.com",
+                email="info@codevertexafrica.com",
                 phone="+254743793901",
                 address="Onginga Street, Pioneer, Kisumu",
                 city="Kisumu",

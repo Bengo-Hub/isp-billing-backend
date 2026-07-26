@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # ── SSO (Phase 1b: central auth-api / Codevertex SSO) ──
     # ADDITIVE: accepted alongside the existing local HS256 JWT. The local
     # login path is unchanged; these only configure RS256 SSO acceptance.
-    sso_issuer: str = "https://sso.codevertexitsolutions.com"
+    sso_issuer: str = "https://sso.codevertexafrica.com"
     # When empty, the JWKS URL is derived as <issuer>/.well-known/jwks.json.
     sso_jwks_url: Optional[str] = None
     # Audience this service expects in SSO tokens (the isp-billing client id).
@@ -84,8 +84,8 @@ class Settings(BaseSettings):
     treasury_api_url: Optional[str] = None
     # Browser-reachable shared pay page base (treasury-ui). The customer is
     # redirected here to choose a gateway and pay. e.g.
-    # https://books.codevertexitsolutions.com
-    treasury_pay_page_url: str = "https://books.codevertexitsolutions.com"
+    # https://books.codevertexafrica.com
+    treasury_pay_page_url: str = "https://books.codevertexafrica.com"
     # Request timeout (seconds) for S2S treasury calls.
     treasury_request_timeout: float = 20.0
     # PUBLIC, browser-reachable host the captive (unauthenticated) device polls for
@@ -94,8 +94,8 @@ class Settings(BaseSettings):
     # cannot poll payment status and the purchase only "confirms" at the client-side
     # countdown. Hostname only (no scheme/path) — it is added both by-host and
     # IP-pinned (SNI HTTPS won't pass unauth by host alone). e.g.
-    # booksapi.codevertexitsolutions.com
-    treasury_status_host: str = "booksapi.codevertexitsolutions.com"
+    # booksapi.codevertexafrica.com
+    treasury_status_host: str = "booksapi.codevertexafrica.com"
     # Treasury "platform operating tenant" identifier — the tenant under which
     # the PLATFORM-owned payment rail ("Codevertex Africa Limited") is enabled in
     # treasury. Captive customers pay this platform rail, so when an ISP tenant has
@@ -162,7 +162,7 @@ class Settings(BaseSettings):
     encryption_salt: Optional[str] = None
 
     # Platform Admin (picked from env / git secrets)
-    global_admin_email: str = "admin@codevertexitsolutions.com"
+    global_admin_email: str = "admin@codevertexafrica.com"
     global_admin_password: str = "REDACTED_PG_ADMIN_PASSWORD"  # MUST be changed via env variable in production
     
     @model_validator(mode="after")
@@ -284,7 +284,7 @@ class Settings(BaseSettings):
 
     # VPN overlay (remote Winbox / management). Per-org overrides live in
     # OrganizationSettings.vpn_domain; this is the platform-wide default.
-    vpn_domain: str = "vpn.codevertexitsolutions.com"
+    vpn_domain: str = "vpn.codevertexafrica.com"
 
     # ── WireGuard VPN overlay (router management tunnel) ──
     # The WG server runs in k8s ns `vpn`; routers dial it outbound (NAT-safe).
@@ -295,7 +295,7 @@ class Settings(BaseSettings):
     # bootstrap script then skips the WireGuard block and routers stay on the
     # polling-agent fallback).
     wg_server_public_key: str = ""  # base64 server pubkey (from wg-server-keys Secret)
-    wg_endpoint: str = "vpn.codevertexitsolutions.com:51820"  # host:port routers dial
+    wg_endpoint: str = "vpn.codevertexafrica.com:51820"  # host:port routers dial
     wg_subnet: str = "10.8.0.0/16"  # tunnel subnet; server is .1, routers .2+
     # Shared bearer token authenticating the WG server's reconcile loop when it
     # pulls the authoritative peer list (GET /api/v1/vpn/peers). Stored in the

@@ -67,7 +67,7 @@ class User(Base):
 **Default Values** (for demo):
 ```typescript
 {
-  email: 'demo@codevertexitsolutions.com',
+  email: 'demo@codevertexafrica.com',
   password: 'demo123',
   remember: false
 }
@@ -113,7 +113,7 @@ username=demo&password=demo123
 ```
 OR
 ```
-username=demo@codevertexitsolutions.com&password=demo123
+username=demo@codevertexafrica.com&password=demo123
 ```
 
 **Note**: The backend uses OAuth2PasswordRequestForm which requires form-encoded data, NOT JSON!
@@ -126,7 +126,7 @@ username=demo@codevertexitsolutions.com&password=demo123
   "user": {
     "id": 1,
     "username": "demo",
-    "email": "demo@codevertexitsolutions.com",
+    "email": "demo@codevertexafrica.com",
     "first_name": "Demo",
     "last_name": "User",
     "company_name": "Demo ISP Company",
@@ -298,7 +298,7 @@ register: async (data: RegisterRequest) => {
 {
   "username": "demo",
   "password": "demo123",
-  "email": "demo@codevertexitsolutions.com",
+  "email": "demo@codevertexafrica.com",
   "first_name": "Demo",
   "last_name": "Admin",
   "company_name": "Demo ISP Company",
@@ -316,7 +316,7 @@ register: async (data: RegisterRequest) => {
 {
   "username": "superuser",
   "password": "superuser123",
-  "email": "superuser@codevertexitsolutions.com",
+  "email": "superuser@codevertexafrica.com",
   "first_name": "Super",
   "last_name": "User",
   "role": "superuser"
@@ -359,7 +359,7 @@ The login form is pre-filled with demo credentials for easy testing:
 
 ```typescript
 const [formData, setFormData] = useState({
-  email: 'demo@codevertexitsolutions.com',  // Default demo email
+  email: 'demo@codevertexafrica.com',  // Default demo email
   password: 'demo123',  // Default demo password
   remember: false,
 });
@@ -381,7 +381,7 @@ const [formData, setFormData] = useState({
 │                                                              │
 │  Login Form                                                 │
 │  ┌──────────────────────────────────────────────────────┐  │
-│  │ Email:    demo@codevertexitsolutions.com             │  │
+│  │ Email:    demo@codevertexafrica.com             │  │
 │  │ Password: ••••••••                                    │  │
 │  │ [x] Remember me                                       │  │
 │  │                                                        │  │
@@ -513,7 +513,7 @@ curl -X POST "http://localhost:8000/api/v1/auth/login" \
 # Using email
 curl -X POST "http://localhost:8000/api/v1/auth/login" \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=demo@codevertexitsolutions.com&password=demo123"
+  -d "username=demo@codevertexafrica.com&password=demo123"
 ```
 
 **Test Registration**:
@@ -537,7 +537,7 @@ curl -X POST "http://localhost:8000/api/v1/auth/register" \
 describe('Auth Store', () => {
   it('should login with valid credentials', async () => {
     const { login } = useAuthStore.getState()
-    await login('demo@codevertexitsolutions.com', 'demo123')
+    await login('demo@codevertexafrica.com', 'demo123')
     
     expect(useAuthStore.getState().isAuthenticated).toBe(true)
     expect(useAuthStore.getState().user).not.toBeNull()

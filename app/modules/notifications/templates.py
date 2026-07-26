@@ -407,7 +407,7 @@ class NotificationTemplateService:
                 'support_email': system_data.get('support_email', 'support@example.com'),
                 'support_phone': system_data.get('support_phone', ''),
                 'website_url': system_data.get('website_url', ''),
-                'portal_url': system_data.get('portal_url', 'https://ispbilling.codevertexitsolutions.com'),
+                'portal_url': system_data.get('portal_url', 'https://ispbilling.codevertexafrica.com'),
                 'org_slug': system_data.get('org_slug', ''),
                 'account_number': system_data.get('account_number', ''),
                 'paybill': system_data.get('paybill', ''),

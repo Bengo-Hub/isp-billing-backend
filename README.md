@@ -273,7 +273,7 @@ See [IMPLEMENTATION_GUIDE.md](./docs/IMPLEMENTATION_GUIDE.md) for complete schem
 ## 📧 Support
 
 For issues, questions, or contributions:
-- **Email**: support@codevertexitsolutions.com
+- **Email**: support@codevertexafrica.com
 - **Documentation**: See `/docs` folder
 - **GitHub Issues**: Create an issue in the repository
 

@@ -213,7 +213,7 @@ def create_admin_accounts(db: Session, roles: dict):
         if not superuser:
             superuser = User(
                 username="superuser",
-                email="superuser@codevertexitsolutions.com",
+                email="superuser@codevertexafrica.com",
                 first_name="Super",
                 last_name="User",
                 company_name="Codevertex Africa Limited",
@@ -245,7 +245,7 @@ def create_admin_accounts(db: Session, roles: dict):
         if not demo_admin:
             demo_admin = User(
                 username="demo",
-                email="demo@codevertexitsolutions.com",
+                email="demo@codevertexafrica.com",
                 first_name="Demo",
                 last_name="Admin",
                 company_name="Demo ISP Company",
@@ -334,7 +334,7 @@ def create_demo_licence(db: Session):
             demo_licence = rbac_service.create_system_licence(
                 licence_key="DEMO-TRIAL-2024",
                 organization_name="Demo ISP Company",
-                contact_email="demo@codevertexitsolutions.com",
+                contact_email="demo@codevertexafrica.com",
                 contact_phone="+254 700 000 000",
                 licence_type="trial",
                 trial_days=14,

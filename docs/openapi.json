@@ -88,7 +88,7 @@
                   "summary": "Demo Admin (using email)",
                   "description": "Login using email instead of username",
                   "value": {
-                    "username": "demo@codevertexitsolutions.com",
+                    "username": "demo@codevertexafrica.com",
                     "password": "demo123"
                   }
                 },
@@ -22627,7 +22627,7 @@
             }
           }
         },
-        "description": "**OAuth2 Password Flow - Demo Credentials:**\n\n**Demo Admin Account:**\n- Username: `demo`\n- Password: `demo123`\n- Email: `demo@codevertexitsolutions.com`\n- Role: Admin (ISP Provider)\n\n**Superuser Account:**\n- Username: `superuser`\n- Password: `superuser123`\n- Email: `superuser@codevertexitsolutions.com`\n- Role: Superuser (Full System Access)\n\n**Note**: You can use either username OR email in the username field."
+        "description": "**OAuth2 Password Flow - Demo Credentials:**\n\n**Demo Admin Account:**\n- Username: `demo`\n- Password: `demo123`\n- Email: `demo@codevertexafrica.com`\n- Role: Admin (ISP Provider)\n\n**Superuser Account:**\n- Username: `superuser`\n- Password: `superuser123`\n- Email: `superuser@codevertexafrica.com`\n- Role: Superuser (Full System Access)\n\n**Note**: You can use either username OR email in the username field."
       },
       "BearerAuth": {
         "type": "http",

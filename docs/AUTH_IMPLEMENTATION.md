@@ -11,7 +11,7 @@ This document details the backend authentication implementation, including suppo
 
 The backend authentication should support login with either:
 1. **Username**: `demo`
-2. **Email**: `demo@codevertexitsolutions.com`
+2. **Email**: `demo@codevertexafrica.com`
 
 Both should work for the same account.
 
@@ -244,7 +244,7 @@ class OAuth2PasswordRequestForm:
 **Swagger UI Example**:
 ```json
 {
-  "username": "demo",  // or "demo@codevertexitsolutions.com"
+  "username": "demo",  // or "demo@codevertexafrica.com"
   "password": "demo123"
 }
 ```
@@ -295,13 +295,13 @@ class UserResponse(BaseModel):
 
 ```sql
 SELECT * FROM users 
-WHERE username = 'demo' OR email = 'demo@codevertexitsolutions.com'
+WHERE username = 'demo' OR email = 'demo@codevertexafrica.com'
 LIMIT 1;
 ```
 
 This allows both:
 - `username='demo'` AND `password='demo123'`
-- `username='demo@codevertexitsolutions.com'` AND `password='demo123'`
+- `username='demo@codevertexafrica.com'` AND `password='demo123'`
 
 To authenticate the same account.
 
@@ -364,7 +364,7 @@ curl -X POST "http://localhost:8000/api/v1/auth/login" \
 ```bash
 curl -X POST "http://localhost:8000/api/v1/auth/login" \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=demo@codevertexitsolutions.com&password=demo123"
+  -d "username=demo@codevertexafrica.com&password=demo123"
 ```
 
 Both should return the same response:
@@ -375,7 +375,7 @@ Both should return the same response:
   "user": {
     "id": 1,
     "username": "demo",
-    "email": "demo@codevertexitsolutions.com",
+    "email": "demo@codevertexafrica.com",
     ...
   }
 }

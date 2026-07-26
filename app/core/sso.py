@@ -4,7 +4,7 @@ Phase 1b: ADDITIVE SSO acceptance alongside the existing local JWT login.
 
 This module is self-contained and does NOT touch the local-JWT path:
 - ``SSOValidator`` validates an RS256 JWT minted by the central SSO issuer
-  (https://sso.codevertexitsolutions.com) using JWKS (keys cached via
+  (https://sso.codevertexafrica.com) using JWKS (keys cached via
   PyJWKClient), checking signature, exp, iss and aud.
 - ``get_sso_claims`` is a FastAPI dependency returning the parsed claims (or
   raising 401). It is OPTIONAL-friendly via ``get_optional_sso_claims``.

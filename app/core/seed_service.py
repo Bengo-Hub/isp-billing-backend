@@ -388,7 +388,7 @@ async def _seed_platform_settings(db: AsyncSession, admin: User) -> None:
         country="Kenya",
         phone="254792548766",
         mobile="254742201368",
-        email="info@codevertexitsolutions.com",
+        email="info@codevertexafrica.com",
         logo_url="/images/logo/logo.png",
         primary_color="#ec4899",
         secondary_color="#8b5cf6",

@@ -749,7 +749,7 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
     #   * the treasury/books PUBLIC status host — the device polls it for payment
     #     confirmation; without it the purchase only "confirms" at the client-side
     #     countdown (issue 4). Host is configurable (config override → settings
-    #     default `booksapi.codevertexitsolutions.com`).
+    #     default `booksapi.codevertexafrica.com`).
     #   * the treasury-UI host — serves the embedded checkout iframe.
     #   * `api.qrserver.com` — renders the M-Pesa/merchant QR + logo on the pay
     #     page; without it the QR/logo never loads (issue 3).
@@ -759,8 +759,8 @@ def generate_hotspot_commands(config: Dict[str, Any], routeros_version: Optional
     # All are NON-wildcard HTTPS hosts, so (like the billing/api host) they must
     # ALSO be IP-pinned in cloud_hosts below — MikroTik's by-host (SNI) walled-
     # garden does not reliably pass unauthenticated HTTPS.
-    _default_treasury_host = "booksapi.codevertexitsolutions.com"
-    _default_treasury_ui_host = "books.codevertexitsolutions.com"
+    _default_treasury_host = "booksapi.codevertexafrica.com"
+    _default_treasury_ui_host = "books.codevertexafrica.com"
     try:
         from app.core.config import settings as _settings
         _default_treasury_host = _settings.treasury_status_host or _default_treasury_host

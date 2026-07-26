@@ -36,7 +36,7 @@ class LoginRequest(BaseModel):
     username: str = Field(
         default="demo",
         description="Username or email address",
-        examples=["demo", "demo@codevertexitsolutions.com", "superuser"]
+        examples=["demo", "demo@codevertexafrica.com", "superuser"]
     )
     password: str = Field(
         default="demo123",
@@ -127,7 +127,7 @@ class LoginResponse(BaseModel):
                 "user": {
                     "id": 1,
                     "username": "demo",
-                    "email": "demo@codevertexitsolutions.com",
+                    "email": "demo@codevertexafrica.com",
                     "first_name": "Demo",
                     "last_name": "Admin",
                     "company_name": "Demo ISP Company",

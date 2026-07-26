@@ -361,7 +361,7 @@ class MasterSeeder:
             slug="codevertex",
             organization_type=OrganizationType.HOTSPOT,
             status=OrganizationStatus.ACTIVE,
-            email="info@codevertexitsolutions.com",
+            email="info@codevertexafrica.com",
             phone="+254792548766",
             address="OGINGA STREET, BANK ST., PIONEER HSE",
             city="KISUMU",

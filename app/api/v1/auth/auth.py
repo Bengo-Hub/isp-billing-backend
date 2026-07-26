@@ -376,4 +376,4 @@ async def get_sso_current_user_info(
 
 # Legacy local-auth endpoints (email/phone verification, password reset/change,
 # and session management) were removed — these are owned by the central SSO
-# (auth-api) and the user-profile UI in accounts.codevertexitsolutions.com.
+# (auth-api) and the user-profile UI in accounts.codevertexafrica.com.
