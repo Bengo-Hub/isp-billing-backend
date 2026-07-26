@@ -222,7 +222,7 @@ if kubectl -n "$NAMESPACE" get secret "$ENV_SECRET_NAME" >/dev/null 2>&1; then
   info "Updating secret with admin credentials from git secrets..."
   
   # Use defaults if not provided (should not happen in production)
-  ADMIN_EMAIL="${GLOBAL_ADMIN_EMAIL:-superuser@codevertexitsolutions.com}"
+  ADMIN_EMAIL="${GLOBAL_ADMIN_EMAIL:-superuser@codevertexafrica.com}"
   ADMIN_PASSWORD="${GLOBAL_ADMIN_PASSWORD:-superuser123}"
   
   if [[ "$ADMIN_PASSWORD" == "superuser123" ]]; then
