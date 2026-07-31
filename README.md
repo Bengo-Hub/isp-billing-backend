@@ -1,4 +1,4 @@
-﻿# Codevertex ISP Billing System - Backend
+# Codevertex ISP Billing System - Backend
 
 A comprehensive, production-ready ISP billing and management system built with FastAPI, supporting MikroTik router integration, M-PESA payments, RBAC, and multi-tenant architecture.
 

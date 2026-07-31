@@ -1,4 +1,4 @@
-﻿# Authentication Implementation - Backend
+# Authentication Implementation - Backend
 
 ## Overview
 This document details the backend authentication implementation, including support for both email and username login.

@@ -1,4 +1,4 @@
-﻿"""Quick script to add the default organization for portal access."""
+"""Quick script to add the default organization for portal access."""
 
 import asyncio
 import sys

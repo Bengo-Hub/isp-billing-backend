@@ -1,4 +1,4 @@
-﻿# Authentication API Mapping - Frontend to Backend
+# Authentication API Mapping - Frontend to Backend
 
 ## Overview
 This document explains how the frontend authentication forms map to the backend API endpoints and database models.

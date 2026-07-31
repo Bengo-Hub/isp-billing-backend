@@ -1,4 +1,4 @@
-﻿# ISP Billing Software - Complete Setup Guide
+# ISP Billing Software - Complete Setup Guide
 
 ## Table of Contents
 1. [Quick Start (One-Command Setup)](#quick-start-one-command-setup)
