@@ -59,7 +59,7 @@ class SubscriptionsClient:
         api_key: Optional[str] = None,
         timeout: Optional[float] = None,
     ):
-        self.base_url = (base_url or settings.subscriptions_api_url or "").rstrip("/")
+        self.base_url = (base_url or settings.subscription_base_url or "").rstrip("/")
         self.api_key = api_key or settings.internal_service_key
         self.timeout = timeout or getattr(settings, "subscriptions_request_timeout", 10.0)
 
@@ -118,7 +118,7 @@ class SubscriptionsClient:
         if not self.is_configured:
             raise SubscriptionsError(
                 "subscriptions client not configured "
-                "(subscriptions_api_url / internal_service_key)"
+                "(subscription_base_url / internal_service_key)"
             )
 
         url = f"{self.base_url}/api/v1/admin/tenants/{tenant_id}/subscription"
