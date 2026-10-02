@@ -4,6 +4,7 @@ ISP Provider Onboarding API.
 Multi-step signup flow for new ISP providers.
 """
 
+import json
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.core.config import settings
+from app.core.redis import redis_client
 from app.core.rate_limit import limit_credential_attempt
 from app.core.security import get_password_hash, create_access_token
 from app.models.organization import Organization, OrganizationType, OrganizationStatus
@@ -109,12 +111,80 @@ class OnboardingStatusResponse(BaseModel):
 
 
 # =========================================================================
-# In-memory storage for onboarding sessions
-# In production, use Redis or database
+# Onboarding sessions live in Redis, so every backend replica sees the same
+# signup in progress and a restart does not lose it. Before, they were a
+# module-level dict: a code sent by one replica was unknown to the next.
+# Structure: {verification_code, expires_at, step, verified, business_details,
+# security_details}, one key per email, expiring an hour after the last step.
 # =========================================================================
 
-# Structure: {email: {verification_code, expires_at, step, business_details, security_details}}
-onboarding_sessions: dict = {}
+ONBOARDING_SESSION_TTL_SECONDS = 3600
+
+
+def _session_key(email: str) -> str:
+    return "isp:onboarding:" + email.strip().lower()
+
+
+async def _redis():
+    try:
+        if not redis_client.redis:
+            await redis_client.connect()
+        return redis_client.redis
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Registration is temporarily unavailable. Please try again shortly.",
+        ) from exc
+
+
+async def load_session(email: str) -> Optional[dict]:
+    """Return the onboarding session for email, or None."""
+    try:
+        raw = await (await _redis()).get(_session_key(email))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Registration is temporarily unavailable. Please try again shortly.",
+        ) from exc
+    if not raw:
+        return None
+    session = json.loads(raw)
+    session["expires_at"] = datetime.fromisoformat(session["expires_at"])
+    business = session.get("business_details")
+    if business and business.get("business_type"):
+        business["business_type"] = OrganizationType(business["business_type"])
+    return session
+
+
+async def save_session(email: str, session: dict) -> None:
+    """Store the onboarding session for email (refreshing its expiry)."""
+    data = dict(session)
+    data["expires_at"] = session["expires_at"].isoformat()
+    business = session.get("business_details")
+    if business and business.get("business_type") is not None:
+        data["business_details"] = dict(business)
+        bt = business["business_type"]
+        data["business_details"]["business_type"] = bt.value if hasattr(bt, "value") else bt
+    try:
+        await (await _redis()).set(
+            _session_key(email), json.dumps(data), ex=ONBOARDING_SESSION_TTL_SECONDS
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Registration is temporarily unavailable. Please try again shortly.",
+        ) from exc
+
+
+async def delete_session(email: str) -> None:
+    try:
+        await (await _redis()).delete(_session_key(email))
+    except Exception:
+        pass  # expires on its own
 
 
 def generate_verification_code() -> str:
@@ -199,14 +269,14 @@ async def send_verification_code(
     expires_at = datetime.utcnow() + timedelta(minutes=15)
 
     # Store in session
-    onboarding_sessions[data.email] = {
+    await save_session(data.email, {
         "verification_code": code,
         "expires_at": expires_at,
         "step": "verification_sent",
         "verified": False,
         "business_details": None,
         "security_details": None,
-    }
+    })
 
     # TODO: Send email with verification code
     # For now, we'll log it (in production, use email service)
@@ -240,7 +310,7 @@ async def verify_code(
     """
     # Caps guesses at the 6-digit code per email, whatever the source address.
     await limit_credential_attempt(request, "onboarding-verify", data.email)
-    session = onboarding_sessions.get(data.email)
+    session = await load_session(data.email)
 
     if not session:
         raise HTTPException(
@@ -249,7 +319,7 @@ async def verify_code(
         )
 
     if datetime.utcnow() > session["expires_at"]:
-        del onboarding_sessions[data.email]
+        await delete_session(data.email)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Verification code has expired. Please request a new code."
@@ -264,6 +334,7 @@ async def verify_code(
     # Mark as verified
     session["verified"] = True
     session["step"] = "email_verified"
+    await save_session(data.email, session)
 
     return {"success": True, "message": "Email verified successfully."}
 
@@ -277,7 +348,7 @@ async def submit_business_details(
 
     Step 4 of onboarding.
     """
-    session = onboarding_sessions.get(data.email)
+    session = await load_session(data.email)
 
     if not session:
         raise HTTPException(
@@ -300,6 +371,7 @@ async def submit_business_details(
         "city": data.city,
     }
     session["step"] = "business_details"
+    await save_session(data.email, session)
 
     return {"success": True, "message": "Business details saved."}
 
@@ -314,7 +386,7 @@ async def complete_registration(
 
     Final step of onboarding - creates organization and admin user.
     """
-    session = onboarding_sessions.get(data.email)
+    session = await load_session(data.email)
 
     if not session:
         raise HTTPException(
@@ -436,7 +508,7 @@ async def complete_registration(
     await db.refresh(admin_user)
 
     # Clean up session
-    del onboarding_sessions[data.email]
+    await delete_session(data.email)
 
     # Generate access token
     token = create_access_token(
@@ -463,7 +535,7 @@ async def get_onboarding_status(
     """
     Get the current onboarding status for an email.
     """
-    session = onboarding_sessions.get(email)
+    session = await load_session(email)
 
     if not session:
         raise HTTPException(
@@ -491,7 +563,7 @@ async def resend_verification_code(
     Resend verification code.
     """
     await limit_credential_attempt(request, "onboarding-send", data.email)
-    session = onboarding_sessions.get(data.email)
+    session = await load_session(data.email)
 
     if not session:
         raise HTTPException(
@@ -505,6 +577,7 @@ async def resend_verification_code(
 
     session["verification_code"] = code
     session["expires_at"] = expires_at
+    await save_session(data.email, session)
 
     # TODO: Send email with verification code
     import logging
