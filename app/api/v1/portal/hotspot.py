@@ -22,6 +22,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db
 from app.api.deps_tenant import get_organization_by_slug
+from app.core.rate_limit import limit_credential_attempt
 from app.models.organization import Organization, OrganizationSettings
 from app.models.plan import ServicePlan, PlanType, PlanStatus
 from app.models.customer_portal import VoucherCode, CustomerSession, CustomerPurchase, VoucherStatus, SessionStatus
@@ -338,6 +339,7 @@ async def hotspot_login(
 
     Public endpoint - no authentication required.
     """
+    await limit_credential_attempt(request, f"hotspot-login:{org_slug}", data.username)
     client_ip = request.client.host if request.client else None
     mac_address = data.mac_address
 
@@ -945,6 +947,8 @@ async def redeem_voucher(
 
     Public endpoint - activates session for the voucher.
     """
+    # Per IP only: a guesser tries a different code each time, so a per-code limit would not help.
+    await limit_credential_attempt(request, f"voucher-redeem:{org_slug}")
     # Find voucher
     result = await db.execute(
         select(VoucherCode)

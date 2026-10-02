@@ -20,6 +20,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db
 from app.api.deps_tenant import get_organization_by_slug
+from app.core.rate_limit import limit_credential_attempt
 from app.core.security import create_access_token, verify_password
 from app.models.organization import Organization
 from app.models.user import User, UserRole, UserStatus
@@ -87,6 +88,7 @@ class PlanResponse(BaseModel):
 @router.post("/{org_slug}/login", response_model=CustomerLoginResponse)
 async def customer_login(
     org_slug: str,
+    request: Request,
     data: CustomerLoginRequest,
     db: AsyncSession = Depends(get_db),
     organization: Organization = Depends(get_organization_by_slug),
@@ -96,6 +98,7 @@ async def customer_login(
 
     Returns access token for authenticated requests.
     """
+    await limit_credential_attempt(request, f"pppoe-login:{org_slug}", data.username)
     # Find user by username within organization
     result = await db.execute(
         select(User).where(

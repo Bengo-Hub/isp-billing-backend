@@ -12,6 +12,7 @@ from app.api.deps import (
     get_current_user_unified,
 )
 from app.core.database import get_db
+from app.core.rate_limit import limit_credential_attempt
 from app.core.security import create_token_pair, verify_token
 from app.models.user import User
 from app.schemas.user import (
@@ -55,12 +56,14 @@ router = APIRouter()
                 400: {"description": "Inactive user"}
             })
 async def login(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Login user and return JWT tokens wrapped in a `data` envelope including user info.
     """
+    await limit_credential_attempt(request, "admin-login", form_data.username)
     auth_service = AuthService(db)
     user = await auth_service.authenticate_user(form_data.username, form_data.password)
     

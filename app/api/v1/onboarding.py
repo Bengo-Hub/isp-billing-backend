@@ -8,13 +8,14 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, status, BackgroundTasks
 from pydantic import BaseModel, Field, EmailStr, field_validator
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.core.config import settings
+from app.core.rate_limit import limit_credential_attempt
 from app.core.security import get_password_hash, create_access_token
 from app.models.organization import Organization, OrganizationType, OrganizationStatus
 from app.models.user import User, UserRole, UserStatus
@@ -172,6 +173,7 @@ async def check_email_availability(
 
 @router.post("/send-verification", response_model=VerificationCodeResponse)
 async def send_verification_code(
+    request: Request,
     data: VerificationCodeRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
@@ -181,6 +183,7 @@ async def send_verification_code(
 
     Step 2 of onboarding.
     """
+    await limit_credential_attempt(request, "onboarding-send", data.email)
     # Check email availability first
     result = await db.execute(
         select(func.count(User.id)).where(User.email == data.email)
@@ -227,6 +230,7 @@ async def send_verification_code(
 
 @router.post("/verify-code")
 async def verify_code(
+    request: Request,
     data: VerifyEmailRequest,
 ):
     """
@@ -234,6 +238,8 @@ async def verify_code(
 
     Step 3 of onboarding.
     """
+    # Caps guesses at the 6-digit code per email, whatever the source address.
+    await limit_credential_attempt(request, "onboarding-verify", data.email)
     session = onboarding_sessions.get(data.email)
 
     if not session:
@@ -477,12 +483,14 @@ async def get_onboarding_status(
 
 @router.post("/resend-code", response_model=VerificationCodeResponse)
 async def resend_verification_code(
+    request: Request,
     data: VerificationCodeRequest,
     background_tasks: BackgroundTasks,
 ):
     """
     Resend verification code.
     """
+    await limit_credential_attempt(request, "onboarding-send", data.email)
     session = onboarding_sessions.get(data.email)
 
     if not session:
