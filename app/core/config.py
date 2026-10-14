@@ -49,7 +49,8 @@ class Settings(BaseSettings):
 
     # Platform Admin (picked from env / git secrets)
     global_admin_email: str = "admin@codevertexitsolutions.com"
-    global_admin_password: str = "REDACTED_PG_ADMIN_PASSWORD"  # MUST be changed via env variable in production
+    # No default: set GLOBAL_ADMIN_PASSWORD in the environment. The platform admin is not created without it.
+    global_admin_password: Optional[str] = None
     
     @model_validator(mode="after")
     def set_encryption_fallback(self) -> "Settings":
@@ -175,7 +176,8 @@ class Settings(BaseSettings):
     mikrotik_default_subnet: str = "192.168.88.0/24"  # Default subnet for provisioning
     # API user credentials (created during bootstrap for secure API access)
     mikrotik_api_username: str = "codevertex_api"
-    mikrotik_api_password: str = "REDACTED_PG_ADMIN_PASSWORD"  # MUST be changed via env variable
+    # No default: set MIKROTIK_API_PASSWORD in the environment (the bootstrap script sets the same on the router).
+    mikrotik_api_password: str = ""
 
     # Router Agent (polling agent installed on MikroTik routers)
     agent_default_poll_interval: int = 30  # seconds between agent polls

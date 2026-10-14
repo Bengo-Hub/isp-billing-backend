@@ -1,6 +1,7 @@
 """Seed demo users for testing MikroTik provisioning (DEV ONLY)."""
 
 import asyncio
+import os
 import sys
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -106,9 +107,9 @@ async def create_demo_users(db: AsyncSession) -> tuple:
             router_type="mikrotik",
             ip_address="192.168.100.7",  # Actual provisioned router IP
             port=8728,
-            # Use the demo API user credentials requested: codevertex_api_user / REDACTED_PG_ADMIN_PASSWORD
+            # Demo API user on the test router; its password comes from the environment.
             username="codevertex_api_user",
-            password="REDACTED_PG_ADMIN_PASSWORD",
+            password=os.environ.get("DEMO_ROUTER_API_PASSWORD", ""),
             winbox_port=8291,
             status=RouterStatus.ONLINE,
             is_active=True,
