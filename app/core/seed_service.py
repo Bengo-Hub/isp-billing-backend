@@ -329,7 +329,6 @@ async def _seed_platform_admin(db: AsyncSession, roles: dict) -> User:
     """Ensure platform admin exists (credentials from env vars)."""
     admin_email = settings.global_admin_email
     admin_password = settings.global_admin_password
-
     # Check by username first (backward compat), then by email
     result = await db.execute(
         select(User)
@@ -345,6 +344,10 @@ async def _seed_platform_admin(db: AsyncSession, roles: dict) -> User:
             .options(selectinload(User.role_obj))
         )
         admin = result.scalar_one_or_none()
+
+    if not admin and not admin_password:
+        # Never create the platform admin with a made-up password.
+        raise RuntimeError("GLOBAL_ADMIN_PASSWORD must be set to create the platform admin")
 
     if not admin:
         logger.info(f"Creating platform admin: {admin_email}")
