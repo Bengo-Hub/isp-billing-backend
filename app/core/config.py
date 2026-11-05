@@ -140,7 +140,9 @@ class Settings(BaseSettings):
     # standalone durable consumer (app.events.consumer).
     #
     # When nats_url is EMPTY (default), the whole event subsystem is INERT:
-    #   - the outbox poller no-ops (rows accumulate harmlessly / are pruned),
+    #   - the outbox poller no-ops (rows accumulate harmlessly). Published rows
+    #     and poison rows (attempts >= 10) older than 7 days are pruned nightly
+    #     by devops-k8s platform-db-maintenance, which detects this schema,
     #   - the consumer is simply not deployed,
     #   - the existing Phase-2 treasury payment/status POLLING remains the live
     #     confirmation path (it is never removed — it is the fallback).

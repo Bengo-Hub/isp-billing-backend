@@ -29,7 +29,15 @@ celery_app.conf.update(
     task_time_limit=30 * 60,  # 30 minutes
     task_soft_time_limit=25 * 60,  # 25 minutes
     worker_prefetch_multiplier=1,
+    # Recycling policy for pool children. This file is the single source of
+    # truth: the shared Helm chart no longer passes its own
+    # --max-tasks-per-child (it used to force 100, which with the 5s outbox
+    # poller re-forked a child every ~7 minutes). 1000 tasks is a few hours per
+    # child at today's beat volume; the memory cap recycles a child early if a
+    # task leaks (a child idles at ~80MB, the pod limit is sized for two
+    # children at the cap plus the parent).
     worker_max_tasks_per_child=1000,
+    worker_max_memory_per_child=250_000,  # KiB, about 244MiB per child
     result_expires=3600,  # 1 hour
     beat_schedule={
         "billing-cycle": {
